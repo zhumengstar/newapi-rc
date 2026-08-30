@@ -159,19 +159,32 @@ func GetChannelExcluding(
 	}
 	channel := Channel{}
 	if len(abilities) > 0 {
-		// Randomly choose one
-		weightSum := uint(0)
-		for _, ability_ := range abilities {
-			weightSum += ability_.Weight + 10
-		}
-		// Randomly choose one
-		weight := common.GetRandomInt(int(weightSum))
-		for _, ability_ := range abilities {
-			weight -= int(ability_.Weight) + 10
-			//log.Printf("weight: %d, ability weight: %d", weight, *ability_.Weight)
-			if weight <= 0 {
-				channel.Id = ability_.ChannelId
-				break
+		if len(excludedChannelIds) > 0 {
+			// During retry, use the highest remaining enabled weight in this
+			// priority instead of selecting another channel at random. The
+			// initial request keeps the existing weighted distribution.
+			sort.SliceStable(abilities, func(i, j int) bool {
+				if abilities[i].Weight != abilities[j].Weight {
+					return abilities[i].Weight > abilities[j].Weight
+				}
+				return abilities[i].ChannelId < abilities[j].ChannelId
+			})
+			channel.Id = abilities[0].ChannelId
+		} else {
+			// Randomly choose one
+			weightSum := uint(0)
+			for _, ability_ := range abilities {
+				weightSum += ability_.Weight + 10
+			}
+			// Randomly choose one
+			weight := common.GetRandomInt(int(weightSum))
+			for _, ability_ := range abilities {
+				weight -= int(ability_.Weight) + 10
+				//log.Printf("weight: %d, ability weight: %d", weight, *ability_.Weight)
+				if weight <= 0 {
+					channel.Id = ability_.ChannelId
+					break
+				}
 			}
 		}
 	} else {
