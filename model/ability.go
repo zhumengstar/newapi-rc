@@ -111,12 +111,30 @@ func GetChannel(
 	retry int,
 	filters []dto.ChannelFilter,
 ) (*Channel, error) {
+	return GetChannelExcluding(group, model, retry, filters, nil)
+}
+
+// GetChannelExcluding selects a channel while excluding channels already tried
+// for the current request. Exclusions are applied before priority selection so
+// a remaining channel at the same priority is preferred over a lower priority.
+func GetChannelExcluding(
+	group string,
+	model string,
+	retry int,
+	filters []dto.ChannelFilter,
+	excludedChannelIds map[int]bool,
+) (*Channel, error) {
 	var abilities []Ability
 	err := DB.Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, model, true).Order("priority DESC, weight DESC").Find(&abilities).Error
 	if err != nil {
 		return nil, err
 	}
 	abilities = filterAbilitiesByConstraints(abilities, model, filters)
+	if len(excludedChannelIds) > 0 {
+		abilities = lo.Filter(abilities, func(ability Ability, _ int) bool {
+			return !excludedChannelIds[ability.ChannelId]
+		})
+	}
 	if len(abilities) > 0 {
 		priorities := make([]int64, 0)
 		seen := make(map[int64]bool)
