@@ -197,6 +197,18 @@ func GetRandomSatisfiedChannelExcluding(
 	if len(targetChannels) == 0 {
 		return nil, errors.New(fmt.Sprintf("no channel found, group: %s, model: %s, priority: %d", group, model, targetPriority))
 	}
+	if len(excludedChannelIds) > 0 {
+		// A retry must be predictable: after excluding failed channels, try
+		// the highest remaining enabled weight in the current priority.
+		// Keep the first request on the existing weighted-random path.
+		sort.SliceStable(targetChannels, func(i, j int) bool {
+			if targetChannels[i].GetWeight() != targetChannels[j].GetWeight() {
+				return targetChannels[i].GetWeight() > targetChannels[j].GetWeight()
+			}
+			return targetChannels[i].Id < targetChannels[j].Id
+		})
+		return targetChannels[0], nil
+	}
 
 	// smoothing factor and adjustment
 	smoothingFactor := 1
