@@ -11,8 +11,8 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
-	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/logger"
 	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 )
@@ -118,9 +118,22 @@ func GetRandomSatisfiedChannel(
 	retry int,
 	filters []dto.ChannelFilter,
 ) (*Channel, error) {
+	return GetRandomSatisfiedChannelExcluding(group, model, retry, filters, nil)
+}
+
+// GetRandomSatisfiedChannelExcluding is the cache-backed counterpart of
+// GetChannelExcluding. It keeps priority and weight selection consistent for
+// retries while removing channels already attempted by this request.
+func GetRandomSatisfiedChannelExcluding(
+	group string,
+	model string,
+	retry int,
+	filters []dto.ChannelFilter,
+	excludedChannelIds map[int]bool,
+) (*Channel, error) {
 	// if memory cache is disabled, get channel directly from database
 	if !common.MemoryCacheEnabled {
-		return GetChannel(group, model, retry, filters)
+		return GetChannelExcluding(group, model, retry, filters, excludedChannelIds)
 	}
 
 	channelSyncLock.RLock()
@@ -128,11 +141,13 @@ func GetRandomSatisfiedChannel(
 
 	// First, try to find channels with the exact model name.
 	channels, _ := filterCandidateIDs(group2model2channels[group][model], model, filters)
+	channels = filterChannelsByExcludedChannelIds(channels, excludedChannelIds)
 
 	// If no channels found, try to find channels with the normalized model name.
 	if len(channels) == 0 {
 		normalizedModel := ratio_setting.FormatMatchingModelName(model)
 		channels, _ = filterCandidateIDs(group2model2channels[group][normalizedModel], model, filters)
+		channels = filterChannelsByExcludedChannelIds(channels, excludedChannelIds)
 	}
 
 	if len(channels) == 0 {
@@ -212,6 +227,19 @@ func GetRandomSatisfiedChannel(
 	}
 	// return null if no channel is not found
 	return nil, errors.New("channel not found")
+}
+
+func filterChannelsByExcludedChannelIds(channelIds []int, excludedChannelIds map[int]bool) []int {
+	if len(excludedChannelIds) == 0 {
+		return channelIds
+	}
+	filtered := make([]int, 0, len(channelIds))
+	for _, channelId := range channelIds {
+		if !excludedChannelIds[channelId] {
+			filtered = append(filtered, channelId)
+		}
+	}
+	return filtered
 }
 
 func CacheGetChannel(id int) (*Channel, error) {

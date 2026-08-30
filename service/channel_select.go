@@ -36,12 +36,13 @@ func AppendTaskPluginIdentityFilter(c *gin.Context, pluginKey string) {
 }
 
 type RetryParam struct {
-	Ctx          *gin.Context
-	TokenGroup   string
-	ModelName    string
-	RequestPath  string
-	Retry        *int
-	resetNextTry bool
+	Ctx             *gin.Context
+	TokenGroup      string
+	ModelName       string
+	RequestPath     string
+	Retry           *int
+	TriedChannelIds map[int]bool
+	resetNextTry    bool
 }
 
 func (p *RetryParam) GetRetry() int {
@@ -68,6 +69,20 @@ func (p *RetryParam) IncreaseRetry() {
 
 func (p *RetryParam) ResetRetryNextTry() {
 	p.resetNextTry = true
+}
+
+func (p *RetryParam) MarkChannelTried(channelId int) {
+	if p.TriedChannelIds == nil {
+		p.TriedChannelIds = make(map[int]bool)
+	}
+	p.TriedChannelIds[channelId] = true
+}
+
+func getRandomSatisfiedChannel(group string, param *RetryParam, priorityRetry int, filters []dto.ChannelFilter) (*model.Channel, error) {
+	if len(param.TriedChannelIds) > 0 {
+		priorityRetry = 0
+	}
+	return model.GetRandomSatisfiedChannelExcluding(group, param.ModelName, priorityRetry, filters, param.TriedChannelIds)
 }
 
 // CacheGetRandomSatisfiedChannel tries to get a random channel that satisfies the requirements.
@@ -141,12 +156,7 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 			}
 			logger.LogDebug(param.Ctx, "Auto selecting group: %s, priorityRetry: %d", autoGroup, priorityRetry)
 
-			channel, _ = model.GetRandomSatisfiedChannel(
-				autoGroup,
-				param.ModelName,
-				priorityRetry,
-				filters,
-			)
+			channel, _ = getRandomSatisfiedChannel(autoGroup, param, priorityRetry, filters)
 			if channel == nil {
 				// Current group has no available channel for this model, try next group
 				// 当前分组没有该模型的可用渠道，尝试下一个分组
@@ -184,12 +194,8 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 			break
 		}
 	} else {
-		channel, err = model.GetRandomSatisfiedChannel(
-			param.TokenGroup,
-			param.ModelName,
-			param.GetRetry(),
-			filters,
-		)
+		priorityRetry := param.GetRetry()
+		channel, err = getRandomSatisfiedChannel(param.TokenGroup, param, priorityRetry, filters)
 		if err != nil {
 			return nil, param.TokenGroup, err
 		}
