@@ -332,18 +332,50 @@ func PinTaskPluginEndpoint() gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		c.Set(contextKeyTaskPluginEndpointModel, *modelRequest)
 		claimedModel := modelRequest.Model
 		if strings.TrimSpace(claimedModel) == "" {
+			c.Set(contextKeyTaskPluginEndpointModel, *modelRequest)
 			c.Next()
 			return
 		}
-		binding, found := generation.LookupEndpoint(c.Request.Method, c.Request.URL.Path, claimedModel)
+		lookupModel := claimedModel
+		pinModel := claimedModel
+		mappedModel := ""
+		rewriteTo := ""
+		if declared, ok := generation.CanonicalModel(claimedModel); ok {
+			lookupModel = declared
+			pinModel = declared
+			if claimedModel != declared {
+				rewriteTo = declared
+			}
+		} else if target, ok := model.ResolveTaskModelAlias(generation, claimedModel); ok {
+			if target.Declared == "" {
+				c.Set(contextKeyTaskPluginEndpointModel, *modelRequest)
+				c.Next()
+				return
+			}
+			lookupModel = target.Declared
+			pinModel = target.Alias
+			mappedModel = target.Declared
+			if claimedModel != target.Alias {
+				rewriteTo = target.Alias
+			}
+		}
+		binding, found := generation.LookupEndpoint(c.Request.Method, c.Request.URL.Path, lookupModel)
 		if !found || binding.Plugin == nil {
+			c.Set(contextKeyTaskPluginEndpointModel, *modelRequest)
 			c.Next()
 			return
 		}
-		candidates := generation.LookupEndpointCandidates(c.Request.Method, c.Request.URL.Path, claimedModel)
+		if rewriteTo != "" {
+			if rewriteErr := rewriteTaskPluginJSONModel(c, rewriteTo); rewriteErr != nil {
+				abortWithOpenAiMessage(c, http.StatusBadRequest, "Invalid task protocol request")
+				return
+			}
+		}
+		modelRequest.Model = pinModel
+		c.Set(contextKeyTaskPluginEndpointModel, *modelRequest)
+		candidates := generation.LookupEndpointCandidates(c.Request.Method, c.Request.URL.Path, lookupModel)
 		if len(candidates) == 0 {
 			candidates = []pluginruntime.ProtocolBinding{binding}
 		}
@@ -386,12 +418,13 @@ func PinTaskPluginEndpoint() gin.HandlerFunc {
 
 		pin := pluginruntime.PinnedPlugin{Generation: generation, Plugin: binding.Plugin}
 		pinnedEndpoint := pluginruntime.PinnedEndpoint{
-			Generation: generation,
-			Plugin:     binding.Plugin,
-			Protocol:   binding.Protocol,
-			Operation:  binding.Operation,
-			Model:      claimedModel,
-			Candidates: candidates,
+			Generation:  generation,
+			Plugin:      binding.Plugin,
+			Protocol:    binding.Protocol,
+			Operation:   binding.Operation,
+			Model:       pinModel,
+			MappedModel: mappedModel,
+			Candidates:  candidates,
 		}
 		c.Set(pluginruntime.ContextKeyPinnedPlugin, pin)
 		c.Set(pluginruntime.ContextKeyPinnedEndpoint, pinnedEndpoint)
@@ -403,7 +436,7 @@ func PinTaskPluginEndpoint() gin.HandlerFunc {
 			binding.Plugin.Meta.Version,
 			binding.Operation.Methods[0],
 			binding.Protocol,
-			claimedModel,
+			pinModel,
 		)
 		c.Next()
 	}
@@ -468,8 +501,7 @@ func TaskPluginEndpointOnly(handler gin.HandlerFunc) gin.HandlerFunc {
 }
 
 // PrepareTaskPluginEndpoint normalizes a claimed shared request through the
-// deterministic parser pinned before distribution. A shared-model request can
-// later rebind to another declared legacy provider from the same generation.
+// candidates pinned before distribution, retaining only plugins that accept it.
 func PrepareTaskPluginEndpoint() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		pinnedValue, exists := c.Get(pluginruntime.ContextKeyPinnedEndpoint)
@@ -514,6 +546,13 @@ func PrepareTaskPluginEndpoint() gin.HandlerFunc {
 			}
 			abortWithOpenAiMessage(c, status, err.Error())
 			return
+		}
+		if body, ok := requestContext.Body.(map[string]any); ok {
+			if fields, ok := body["fields"].(map[string][]string); ok {
+				if values := fields["model"]; len(values) > 0 && values[0] != pinned.Model {
+					fields["model"][0] = pinned.Model
+				}
+			}
 		}
 		bodyObject, _ := requestContext.Body.(map[string]any)
 		bodyKind, _ := bodyObject["kind"].(string)
@@ -561,81 +600,82 @@ func PrepareTaskPluginEndpoint() gin.HandlerFunc {
 			Protocol:            pinned.Protocol,
 			Operation:           pinned.Operation.Name,
 			Model:               pinned.Model,
+			UpstreamModel:       pinned.MappedModel,
 			Stream:              stream,
 		}
-		c.Set(pluginruntime.ContextKeyProtocolRequest, protocolContext)
 		hookStarted := time.Now()
-		// Parsing belongs to the durable task submission path. A client
-		// disconnect only stops the later Responses observation.
-		resolvedValue, callErr := pinned.Plugin.Engine.CallPathWithAdmissionTimeout(
-			context.WithoutCancel(c.Request.Context()),
-			pluginruntime.DefaultCallTimeout,
-			"protocols",
-			[]string{pinned.Protocol, "decodeRequest"},
-			protocolContext.JSValue(),
-		)
-		if callErr != nil {
-			logger.LogWarn(
-				c,
-				"task_plugin subsystem=endpoint event=prepare_rejected generation=%d plugin=%q stage=parse_request reason=hook_failed err=%q elapsed_ms=%d",
-				pinned.Generation.Number,
-				pinned.Plugin.Meta.Key,
-				callErr.Error(),
-				time.Since(hookStarted).Milliseconds(),
+		candidates := pinned.Candidates
+		if len(candidates) == 0 {
+			candidates = []pluginruntime.ProtocolBinding{{Plugin: pinned.Plugin, Protocol: pinned.Protocol, Operation: pinned.Operation, Model: pinned.Model}}
+		}
+		accepted := make([]pluginruntime.ProtocolBinding, 0, len(candidates))
+		var resolved map[string]any
+		var failures []string
+		rejectedPlugins := make(map[string][]string)
+		for _, candidate := range candidates {
+			candidateContext := protocolContext
+			candidateContext.Protocol = candidate.Protocol
+			candidateContext.Operation = candidate.Operation.Name
+			// Parsing belongs to durable submission; disconnecting only stops
+			// the later Responses observation.
+			resolvedValue, callErr := candidate.Plugin.Engine.CallPathWithAdmissionTimeout(
+				context.WithoutCancel(c.Request.Context()), pluginruntime.DefaultCallTimeout,
+				"protocols", []string{candidate.Protocol, "decodeRequest"}, candidateContext.JSValue(),
 			)
-			detail := taskPluginHookDetail(callErr)
-			if detail == "" {
-				detail = "Invalid task protocol request"
+			result, resultOK := resolvedValue.(map[string]any)
+			detail := ""
+			reason := ""
+			if callErr != nil {
+				reason = "hook_failed"
+				detail = taskPluginHookDetail(callErr)
+				if detail == "" {
+					detail = "Invalid task protocol request"
+				}
+			} else if !resultOK {
+				reason = "result_not_object"
+				detail = taskPluginInvalidRouteResult
+			} else if kind, _ := result["kind"].(string); kind != string(pluginruntime.RouteTypeSubmit) {
+				reason = "unsupported_kind"
+				detail = taskPluginInvalidRouteResult
+			} else if model, _ := result["model"].(string); strings.TrimSpace(model) == "" {
+				reason = "invalid_model"
+				detail = "decoded request is missing a model"
+			} else if model != pinned.Model || (pinned.MappedModel == "" && !slices.Contains(candidate.Plugin.Meta.Models, model)) {
+				reason = "resolved_model_not_owned"
+				detail = fmt.Sprintf("model %q is not served by this plugin", model)
 			}
-			abortWithOpenAiMessage(c, http.StatusBadRequest, detail)
+			if detail != "" {
+				logger.LogWarn(c, "task_plugin subsystem=endpoint event=prepare_rejected generation=%d plugin=%q stage=parse_request reason=%s err=%q elapsed_ms=%d",
+					pinned.Generation.Number, candidate.Plugin.Meta.Key, reason, detail, time.Since(hookStarted).Milliseconds())
+				if _, seen := rejectedPlugins[detail]; !seen {
+					failures = append(failures, detail)
+				}
+				rejectedPlugins[detail] = append(rejectedPlugins[detail], candidate.Plugin.Meta.Key)
+				continue
+			}
+			accepted = append(accepted, candidate)
+			if resolved == nil {
+				resolved = result
+				protocolContext = candidateContext
+			}
+		}
+		if len(accepted) == 0 {
+			if len(candidates) > 1 {
+				for index, detail := range failures {
+					failures[index] = strings.Join(rejectedPlugins[detail], ", ") + ": " + detail
+				}
+			}
+			abortWithOpenAiMessage(c, http.StatusBadRequest, strings.Join(failures, "; "))
 			return
 		}
-		resolved, ok := resolvedValue.(map[string]any)
-		if !ok {
-			logger.LogWarn(
-				c,
-				"task_plugin subsystem=endpoint event=prepare_rejected generation=%d plugin=%q stage=parse_request reason=result_not_object elapsed_ms=%d",
-				pinned.Generation.Number,
-				pinned.Plugin.Meta.Key,
-				time.Since(hookStarted).Milliseconds(),
-			)
-			abortWithOpenAiMessage(c, http.StatusBadRequest, taskPluginInvalidRouteResult)
-			return
-		}
-		if kind, _ := resolved["kind"].(string); kind != string(pluginruntime.RouteTypeSubmit) {
-			logger.LogWarn(
-				c,
-				"task_plugin subsystem=endpoint event=prepare_rejected generation=%d plugin=%q stage=parse_request reason=unsupported_kind",
-				pinned.Generation.Number,
-				pinned.Plugin.Meta.Key,
-			)
-			abortWithOpenAiMessage(c, http.StatusBadRequest, taskPluginInvalidRouteResult)
-			return
-		}
-		resolvedModel, ok := resolved["model"].(string)
-		if !ok || strings.TrimSpace(resolvedModel) == "" {
-			logger.LogWarn(
-				c,
-				"task_plugin subsystem=endpoint event=prepare_rejected generation=%d plugin=%q stage=parse_request reason=invalid_model",
-				pinned.Generation.Number,
-				pinned.Plugin.Meta.Key,
-			)
-			abortWithOpenAiMessage(c, http.StatusBadRequest, "decoded request is missing a model")
-			return
-		}
-		modelOwned := slices.Contains(pinned.Plugin.Meta.Models, resolvedModel)
-		if !modelOwned || resolvedModel != pinned.Model {
-			logger.LogWarn(
-				c,
-				"task_plugin subsystem=endpoint event=prepare_rejected generation=%d plugin=%q stage=parse_request reason=resolved_model_not_owned claimed_model=%q resolved_model=%q",
-				pinned.Generation.Number,
-				pinned.Plugin.Meta.Key,
-				pinned.Model,
-				resolvedModel,
-			)
-			abortWithOpenAiMessage(c, http.StatusBadRequest, fmt.Sprintf("model %q is not served by this plugin", resolvedModel))
-			return
-		}
+		pinned.Candidates = accepted
+		pinned.Plugin = accepted[0].Plugin
+		pinned.Protocol = accepted[0].Protocol
+		pinned.Operation = accepted[0].Operation
+		c.Set(pluginruntime.ContextKeyPinnedEndpoint, pinned)
+		c.Set(pluginruntime.ContextKeyPinnedPlugin, pluginruntime.PinnedPlugin{Generation: pinned.Generation, Plugin: pinned.Plugin})
+		c.Set(pluginruntime.ContextKeyProtocolRequest, protocolContext)
+		resolvedModel := pinned.Model
 
 		action := ""
 		if resolvedAction, present := resolved["action"]; present {
@@ -1379,6 +1419,27 @@ func PrepareTaskPluginSubmit() gin.HandlerFunc {
 		if strings.TrimSpace(modelName) == "" {
 			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "model is required", "type": "invalid_request_error"}})
 			return
+		}
+		exactOwned := slices.Contains(plugin.Meta.Models, modelName)
+		exactAlias := false
+		if target, resolved := model.ResolveTaskModelAlias(generation, modelName); resolved && target.Alias == modelName && target.PluginKey == plugin.Meta.Key {
+			exactAlias = true
+		}
+		if !exactOwned && !exactAlias {
+			folded := ""
+			if declared, ok := generation.CanonicalModel(modelName); ok && slices.Contains(plugin.Meta.Models, declared) && declared != modelName {
+				folded = declared
+			} else if target, resolved := model.ResolveTaskModelAlias(generation, modelName); resolved && target.PluginKey == plugin.Meta.Key && target.Alias != "" && target.Alias != modelName {
+				folded = target.Alias
+			}
+			if folded != "" {
+				if rewriteErr := rewriteTaskPluginJSONModel(c, folded); rewriteErr != nil {
+					c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": rewriteErr.Error(), "type": "invalid_request_error"}})
+					return
+				}
+				requestBody["model"] = folded
+				modelName = folded
+			}
 		}
 		c.Set("task_request", requestBody)
 		c.Set("resolved_task_model", modelName)

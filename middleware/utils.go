@@ -115,15 +115,15 @@ func recordMiddlewareAbortErrorLog(c *gin.Context, statusCode int, message strin
 		useTimeSeconds = int(time.Since(startTime).Seconds())
 	}
 
-	other := make(map[string]interface{})
+	other := model.NewLogOther()
 	if path != "" {
-		other["request_path"] = path
+		other.SetPublic("request_path", path)
 	}
-	other["error_type"] = "middleware_abort"
+	other.SetPublic("error_type", "middleware_abort")
 	if codeStr != "" {
-		other["error_code"] = codeStr
+		other.SetPublic("error_code", codeStr)
 	}
-	other["status_code"] = statusCode
+	other.SetPublic("status_code", statusCode)
 
 	content := fmt.Sprintf("status_code=%d, %s", statusCode, message)
 	model.RecordErrorLog(c, userId, channelId, modelName, tokenName, content, tokenId, useTimeSeconds, false, userGroup, other)

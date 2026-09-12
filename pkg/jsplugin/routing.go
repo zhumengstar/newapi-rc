@@ -219,12 +219,13 @@ type PinnedRoute struct {
 // distribution may rebind it to another candidate from the same generation
 // when multiple legacy providers expose the same model.
 type PinnedEndpoint struct {
-	Generation *RoutingGeneration
-	Plugin     *LoadedPlugin
-	Protocol   string
-	Operation  HostProtocolOperation
-	Model      string
-	Candidates []ProtocolBinding
+	Generation  *RoutingGeneration
+	Plugin      *LoadedPlugin
+	Protocol    string
+	Operation   HostProtocolOperation
+	Model       string
+	MappedModel string
+	Candidates  []ProtocolBinding
 }
 
 // RouteRequestContext is the canonical request view exposed to declarative
@@ -242,9 +243,7 @@ type RouteRequestContext struct {
 
 func (r RouteRequestContext) JSValue() map[string]any {
 	params := make(map[string]string, len(r.Params))
-	for key, value := range r.Params {
-		params[key] = value
-	}
+	maps.Copy(params, r.Params)
 	query := make(map[string][]string, len(r.Query))
 	for key, values := range r.Query {
 		query[key] = append([]string(nil), values...)
@@ -296,7 +295,11 @@ type ProtocolRequestContext struct {
 	Protocol  string `json:"protocol"`
 	Operation string `json:"operation"`
 	Model     string `json:"model"`
-	Stream    bool   `json:"stream"`
+	// UpstreamModel is the declared machine identity when Model is a
+	// channel-mapping alias; empty otherwise. Decode hooks that key rate
+	// tables or request shaping by model must use it over Model.
+	UpstreamModel string `json:"upstreamModel,omitempty"`
+	Stream        bool   `json:"stream"`
 }
 
 func (p ProtocolRequestContext) JSValue() map[string]any {
@@ -304,6 +307,9 @@ func (p ProtocolRequestContext) JSValue() map[string]any {
 	value["protocol"] = p.Protocol
 	value["operation"] = p.Operation
 	value["model"] = p.Model
+	if p.UpstreamModel != "" {
+		value["upstreamModel"] = p.UpstreamModel
+	}
 	value["stream"] = p.Stream
 	return value
 }
@@ -318,15 +324,17 @@ type RoutingGeneration struct {
 	Number      uint64
 	PublishedAt time.Time
 
-	byKey         map[string]*LoadedPlugin
-	byModel       map[string]*LoadedPlugin
-	byChannelType map[int]*LoadedPlugin
-	routeIndex    map[string]RouteBinding
-	protocolIndex map[string][]ProtocolBinding
-	plugins       []*LoadedPlugin
-	routes        []RouteBinding
-	runtime       http.Handler
-	retainCurrent map[string]struct{}
+	byKey                map[string]*LoadedPlugin
+	byModel              map[string]*LoadedPlugin
+	modelPlugins         map[string][]*LoadedPlugin
+	canonicalModelByFold map[string]string
+	byChannelType        map[int]*LoadedPlugin
+	routeIndex           map[string]RouteBinding
+	protocolIndex        map[string][]ProtocolBinding
+	plugins              []*LoadedPlugin
+	routes               []RouteBinding
+	runtime              http.Handler
+	retainCurrent        map[string]struct{}
 }
 
 var (
@@ -409,6 +417,34 @@ func (g *RoutingGeneration) GetByModel(model string) (*LoadedPlugin, bool) {
 	return plugin, ok
 }
 
+// PluginsByModel returns all plugins declaring model, in ascending key order.
+func (g *RoutingGeneration) PluginsByModel(model string) []*LoadedPlugin {
+	if g == nil {
+		return nil
+	}
+	return slices.Clone(g.modelPlugins[model])
+}
+
+// SharedModel reports whether multiple plugins declare a model without copying
+// its provider list on the relay hot path.
+func (g *RoutingGeneration) SharedModel(model string) bool {
+	return g != nil && len(g.modelPlugins[model]) >= 2
+}
+
+// CanonicalModel returns the declared spelling for model. An exact byModel
+// hit wins and returns the input unchanged; otherwise the ASCII-folded
+// index is consulted. Miss and nil-receiver return ("", false).
+func (g *RoutingGeneration) CanonicalModel(model string) (string, bool) {
+	if g == nil || model == "" {
+		return "", false
+	}
+	if _, ok := g.byModel[model]; ok {
+		return model, true
+	}
+	declared, ok := g.canonicalModelByFold[asciiFold(model)]
+	return declared, ok
+}
+
 // LookupDeclaredRoute resolves a manifest path declaration. It does not match
 // an incoming concrete URL; runtime matching is delegated to Gin.
 func (g *RoutingGeneration) LookupDeclaredRoute(method, path string) (RouteBinding, bool) {
@@ -442,9 +478,8 @@ func (g *RoutingGeneration) LookupEndpoint(method, path, model string) (Protocol
 	return bindings[0], true
 }
 
-// LookupEndpointCandidates returns every legacy provider implementation that
-// can serve one shared model endpoint. Candidate order is deterministic and
-// the first binding is the parser used before channel distribution.
+// LookupEndpointCandidates returns every plugin that can serve a shared model
+// endpoint, in ascending key order. Each candidate decodes before distribution.
 func (g *RoutingGeneration) LookupEndpointCandidates(method, path, model string) []ProtocolBinding {
 	if g == nil {
 		return nil
@@ -508,7 +543,7 @@ func (g *RoutingGeneration) RebuildWithPlugins(plugins []*LoadedPlugin) (*Routin
 		}
 		byKey[plugin.Meta.Key] = plugin
 	}
-	rebuilt, err := buildRoutingGeneration(byKey, nil, false, g.Number)
+	rebuilt, err := buildRoutingGeneration(byKey, nil, g.Number)
 	if err != nil {
 		return nil, err
 	}
@@ -721,10 +756,11 @@ func validateModelScope(models []string, subject string) error {
 		if strings.TrimSpace(model) == "" || strings.TrimSpace(model) != model {
 			return fmt.Errorf("plugin %s models must contain non-empty canonical names", subject)
 		}
-		if _, duplicate := seen[model]; duplicate {
-			return fmt.Errorf("plugin %s models must be unique", subject)
+		folded := asciiFold(model)
+		if _, duplicate := seen[folded]; duplicate {
+			return fmt.Errorf("plugin %s models must be unique case-insensitively", subject)
 		}
-		seen[model] = struct{}{}
+		seen[folded] = struct{}{}
 	}
 	return nil
 }
@@ -740,19 +776,18 @@ func ResolveRouteAction(route Route, resolvedAction string) string {
 	return route.Action
 }
 
-func buildRoutingGeneration(factory, override map[string]*LoadedPlugin, overrideEnabled bool, number uint64) (*RoutingGeneration, error) {
-	effective := effectivePlugins(factory, override, overrideEnabled)
+func buildRoutingGeneration(factory, override map[string]*LoadedPlugin, number uint64) (*RoutingGeneration, error) {
+	effective := effectivePlugins(factory, override)
 	return buildRoutingGenerationFromPlugins(effective, number)
 }
 
 func buildRoutingGenerationAdmitting(
 	factory, override map[string]*LoadedPlugin,
-	overrideEnabled bool,
 	number uint64,
 	current *RoutingGeneration,
 	retainCurrent map[string]struct{},
 ) (*RoutingGeneration, map[string]string, error) {
-	candidates := effectivePlugins(factory, override, overrideEnabled)
+	candidates := effectivePlugins(factory, override)
 	accepted := make(map[string]*LoadedPlugin, len(candidates))
 	currentByKey := make(map[string]*LoadedPlugin)
 	if current != nil {
@@ -819,12 +854,10 @@ func buildRoutingGenerationAdmitting(
 	return generation, routingErrors, nil
 }
 
-func effectivePlugins(factory, override map[string]*LoadedPlugin, overrideEnabled bool) map[string]*LoadedPlugin {
+func effectivePlugins(factory, override map[string]*LoadedPlugin) map[string]*LoadedPlugin {
 	effective := make(map[string]*LoadedPlugin, len(factory)+len(override))
 	maps.Copy(effective, factory)
-	if overrideEnabled {
-		maps.Copy(effective, override)
-	}
+	maps.Copy(effective, override)
 	return effective
 }
 
@@ -836,23 +869,38 @@ func buildRoutingGenerationFromPlugins(effective map[string]*LoadedPlugin, numbe
 	sort.Strings(keys)
 
 	generation := &RoutingGeneration{
-		Number:        number,
-		PublishedAt:   time.Now(),
-		byKey:         make(map[string]*LoadedPlugin, len(effective)),
-		byModel:       make(map[string]*LoadedPlugin),
-		byChannelType: make(map[int]*LoadedPlugin),
-		routeIndex:    make(map[string]RouteBinding),
-		protocolIndex: make(map[string][]ProtocolBinding),
-		plugins:       make([]*LoadedPlugin, 0, len(effective)),
+		Number:               number,
+		PublishedAt:          time.Now(),
+		byKey:                make(map[string]*LoadedPlugin, len(effective)),
+		byModel:              make(map[string]*LoadedPlugin),
+		modelPlugins:         make(map[string][]*LoadedPlugin),
+		canonicalModelByFold: make(map[string]string),
+		byChannelType:        make(map[int]*LoadedPlugin),
+		routeIndex:           make(map[string]RouteBinding),
+		protocolIndex:        make(map[string][]ProtocolBinding),
+		plugins:              make([]*LoadedPlugin, 0, len(effective)),
 	}
 	for _, key := range keys {
 		plugin := effective[key]
 		generation.byKey[key] = plugin
 		generation.plugins = append(generation.plugins, plugin)
 		for _, model := range plugin.Meta.Models {
+			generation.modelPlugins[model] = append(generation.modelPlugins[model], plugin)
 			if _, exists := generation.byModel[model]; !exists {
 				generation.byModel[model] = plugin
 			}
+			folded := asciiFold(model)
+			if existing, exists := generation.canonicalModelByFold[folded]; exists {
+				if existing != model {
+					otherKey := plugin.Meta.Key
+					if other, ok := generation.byModel[existing]; ok {
+						otherKey = other.Meta.Key
+					}
+					return nil, fmt.Errorf("plugin %s model %q conflicts with plugin %s model %q", plugin.Meta.Key, model, otherKey, existing)
+				}
+				continue
+			}
+			generation.canonicalModelByFold[folded] = model
 		}
 
 		for _, channelType := range plugin.Meta.ChannelTypes {
@@ -895,8 +943,7 @@ func buildRoutingGenerationFromPlugins(effective map[string]*LoadedPlugin, numbe
 						bindings := generation.protocolIndex[indexKey]
 						if len(bindings) > 0 {
 							other := bindings[0]
-							legacyProviders := len(plugin.Meta.ChannelTypes) > 0 && len(other.Plugin.Meta.ChannelTypes) > 0
-							if !legacyProviders || claim.Name != other.Protocol {
+							if claim.Name != other.Protocol {
 								return nil, fmt.Errorf("plugin %s protocol %s %s model %q conflicts with plugin %s", plugin.Meta.Key, method, operation.Path, model, other.Plugin.Meta.Key)
 							}
 						}

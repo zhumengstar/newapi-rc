@@ -151,10 +151,9 @@ function SplitHeaderTableView<TData>({
           props.bodyContainerClassName
         )}
       >
-        <table
-          data-slot='table'
+        <Table
+          withContainer={false}
           className={cn(
-            'w-full caption-bottom text-sm tabular-nums [&_td]:text-sm [&_td_*]:text-sm [&_th]:text-sm [&_th_*]:text-sm',
             props.table.options.enableColumnResizing === true && 'table-fixed',
             props.tableClassName
           )}
@@ -169,7 +168,7 @@ function SplitHeaderTableView<TData>({
             getColumnClassName={getColumnClassName}
           />
           {renderTableBody(props, rows, colSpan, getColumnClassName)}
-        </table>
+        </Table>
       </div>
     </div>
   )

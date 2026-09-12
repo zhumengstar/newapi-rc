@@ -25,7 +25,7 @@ func setupLoginAccessTokenTest(t *testing.T) *gorm.DB {
 
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&model.User{}, &model.UserSession{}, &model.Log{}, &model.TwoFA{}))
+	require.NoError(t, db.AutoMigrate(&model.User{}, &model.UserSession{}, &model.Log{}, &model.TwoFA{}, &model.PasskeyCredential{}, &model.AuditLog{}))
 	model.DB, model.LOG_DB = db, db
 	common.PasswordLoginEnabled = true
 	common.RedisEnabled = false

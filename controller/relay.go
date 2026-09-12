@@ -109,7 +109,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 				})
 			}
 			if !common.GetContextKeyBool(c, constant.ContextKeyErrorLogRecorded) {
-				recordChannelErrorLog(c, newAPIError)
+				recordChannelErrorLog(c, 0, newAPIError, nil)
 			}
 		}
 	}()
@@ -120,7 +120,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		if common.IsRequestBodyTooLargeError(err) || errors.Is(err, common.ErrRequestBodyTooLarge) {
 			newAPIError = types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusRequestEntityTooLarge, types.ErrOptionWithSkipRetry())
 		} else {
-			newAPIError = types.NewError(err, types.ErrorCodeInvalidRequest)
+			newAPIError = types.NewError(err, types.ErrorCodeInvalidRequest, types.ErrOptionWithStatusCode(http.StatusBadRequest), types.ErrOptionWithSkipRetry())
 		}
 		return
 	}
@@ -203,7 +203,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		if channelErr != nil {
 			logger.LogError(c, channelErr.Error())
 			if channel != nil {
-				processChannelAttemptError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), channelErr, false)
+				processChannelAttemptError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), channelErr, false, relayInfo)
 				relayInfo.LastError = channelErr
 				if shouldRetry(c, channelErr, common.RetryTimes-retryParam.GetRetry()) {
 					retryParam.MarkChannelTried(channel.Id)
@@ -256,7 +256,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		newAPIError = service.NormalizeViolationFeeError(newAPIError)
 		relayInfo.LastError = newAPIError
 
-		processChannelAttemptError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, false)
+		processChannelAttemptError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, false, relayInfo)
 
 		if shouldStopRetryAfterSlowImageAttempt(relayInfo, time.Since(attemptStartedAt)) {
 			logger.LogInfo(c, "image upstream attempt exceeded 60s; skip channel retry")
@@ -284,12 +284,44 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	if newAPIError != nil {
 		service.RecordChannelControlRequestMetric(c.Request.Context(), relayInfo.TokenGroup, false, int64(len(useChannel)))
 		if shouldRecordFinalRelayError(hasUpstreamAttempt, newAPIError) {
-			recordChannelErrorLog(c, newAPIError)
+			recordChannelErrorLog(c, 0, newAPIError, relayInfo)
 		}
 		gopool.Go(func() {
 			perfmetrics.RecordRelaySample(relayInfo, false, 0)
 		})
 	}
+}
+
+// CountClaudeTokens implements Anthropic's token-counting utility endpoint.
+// It deliberately skips upstream generation and billing; callers use this
+// endpoint to size prompts before creating a Message.
+func CountClaudeTokens(c *gin.Context) {
+	request, err := helper.GetAndValidateClaudeRequest(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"type": "error",
+			"error": gin.H{
+				"type":    "invalid_request_error",
+				"message": common.MessageWithRequestId(err.Error(), c.GetString(common.RequestIdKey)),
+			},
+		})
+		return
+	}
+
+	info := relaycommon.GenRelayInfoClaude(c, request)
+	inputTokens, err := service.CountRequestToken(c, request.GetTokenCountMeta(), info)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"type": "error",
+			"error": gin.H{
+				"type":    "api_error",
+				"message": common.MessageWithRequestId(err.Error(), c.GetString(common.RequestIdKey)),
+			},
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"input_tokens": inputTokens})
 }
 
 var upgrader = websocket.Upgrader{
@@ -557,11 +589,11 @@ func shouldRecordFinalRelayError(hasUpstreamAttempt bool, err *types.NewAPIError
 	return err != nil
 }
 
-func processChannelError(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError) {
-	processChannelAttemptError(c, channelError, err, true)
+func processChannelError(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError, relayInfo *relaycommon.RelayInfo) {
+	processChannelAttemptError(c, channelError, err, true, relayInfo)
 }
 
-func processChannelAttemptError(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError, recordErrorLog bool) {
+func processChannelAttemptError(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError, recordErrorLog bool, relayInfo *relaycommon.RelayInfo) {
 	if err == nil {
 		return
 	}
@@ -581,11 +613,11 @@ func processChannelAttemptError(c *gin.Context, channelError types.ChannelError,
 	}
 
 	if recordErrorLog {
-		recordChannelErrorLog(c, err)
+		recordChannelErrorLog(c, channelError.ChannelId, err, relayInfo)
 	}
 }
 
-func recordChannelErrorLog(c *gin.Context, err *types.NewAPIError) {
+func recordChannelErrorLog(c *gin.Context, channelId int, err *types.NewAPIError, relayInfo *relaycommon.RelayInfo) {
 	if !constant.ErrorLogEnabled || !types.IsRecordErrorLog(err) {
 		return
 	}
@@ -606,26 +638,26 @@ func recordChannelErrorLog(c *gin.Context, err *types.NewAPIError) {
 	}
 	tokenId := c.GetInt("token_id")
 	userGroup := c.GetString("group")
-	channelId := c.GetInt("channel_id")
-	other := make(map[string]interface{})
-	if c.Request != nil && c.Request.URL != nil {
-		other["request_path"] = c.Request.URL.Path
+	if channelId == 0 {
+		channelId = c.GetInt("channel_id")
 	}
-	other["error_type"] = err.GetErrorType()
-	other["error_code"] = err.GetErrorCode()
-	other["status_code"] = err.StatusCode
-	other["channel_id"] = channelId
-	other["channel_name"] = c.GetString("channel_name")
-	other["channel_type"] = c.GetInt("channel_type")
-	adminInfo := make(map[string]interface{})
-	adminInfo["use_channel"] = c.GetStringSlice("use_channel")
+	other := model.NewLogOther()
+	if c.Request != nil && c.Request.URL != nil {
+		other.SetPublic("request_path", c.Request.URL.Path)
+	}
+	other.SetPublic("error_type", err.GetErrorType())
+	other.SetPublic("error_code", err.GetErrorCode())
+	other.SetPublic("status_code", err.StatusCode)
+	other.SetAdmin("use_channel", c.GetStringSlice("use_channel"))
 	isMultiKey := common.GetContextKeyBool(c, constant.ContextKeyChannelIsMultiKey)
 	if isMultiKey {
-		adminInfo["is_multi_key"] = true
-		adminInfo["multi_key_index"] = common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex)
+		other.SetAdmin("is_multi_key", true)
+		other.SetAdmin("multi_key_index", common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex))
 	}
-	service.AppendChannelAffinityAdminInfo(c, adminInfo)
-	other["admin_info"] = adminInfo
+	service.AppendChannelAffinityAdminInfo(c, other)
+	if relayInfo != nil {
+		service.AppendRelayLogAdminInfo(c, relayInfo, other)
+	}
 	service.AppendTaskPluginContextAuditInfo(c, other)
 	startTime := common.GetContextKeyTime(c, constant.ContextKeyRequestStartTime)
 	if startTime.IsZero() {
@@ -709,6 +741,11 @@ func RelayNotImplemented(c *gin.Context) {
 }
 
 func RelayNotFound(c *gin.Context) {
+	// The web fallback may already have applied static-asset cache headers.
+	// A missing API or asset can appear after an upgrade; never cache its 404.
+	c.Header("Cache-Control", "no-store, no-cache, must-revalidate, private, max-age=0")
+	c.Header("Pragma", "no-cache")
+	c.Header("Expires", "0")
 	err := types.OpenAIError{
 		Message: fmt.Sprintf("Invalid URL (%s %s)", c.Request.Method, c.Request.URL.Path),
 		Type:    "invalid_request_error",
@@ -866,7 +903,7 @@ func executeTaskSubmissionWith(
 			if channelErr != nil {
 				logger.LogError(c, channelErr.Error())
 				if channel != nil {
-					processChannelAttemptError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), channelErr, false)
+					processChannelAttemptError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), channelErr, false, relayInfo)
 					if shouldRetry(c, channelErr, common.RetryTimes-retryParam.GetRetry()) {
 						retryParam.MarkChannelTried(channel.Id)
 						if !waitBeforeChannelRetry(c, channelErr, retryParam.GetRetry()) {
@@ -910,7 +947,8 @@ func executeTaskSubmissionWith(
 			processChannelError(c,
 				*types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey,
 					common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()),
-				types.NewOpenAIError(taskErr.Error, types.ErrorCodeBadResponseStatusCode, taskErr.StatusCode))
+				types.NewOpenAIError(taskErr.Error, types.ErrorCodeBadResponseStatusCode, taskErr.StatusCode),
+				relayInfo)
 		}
 
 		willRetry := shouldRetryTaskRelay(c, channel.Id, taskErr, common.RetryTimes-retryParam.GetRetry())
@@ -982,6 +1020,9 @@ func executeTaskSubmissionWith(
 	}
 	task.Quota = result.Quota
 	task.Data = result.TaskData
+	if len(result.PluginState) > 0 {
+		task.PrivateData.PluginState = result.PluginState
+	}
 	task.Action = relayInfo.Action
 	if immediate := result.Immediate; immediate != nil {
 		task.Status = model.TaskStatus(immediate.Status)
@@ -1092,7 +1133,7 @@ func respondTaskError(c *gin.Context, taskErr *taskdto.TaskError) {
 }
 
 func shouldRetryTaskRelay(c *gin.Context, channelId int, taskErr *taskdto.TaskError, retryTimes int) bool {
-	if taskErr == nil {
+	if taskErr == nil || taskErr.NoRetry {
 		return false
 	}
 	if service.ShouldSkipRetryAfterChannelAffinityFailure(c) {
