@@ -35,7 +35,7 @@ import {
   FormMessage,
 } from '@/components/ui/form'
 import { Switch } from '@/components/ui/switch'
-import { getEnabledModels } from '@/features/channels/api'
+import { getAllChannelModels } from '@/features/channels/api'
 import { handleServerError } from '@/lib/handle-server-error'
 import { requireServerSuccess } from '@/lib/server-error-message'
 
@@ -182,30 +182,30 @@ export const ModelRatioForm = memo(function ModelRatioForm({
   const [editMode, setEditMode] = useState<'visual' | 'json'>('visual')
   const visualEditorRef = useRef<ModelRatioVisualEditorHandle>(null)
 
-  const enabledModelsQuery = useQuery({
-    queryKey: ['enabled-models'],
-    queryFn: async () => requireServerSuccess(await getEnabledModels()),
+  const channelModelsQuery = useQuery({
+    queryKey: ['channel-models-all'],
+    queryFn: async () => requireServerSuccess(await getAllChannelModels()),
     enabled: isUnsetVariant,
   })
 
-  const enabledModelsError = isUnsetVariant
-    ? enabledModelsQuery.isError ||
-      (enabledModelsQuery.data !== undefined &&
-        !enabledModelsQuery.data.success)
+  const channelModelsError = isUnsetVariant
+    ? channelModelsQuery.isError ||
+      (channelModelsQuery.data !== undefined &&
+        !channelModelsQuery.data.success)
     : false
-  const enabledModelsErrorMessage = enabledModelsQuery.data?.message
+  const channelModelsErrorMessage = channelModelsQuery.data?.message
 
   useEffect(() => {
-    if (!enabledModelsError) return
+    if (!channelModelsError) return
     handleServerError(
-      enabledModelsQuery.error ?? enabledModelsQuery.data,
-      t('Failed to load enabled models')
+      channelModelsQuery.error ?? channelModelsQuery.data,
+      t('Failed to load channel models')
     )
   }, [
-    enabledModelsError,
-    enabledModelsErrorMessage,
-    enabledModelsQuery.error,
-    enabledModelsQuery.data,
+    channelModelsError,
+    channelModelsErrorMessage,
+    channelModelsQuery.error,
+    channelModelsQuery.data,
     t,
   ])
 
@@ -330,10 +330,10 @@ export const ModelRatioForm = memo(function ModelRatioForm({
               billingExpr={form.watch('BillingExpr')}
               pluginBillingExpr={form.watch('PluginBillingExpr')}
               candidateModelNames={
-                isUnsetVariant ? enabledModelsQuery.data?.data : undefined
+                isUnsetVariant ? channelModelsQuery.data?.data : undefined
               }
               candidateModelsLoading={
-                isUnsetVariant && enabledModelsQuery.isLoading
+                isUnsetVariant && channelModelsQuery.isLoading
               }
               filterMode={isUnsetVariant ? 'unset' : 'all'}
               onSave={handleSave}

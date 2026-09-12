@@ -339,9 +339,23 @@ func DashboardListModels(c *gin.Context) {
 }
 
 func EnabledListModels(c *gin.Context) {
+	if c.Query("all") == "true" {
+		c.JSON(200, gin.H{
+			"success": true,
+			"data":    model.GetAllChannelModels(),
+		})
+		return
+	}
 	c.JSON(200, gin.H{
 		"success": true,
 		"data":    model.GetEnabledModels(),
+	})
+}
+
+func AllChannelListModels(c *gin.Context) {
+	c.JSON(200, gin.H{
+		"success": true,
+		"data":    model.GetAllChannelModels(),
 	})
 }
 

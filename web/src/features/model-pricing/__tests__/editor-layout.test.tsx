@@ -320,7 +320,11 @@ it.each(['default', 'unset'] as const)(
     vi.spyOn(api, 'get').mockImplementation(async (url) => ({
       data: {
         success: true,
-        data: url === '/api/channel/models_enabled' ? ['example-model'] : [],
+        data:
+          url === '/api/channel/models_all' ||
+          url === '/api/channel/models_enabled'
+            ? ['example-model']
+            : [],
         vendors: [],
       },
     }))

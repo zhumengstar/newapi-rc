@@ -1676,3 +1676,32 @@ func CountChannelsGroupByType() (map[int64]int64, error) {
 	}
 	return counts, nil
 }
+
+// GetAllChannelModels returns distinct model names configured across all channels (both enabled and disabled) and abilities
+func GetAllChannelModels() []string {
+	channelModelSet := make(map[string]struct{})
+	var channelModelsList []string
+	_ = DB.Model(&Channel{}).Pluck("models", &channelModelsList).Error
+	for _, mList := range channelModelsList {
+		for _, m := range strings.Split(mList, ",") {
+			m = strings.TrimSpace(m)
+			if m != "" {
+				channelModelSet[m] = struct{}{}
+			}
+		}
+	}
+	var abilityModels []string
+	_ = DB.Table("abilities").Distinct("model").Pluck("model", &abilityModels).Error
+	for _, m := range abilityModels {
+		m = strings.TrimSpace(m)
+		if m != "" {
+			channelModelSet[m] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(channelModelSet))
+	for m := range channelModelSet {
+		result = append(result, m)
+	}
+	sort.Strings(result)
+	return result
+}
