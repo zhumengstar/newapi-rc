@@ -673,22 +673,24 @@ func buildDifferences(localData map[string]any, successfulChannels []struct {
 	}
 	successfulChannels = normalizedChannels
 
-	// 提取当前启用的渠道以及渠道能力中的所有模型名称白名单
+	// 提取当前所有渠道（包含已启用与未启用）以及能力中的所有模型名称白名单
 	channelModelSet := make(map[string]struct{})
-	for _, m := range model.GetEnabledModels() {
-		m = strings.TrimSpace(m)
-		if m != "" {
-			channelModelSet[m] = struct{}{}
-		}
-	}
 	var channelModelsList []string
-	_ = model.DB.Model(&model.Channel{}).Where("status = ?", common.ChannelStatusEnabled).Pluck("models", &channelModelsList).Error
+	_ = model.DB.Model(&model.Channel{}).Pluck("models", &channelModelsList).Error
 	for _, mList := range channelModelsList {
 		for _, m := range strings.Split(mList, ",") {
 			m = strings.TrimSpace(m)
 			if m != "" {
 				channelModelSet[m] = struct{}{}
 			}
+		}
+	}
+	var abilityModels []string
+	_ = model.DB.Table("abilities").Distinct("model").Pluck("model", &abilityModels).Error
+	for _, m := range abilityModels {
+		m = strings.TrimSpace(m)
+		if m != "" {
+			channelModelSet[m] = struct{}{}
 		}
 	}
 
