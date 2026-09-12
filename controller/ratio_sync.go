@@ -43,6 +43,16 @@ const (
 	modelsDevHost               = "models.dev"
 	modelsDevPath               = "/api.json"
 	modelsDevInputCostRatioBase = 1000.0
+
+	openRouterPresetID       = -103
+	openRouterPresetName     = "OpenRouter 官方价格预设"
+	openRouterPresetBaseURL  = "https://openrouter.ai"
+	openRouterPresetEndpoint = "https://openrouter.ai/api/v1/models"
+
+	liteLLMPresetID       = -104
+	liteLLMPresetName     = "LiteLLM 官方价格预设"
+	liteLLMPresetBaseURL  = "https://raw.githubusercontent.com"
+	liteLLMPresetEndpoint = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 )
 
 func nearlyEqual(a, b float64) bool {
@@ -294,12 +304,21 @@ func FetchUpstreamRatios(c *gin.Context) {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			isOpenRouter := chItem.Endpoint == "openrouter"
+			isOpenRouter := chItem.Endpoint == "openrouter" || chItem.ID == openRouterPresetID
+			isLiteLLM := chItem.ID == liteLLMPresetID
 
 			endpoint := chItem.Endpoint
 			var fullURL string
-			if isOpenRouter {
-				fullURL = chItem.BaseURL + "/v1/models"
+			if chItem.ID == openRouterPresetID {
+				fullURL = openRouterPresetEndpoint
+			} else if chItem.ID == liteLLMPresetID {
+				fullURL = liteLLMPresetEndpoint
+			} else if isOpenRouter {
+				if strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://") {
+					fullURL = endpoint
+				} else {
+					fullURL = chItem.BaseURL + "/v1/models"
+				}
 			} else if strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://") {
 				fullURL = endpoint
 			} else {
@@ -311,6 +330,12 @@ func FetchUpstreamRatios(c *gin.Context) {
 				fullURL = chItem.BaseURL + endpoint
 			}
 			isModelsDev := isModelsDevAPIEndpoint(fullURL)
+			if !isOpenRouter {
+				isOpenRouter = isOpenRouterAPIEndpoint(fullURL)
+			}
+			if !isLiteLLM {
+				isLiteLLM = isLiteLLMAPIEndpoint(fullURL)
+			}
 
 			uniqueName := chItem.Name
 			if chItem.ID != 0 {
@@ -327,26 +352,15 @@ func FetchUpstreamRatios(c *gin.Context) {
 				return
 			}
 
-			// OpenRouter requires Bearer token auth
-			if isOpenRouter && chItem.ID != 0 {
+			// OpenRouter channel auth: only set Authorization header if we have an explicit positive channel ID with API key
+			if isOpenRouter && chItem.ID > 0 {
 				dbCh, err := model.GetChannelById(chItem.ID, true)
-				if err != nil {
-					ch <- upstreamResult{Name: uniqueName, Err: "failed to get channel key: " + err.Error()}
-					return
+				if err == nil {
+					key, _, apiErr := dbCh.GetNextEnabledKey()
+					if apiErr == nil && strings.TrimSpace(key) != "" {
+						httpReq.Header.Set("Authorization", "Bearer "+strings.TrimSpace(key))
+					}
 				}
-				key, _, apiErr := dbCh.GetNextEnabledKey()
-				if apiErr != nil {
-					ch <- upstreamResult{Name: uniqueName, Err: "failed to get enabled channel key: " + apiErr.Error()}
-					return
-				}
-				if strings.TrimSpace(key) == "" {
-					ch <- upstreamResult{Name: uniqueName, Err: "no API key configured for this channel"}
-					return
-				}
-				httpReq.Header.Set("Authorization", "Bearer "+strings.TrimSpace(key))
-			} else if isOpenRouter {
-				ch <- upstreamResult{Name: uniqueName, Err: "OpenRouter requires a valid channel with API key"}
-				return
 			}
 
 			// 简单重试：最多 3 次，指数退避
@@ -360,7 +374,7 @@ func FetchUpstreamRatios(c *gin.Context) {
 				time.Sleep(time.Duration(200*(1<<attempt)) * time.Millisecond)
 			}
 			if lastErr != nil {
-				logger.LogWarn(c.Request.Context(), "http error on "+chItem.Name+": "+lastErr.Error())
+				logger.LogWarn(c.Request.Context(), "fetch failed from "+chItem.Name+": "+lastErr.Error())
 				ch <- upstreamResult{Name: uniqueName, Err: lastErr.Error()}
 				return
 			}
@@ -400,6 +414,18 @@ func FetchUpstreamRatios(c *gin.Context) {
 				converted, err := convertModelsDevToRatioData(bytes.NewReader(bodyBytes))
 				if err != nil {
 					logger.LogWarn(c.Request.Context(), "models.dev parse failed from "+chItem.Name+": "+err.Error())
+					ch <- upstreamResult{Name: uniqueName, Err: err.Error()}
+					return
+				}
+				ch <- upstreamResult{Name: uniqueName, Data: converted}
+				return
+			}
+
+			// type5: LiteLLM model_prices_and_context_window.json -> convert spec pricing to ratios
+			if isLiteLLM {
+				converted, err := convertLiteLLMToRatioData(bytes.NewReader(bodyBytes))
+				if err != nil {
+					logger.LogWarn(c.Request.Context(), "LiteLLM parse failed from "+chItem.Name+": "+err.Error())
 					ch <- upstreamResult{Name: uniqueName, Err: err.Error()}
 					return
 				}
@@ -834,6 +860,28 @@ func isModelsDevAPIEndpoint(rawURL string) bool {
 	return path == modelsDevPath
 }
 
+func isOpenRouterAPIEndpoint(rawURL string) bool {
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(parsedURL.Hostname())
+	if host != "openrouter.ai" && host != "www.openrouter.ai" {
+		return false
+	}
+	path := strings.TrimSuffix(parsedURL.Path, "/")
+	return path == "/api/v1/models" || path == "/v1/models"
+}
+
+func isLiteLLMAPIEndpoint(rawURL string) bool {
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	path := strings.ToLower(parsedURL.Path)
+	return strings.HasSuffix(path, "model_prices_and_context_window.json")
+}
+
 // convertOpenRouterToRatioData parses OpenRouter's /v1/models response and converts
 // per-token USD pricing into the local ratio format.
 // model_ratio = prompt_price_per_token * 1_000_000 * (USD / 1000)
@@ -910,6 +958,21 @@ func convertOpenRouterToRatioData(reader io.Reader) (map[string]any, error) {
 				cacheRatioMap[m.ID] = cacheRatio
 			}
 		}
+
+		// Also register normalized short name without namespace prefix (e.g. google/gemini-2.5-flash -> gemini-2.5-flash)
+		shortID := m.ID
+		if idx := strings.Index(shortID, "/"); idx != -1 {
+			shortID = shortID[idx+1:]
+		}
+		if shortID != "" && shortID != m.ID {
+			if _, exists := modelRatioMap[shortID]; !exists {
+				modelRatioMap[shortID] = ratio
+				completionRatioMap[shortID] = compRatio
+				if crVal, ok := cacheRatioMap[m.ID]; ok {
+					cacheRatioMap[shortID] = crVal
+				}
+			}
+		}
 	}
 
 	converted := make(map[string]any)
@@ -921,6 +984,82 @@ func convertOpenRouterToRatioData(reader io.Reader) (map[string]any, error) {
 	}
 	if len(cacheRatioMap) > 0 {
 		converted["cache_ratio"] = cacheRatioMap
+	}
+
+	return converted, nil
+}
+
+type litellmModelSpec struct {
+	InputCostPerToken       *float64 `json:"input_cost_per_token"`
+	OutputCostPerToken      *float64 `json:"output_cost_per_token"`
+	CacheReadInputTokenCost *float64 `json:"cache_read_input_token_cost"`
+	InputCostPerImage       *float64 `json:"input_cost_per_image"`
+	LitellmProvider         string   `json:"litellm_provider"`
+	Mode                    string   `json:"mode"`
+}
+
+func convertLiteLLMToRatioData(reader io.Reader) (map[string]any, error) {
+	var liteResp map[string]litellmModelSpec
+	if err := common.DecodeJson(reader, &liteResp); err != nil {
+		return nil, fmt.Errorf("failed to decode LiteLLM response: %w", err)
+	}
+
+	modelRatioMap := make(map[string]any)
+	completionRatioMap := make(map[string]any)
+	cacheRatioMap := make(map[string]any)
+	modelPriceMap := make(map[string]any)
+
+	addModel := func(name string, spec litellmModelSpec) {
+		name = strings.TrimSpace(name)
+		if name == "" || name == "sample_spec" {
+			return
+		}
+
+		if spec.InputCostPerToken != nil && *spec.InputCostPerToken > 0 {
+			promptPrice := *spec.InputCostPerToken
+			ratio := roundRatioValue(promptPrice * 1000 * ratio_setting.USD)
+			modelRatioMap[name] = ratio
+
+			if spec.OutputCostPerToken != nil && *spec.OutputCostPerToken >= 0 {
+				compRatio := roundRatioValue(*spec.OutputCostPerToken / promptPrice)
+				completionRatioMap[name] = compRatio
+			}
+			if spec.CacheReadInputTokenCost != nil && *spec.CacheReadInputTokenCost >= 0 {
+				cacheRatio := roundRatioValue(*spec.CacheReadInputTokenCost / promptPrice)
+				cacheRatioMap[name] = cacheRatio
+			}
+		} else if spec.InputCostPerImage != nil && *spec.InputCostPerImage > 0 {
+			modelPriceMap[name] = roundRatioValue(*spec.InputCostPerImage)
+		}
+	}
+
+	for mName, spec := range liteResp {
+		addModel(mName, spec)
+
+		// Also register normalized short name without namespace prefix (e.g. gemini/gemini-2.5-flash -> gemini-2.5-flash)
+		shortName := mName
+		if idx := strings.Index(shortName, "/"); idx != -1 {
+			shortName = shortName[idx+1:]
+		}
+		if shortName != "" && shortName != mName {
+			if _, exists := modelRatioMap[shortName]; !exists {
+				addModel(shortName, spec)
+			}
+		}
+	}
+
+	converted := make(map[string]any)
+	if len(modelRatioMap) > 0 {
+		converted["model_ratio"] = modelRatioMap
+	}
+	if len(completionRatioMap) > 0 {
+		converted["completion_ratio"] = completionRatioMap
+	}
+	if len(cacheRatioMap) > 0 {
+		converted["cache_ratio"] = cacheRatioMap
+	}
+	if len(modelPriceMap) > 0 {
+		converted["model_price"] = modelPriceMap
 	}
 
 	return converted, nil
@@ -1138,6 +1277,20 @@ func GetSyncableChannels(c *gin.Context) {
 		ID:      modelsDevPresetID,
 		Name:    modelsDevPresetName,
 		BaseURL: modelsDevPresetBaseURL,
+		Status:  1,
+	})
+
+	syncableChannels = append(syncableChannels, dto.SyncableChannel{
+		ID:      openRouterPresetID,
+		Name:    openRouterPresetName,
+		BaseURL: openRouterPresetBaseURL,
+		Status:  1,
+	})
+
+	syncableChannels = append(syncableChannels, dto.SyncableChannel{
+		ID:      liteLLMPresetID,
+		Name:    liteLLMPresetName,
+		BaseURL: liteLLMPresetBaseURL,
 		Status:  1,
 	})
 

@@ -42,6 +42,17 @@ export const MODELS_DEV_PRESET_NAME = 'models.dev 价格预设'
 export const MODELS_DEV_PRESET_BASE_URL = 'https://models.dev'
 export const MODELS_DEV_PRESET_ENDPOINT = 'https://models.dev/api.json'
 
+export const OPENROUTER_PRESET_ID = -103
+export const OPENROUTER_PRESET_NAME = 'OpenRouter 官方价格预设'
+export const OPENROUTER_PRESET_BASE_URL = 'https://openrouter.ai'
+export const OPENROUTER_PRESET_ENDPOINT = 'https://openrouter.ai/api/v1/models'
+
+export const LITELLM_PRESET_ID = -104
+export const LITELLM_PRESET_NAME = 'LiteLLM 官方价格预设'
+export const LITELLM_PRESET_BASE_URL = 'https://raw.githubusercontent.com'
+export const LITELLM_PRESET_ENDPOINT =
+  'https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json'
+
 export const OPENROUTER_ENDPOINT = 'openrouter'
 
 // Backend channel type for OpenRouter (see constant/channel.go: ChannelTypeOpenRouter = 20)

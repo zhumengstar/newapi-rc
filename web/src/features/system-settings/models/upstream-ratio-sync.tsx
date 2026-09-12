@@ -59,6 +59,10 @@ import {
   OFFICIAL_CHANNEL_ID,
   OPENROUTER_CHANNEL_TYPE,
   OPENROUTER_ENDPOINT,
+  OPENROUTER_PRESET_ENDPOINT,
+  OPENROUTER_PRESET_ID,
+  LITELLM_PRESET_ENDPOINT,
+  LITELLM_PRESET_ID,
 } from './constants'
 import {
   describeSyncPrice,
@@ -71,6 +75,8 @@ import { UpstreamRatioSyncTable } from './upstream-ratio-sync-table'
 function getDefaultEndpointForChannel(channel: UpstreamChannel): string {
   if (channel.id === MODELS_DEV_PRESET_ID) return MODELS_DEV_PRESET_ENDPOINT
   if (channel.id === OFFICIAL_CHANNEL_ID) return OFFICIAL_CHANNEL_ENDPOINT
+  if (channel.id === OPENROUTER_PRESET_ID) return OPENROUTER_PRESET_ENDPOINT
+  if (channel.id === LITELLM_PRESET_ID) return LITELLM_PRESET_ENDPOINT
   if (channel.type === OPENROUTER_CHANNEL_TYPE) return OPENROUTER_ENDPOINT
   return DEFAULT_ENDPOINT
 }

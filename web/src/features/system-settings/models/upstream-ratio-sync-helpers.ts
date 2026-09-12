@@ -27,6 +27,10 @@ import {
   OFFICIAL_CHANNEL_NAME,
   MODELS_DEV_PRESET_ID,
   MODELS_DEV_PRESET_NAME,
+  OPENROUTER_PRESET_ID,
+  OPENROUTER_PRESET_NAME,
+  LITELLM_PRESET_ID,
+  LITELLM_PRESET_NAME,
 } from './constants'
 import { formatPricingNumber } from './pricing-format'
 
@@ -48,6 +52,18 @@ export function getUpstreamDisplayName(
     sourceName === `${MODELS_DEV_PRESET_NAME}(${MODELS_DEV_PRESET_ID})`
   ) {
     return t('models.dev pricing preset')
+  }
+  if (
+    sourceName === OPENROUTER_PRESET_NAME ||
+    sourceName === `${OPENROUTER_PRESET_NAME}(${OPENROUTER_PRESET_ID})`
+  ) {
+    return t('OpenRouter pricing preset')
+  }
+  if (
+    sourceName === LITELLM_PRESET_NAME ||
+    sourceName === `${LITELLM_PRESET_NAME}(${LITELLM_PRESET_ID})`
+  ) {
+    return t('LiteLLM pricing preset')
   }
   return sourceName
 }
