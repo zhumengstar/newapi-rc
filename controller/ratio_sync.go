@@ -673,18 +673,57 @@ func buildDifferences(localData map[string]any, successfulChannels []struct {
 	}
 	successfulChannels = normalizedChannels
 
-	allModels := make(map[string]struct{})
-
-	for _, field := range pricingSyncFields {
-		for modelName := range valueMap(localData[field]) {
-			allModels[modelName] = struct{}{}
+	// 提取当前启用的渠道以及渠道能力中的所有模型名称白名单
+	channelModelSet := make(map[string]struct{})
+	for _, m := range model.GetEnabledModels() {
+		m = strings.TrimSpace(m)
+		if m != "" {
+			channelModelSet[m] = struct{}{}
+		}
+	}
+	var channelModelsList []string
+	_ = model.DB.Model(&model.Channel{}).Where("status = ?", common.ChannelStatusEnabled).Pluck("models", &channelModelsList).Error
+	for _, mList := range channelModelsList {
+		for _, m := range strings.Split(mList, ",") {
+			m = strings.TrimSpace(m)
+			if m != "" {
+				channelModelSet[m] = struct{}{}
+			}
 		}
 	}
 
-	for _, channel := range successfulChannels {
+	allModels := make(map[string]struct{})
+
+	if len(channelModelSet) > 0 {
 		for _, field := range pricingSyncFields {
-			for modelName := range valueMap(channel.data[field]) {
+			for modelName := range valueMap(localData[field]) {
+				if _, ok := channelModelSet[modelName]; ok {
+					allModels[modelName] = struct{}{}
+				}
+			}
+		}
+
+		for _, channel := range successfulChannels {
+			for _, field := range pricingSyncFields {
+				for modelName := range valueMap(channel.data[field]) {
+					if _, ok := channelModelSet[modelName]; ok {
+						allModels[modelName] = struct{}{}
+					}
+				}
+			}
+		}
+	} else {
+		for _, field := range pricingSyncFields {
+			for modelName := range valueMap(localData[field]) {
 				allModels[modelName] = struct{}{}
+			}
+		}
+
+		for _, channel := range successfulChannels {
+			for _, field := range pricingSyncFields {
+				for modelName := range valueMap(channel.data[field]) {
+					allModels[modelName] = struct{}{}
+				}
 			}
 		}
 	}
