@@ -71,7 +71,7 @@ func InitChannelCache() {
 	for group, model2channels := range newGroup2model2channels {
 		for model, channels := range model2channels {
 			sort.Slice(channels, func(i, j int) bool {
-				return newChannelId2channel[channels[i]].GetPriority() > newChannelId2channel[channels[j]].GetPriority()
+				return newChannelId2channel[channels[i]].GetRoutingPriority() > newChannelId2channel[channels[j]].GetRoutingPriority()
 			})
 			newGroup2model2channels[group][model] = channels
 		}
@@ -164,7 +164,7 @@ func GetRandomSatisfiedChannelExcluding(
 	uniquePriorities := make(map[int]bool)
 	for _, channelId := range channels {
 		if channel, ok := channelsIDM[channelId]; ok {
-			uniquePriorities[int(channel.GetPriority())] = true
+			uniquePriorities[int(channel.GetRoutingPriority())] = true
 		} else {
 			return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channelId)
 		}
@@ -185,7 +185,7 @@ func GetRandomSatisfiedChannelExcluding(
 	var targetChannels []*Channel
 	for _, channelId := range channels {
 		if channel, ok := channelsIDM[channelId]; ok {
-			if channel.GetPriority() == targetPriority {
+			if channel.GetRoutingPriority() == targetPriority {
 				sumWeight += channel.GetWeight()
 				targetChannels = append(targetChannels, channel)
 			}
@@ -210,29 +210,21 @@ func GetRandomSatisfiedChannelExcluding(
 		return targetChannels[0], nil
 	}
 
-	// smoothing factor and adjustment
-	smoothingFactor := 1
-	smoothingAdjustment := 0
-
-	if sumWeight == 0 {
-		// when all channels have weight 0, set sumWeight to the number of channels and set smoothing adjustment to 100
-		// each channel's effective weight = 100
-		sumWeight = len(targetChannels) * 100
-		smoothingAdjustment = 100
-	} else if sumWeight/len(targetChannels) < 10 {
-		// when the average weight is less than 10, set smoothing factor to 100
-		smoothingFactor = 100
+	allZeroWeights := sumWeight == 0
+	if allZeroWeights {
+		// All-zero weights retain the historical equal-share behavior.
+		sumWeight = len(targetChannels)
 	}
 
-	// Calculate the total weight of all channels up to endIdx
-	totalWeight := sumWeight * smoothingFactor
-
-	// Generate a random value in the range [0, totalWeight)
-	randomWeight := rand.Intn(totalWeight)
+	randomWeight := rand.Intn(sumWeight)
 
 	// Find a channel based on its weight
 	for _, channel := range targetChannels {
-		randomWeight -= channel.GetWeight()*smoothingFactor + smoothingAdjustment
+		weight := channel.GetWeight()
+		if allZeroWeights {
+			weight = 1
+		}
+		randomWeight -= weight
 		if randomWeight < 0 {
 			return channel, nil
 		}

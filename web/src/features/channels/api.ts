@@ -25,6 +25,8 @@ import type {
   BatchSetTagParams,
   Channel,
   ChannelBalanceResponse,
+  ChannelControlPolicy,
+  ChannelControlPolicyInput,
   ChannelOpsResponse,
   ChannelTestResponse,
   CopyChannelParams,
@@ -66,6 +68,30 @@ export type CodexUsageResponse = {
 }
 
 export type CodexResetCreditsResponse = CodexUsageResponse
+
+export type ChannelSiteType = 'newapi' | 'sub2api' | 'unknown'
+
+export interface ChannelSiteTypeDetectionItem {
+  id: number
+  name: string
+  type: ChannelSiteType
+  confidence: string
+  evidence: string[]
+}
+
+export async function detectAllChannelTypes(
+  ids?: number[],
+  force = false
+): Promise<ChannelSiteTypeDetectionItem[]> {
+  const res = await api.post<{
+    success: boolean
+    data?: ChannelSiteTypeDetectionItem[]
+  }>('/api/channel/detect_type_all', {
+    ...(ids?.length ? { ids } : {}),
+    ...(force ? { force: true } : {}),
+  })
+  return res.data.data || []
+}
 
 export type CodexUsageResetResponse = CodexUsageResponse
 
@@ -144,6 +170,41 @@ export async function updateChannel(
   const res = await api.put(
     '/api/channel/',
     { id, ...data },
+    channelActionConfig()
+  )
+  return res.data
+}
+
+export async function updateChannelGroupAdaptiveEnabled(
+  group: string,
+  adaptiveEnabled: boolean
+): Promise<{ success: boolean; message?: string; data?: number }> {
+  const res = await api.put(
+    '/api/channel/group/adaptive',
+    { group, adaptive_enabled: adaptiveEnabled },
+    channelActionConfig()
+  )
+  return res.data
+}
+
+export async function updateChannelGroupPriorityOrder(
+  groups: string[]
+): Promise<{ success: boolean; message?: string; data?: number }> {
+  const res = await api.put(
+    '/api/channel/group/priority-order',
+    { groups },
+    channelActionConfig()
+  )
+  return res.data
+}
+
+export async function updateChannelAdaptiveEnabled(
+  id: number,
+  adaptiveEnabled: boolean
+): Promise<{ success: boolean; message?: string; data?: boolean }> {
+  const res = await api.put(
+    `/api/channel/${id}/adaptive`,
+    { adaptive_enabled: adaptiveEnabled },
     channelActionConfig()
   )
   return res.data
@@ -239,6 +300,60 @@ export async function updateChannelBalance(
 ): Promise<ChannelBalanceResponse> {
   const res = await api.get(
     `/api/channel/update_balance/${id}`,
+    channelActionConfig()
+  )
+  return res.data
+}
+
+export async function getChannelBalanceSettings(id: number): Promise<{
+  success: boolean
+  message?: string
+  data?: {
+    username: string
+    password: string
+    access_token: string
+    access_token_configured: boolean
+    login_configured: boolean
+    mode: 'auto' | 'manual'
+  }
+}> {
+  const res = await api.get(
+    `/api/channel/${id}/balance_settings`,
+    channelActionConfig()
+  )
+  return res.data
+}
+
+export async function updateChannelBalanceSettings(
+  id: number,
+  data: {
+    access_token?: string
+    username?: string
+    password?: string
+    mode?: 'auto' | 'manual'
+  }
+): Promise<{ success: boolean; message?: string }> {
+  const res = await api.put(
+    `/api/channel/${id}/balance_settings`,
+    data,
+    channelActionConfig()
+  )
+  return res.data
+}
+
+export async function setChannelBalance(
+  id: number,
+  balance: number,
+  mode: 'auto' | 'manual' = 'manual'
+): Promise<{
+  success: boolean
+  message?: string
+  balance?: number
+  mode?: string
+}> {
+  const res = await api.put(
+    `/api/channel/${id}/balance`,
+    { balance, mode },
     channelActionConfig()
   )
   return res.data
@@ -579,7 +694,7 @@ export async function testAllChannels(): Promise<{
 }
 
 /**
- * Update balance for all enabled channels
+ * Start a background balance refresh for all eligible channels
  */
 export async function updateAllChannelsBalance(): Promise<{
   success: boolean
@@ -635,9 +750,48 @@ export async function getOllamaVersion(
 // ============================================================================
 
 /**
- * Get all available groups (re-exported from users API for convenience)
+ * Get user-configured groups for channel editing.
  */
 export const getGroups = getUserGroups
+
+export async function getChannelControlPolicies(): Promise<
+  ChannelControlPolicy[]
+> {
+  const res = await api.get<{ success: boolean; data: ChannelControlPolicy[] }>(
+    '/api/channel/control_policies'
+  )
+  return res.data.data
+}
+
+export async function upsertChannelControlPolicy(
+  policy: ChannelControlPolicyInput
+): Promise<ChannelControlPolicy> {
+  const res = await api.put<{ success: boolean; data: ChannelControlPolicy }>(
+    '/api/channel/control_policies',
+    policy,
+    channelActionConfig()
+  )
+  return res.data.data
+}
+
+export async function deleteChannelControlPolicy(group: string): Promise<void> {
+  await api.delete(
+    `/api/channel/control_policies/${encodeURIComponent(group)}`,
+    channelActionConfig()
+  )
+}
+
+/**
+ * Get the groups currently assigned to channels for the list filter.
+ */
+export async function getChannelGroups(): Promise<{
+  success: boolean
+  message?: string
+  data: string[]
+}> {
+  const res = await api.get('/api/channel/groups')
+  return res.data
+}
 
 // ============================================================================
 // Prefill Groups (Model Groups)

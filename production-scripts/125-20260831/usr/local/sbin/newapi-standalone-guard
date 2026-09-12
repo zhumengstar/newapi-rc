@@ -1,0 +1,35 @@
+#!/bin/sh
+set -eu
+
+container='new-api-standalone'
+maintenance_lock='/run/newapi-standalone-maintenance.lock'
+log='/var/log/newapi-standalone-guard.log'
+
+timestamp() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
+record() { printf '%s %s\n' "$(timestamp)" "$*" >> "$log"; }
+
+[ -e "$maintenance_lock" ] && exit 0
+
+status="$(docker inspect -f '{{.State.Status}}' "$container" 2>/dev/null || printf 'missing')"
+restart_policy="$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$container" 2>/dev/null || printf 'missing')"
+
+if [ "$restart_policy" != 'unless-stopped' ]; then
+  docker update --restart=unless-stopped "$container" >/dev/null
+  record "restored_restart_policy previous=$restart_policy current=unless-stopped"
+fi
+
+case "$status" in
+  running) exit 0 ;;
+  exited|created|dead)
+    docker start "$container" >/dev/null
+    record "started_container previous=$status exit=$(docker inspect -f '{{.State.ExitCode}}' "$container" 2>/dev/null || printf 'unknown')"
+    ;;
+  missing)
+    record 'container_missing action=none'
+    exit 1
+    ;;
+  *)
+    record "unexpected_status status=$status action=none"
+    exit 1
+    ;;
+esac

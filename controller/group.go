@@ -3,6 +3,7 @@ package controller
 import (
 	"net/http"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting"
@@ -10,6 +11,15 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+func GetChannelGroups(c *gin.Context) {
+	groups, err := model.GetChannelGroups()
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, groups)
+}
 
 func GetGroups(c *gin.Context) {
 	groupNames := make([]string, 0)
@@ -29,11 +39,12 @@ func GetUserGroups(c *gin.Context) {
 	userId := c.GetInt("id")
 	userGroup, _ = model.GetUserGroup(userId, false)
 	userUsableGroups := service.GetUserUsableGroups(userGroup)
+	userSetting, _ := model.GetUserSetting(userId, false)
 	for groupName, _ := range ratio_setting.GetGroupRatioCopy() {
 		// UserUsableGroups contains the groups that the user can use
 		if desc, ok := userUsableGroups[groupName]; ok {
 			usableGroups[groupName] = map[string]interface{}{
-				"ratio": service.GetUserGroupRatio(userGroup, groupName),
+				"ratio": service.GetUserGroupRatioWithSetting(userSetting, userGroup, groupName),
 				"desc":  desc,
 			}
 		}

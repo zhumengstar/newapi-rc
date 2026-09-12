@@ -64,6 +64,24 @@ func ShouldDisableChannel(err *types.NewAPIError) bool {
 	return search
 }
 
+// IsFastCircuitError identifies failures that should not consume the rolling
+// threshold: credentials and explicit quota/auth failures are deterministic.
+func IsFastCircuitError(err *types.NewAPIError) bool {
+	if err == nil {
+		return false
+	}
+	if err.GetErrorCode() == types.ErrorCodeChannelInvalidKey || err.StatusCode == 401 || err.StatusCode == 402 {
+		return true
+	}
+	lower := strings.ToLower(err.Error())
+	for _, marker := range []string{"invalid api key", "invalid token", "authentication failed", "unauthorized", "insufficient quota", "insufficient balance", "余额不足", "额度不足"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func ShouldEnableChannel(newAPIError *types.NewAPIError, status int) bool {
 	if !common.AutomaticEnableChannelEnabled {
 		return false

@@ -1,0 +1,20 @@
+[Unit]
+Description=Control NewAPI banana group weights and periodic recovery
+After=docker.service
+Requires=docker.service
+ConditionPathExists=/var/run/docker.sock
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/newapi-banana-groups-controller
+User=root
+Group=root
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+StateDirectory=newapi-banana-groups-controller
+ReadWritePaths=/var/lib/newapi-banana-groups-controller /var/lib/newapi-banana-weight-controller /var/lib/newapi-big-banana-weight-controller /var/lib/newapi-banana-channel-recovery /var/lib/newapi-big-banana-channel-recovery /var/log /run

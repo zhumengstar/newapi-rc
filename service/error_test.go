@@ -8,12 +8,21 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
+
+func TestParseRetryAfter(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	require.Equal(t, 3*time.Second, parseRetryAfter("3", now))
+	require.Equal(t, 30*time.Second, parseRetryAfter("600", now))
+	require.Equal(t, 5*time.Second, parseRetryAfter(now.Add(5*time.Second).Format(http.TimeFormat), now))
+	require.Zero(t, parseRetryAfter("invalid", now))
+}
 
 func TestResetStatusCode(t *testing.T) {
 	t.Parallel()

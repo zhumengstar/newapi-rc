@@ -23,11 +23,12 @@ import {
   AlertTriangle,
   ChevronDown,
   ChevronRight,
+  ExternalLink,
   ListOrdered,
   Shuffle,
   SlidersHorizontal,
 } from 'lucide-react'
-import { useState, useMemo, useContext, useEffect } from 'react'
+import { useState, useMemo, useContext, useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
@@ -40,12 +41,14 @@ import { TableId } from '@/components/table-id'
 import { TruncatedText } from '@/components/truncated-text'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
+import { Switch } from '@/components/ui/switch'
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
+import { usePricingData } from '@/features/pricing/hooks'
 import { toIntlLocale } from '@/i18n/languages'
 import {
   formatCurrencyFromUSD,
@@ -55,18 +58,29 @@ import {
 import { formatTimestampToDate } from '@/lib/format'
 import { truncateText } from '@/lib/utils'
 
-import { getCodexUsage, updateChannelBalance } from '../api'
-import { CHANNEL_STATUS_CONFIG, MODEL_FETCHABLE_TYPES } from '../constants'
+import {
+  getCodexUsage,
+  updateChannelAdaptiveEnabled,
+  updateChannel,
+} from '../api'
+import {
+  CHANNEL_SITE_TYPE_OPTIONS,
+  CHANNEL_STATUS_CONFIG,
+  MODEL_FETCHABLE_TYPES,
+} from '../constants'
 import {
   formatRelativeTime,
   formatResponseTime,
   getBalanceVariant,
   getChannelTypeIcon,
   getChannelTypeLabel,
+  getChannelSiteTypeLabel,
+  getDetectedChannelSiteTypeLabel,
   getResponseTimeConfig,
   isMultiKeyChannel,
   parseModelsList,
   parseGroupsList,
+  sortGroupsByRatio,
   parseChannelSettings,
   channelsQueryKeys,
   handleUpdateChannelField,
@@ -81,7 +95,6 @@ import { ChannelRowActionsLayoutContext } from './channel-row-actions-context'
 import { useChannels } from './channels-provider'
 import { DataTableRowActions } from './data-table-row-actions'
 import { DataTableTagRowActions } from './data-table-tag-row-actions'
-import { BalanceQueryDialog } from './dialogs/balance-query-dialog'
 import {
   CodexUsageDialog,
   type CodexUsageDialogData,
@@ -104,6 +117,99 @@ function parseIonetMeta(otherInfo: string | null | undefined): null | {
     return null
   }
   return null
+}
+
+function AdaptiveRoutingCell({ channel }: { channel: Channel }) {
+  const { t } = useTranslation()
+  const queryClient = useQueryClient()
+  const [isSaving, setIsSaving] = useState(false)
+
+  if (isTagAggregateRow(channel)) {
+    return <span className='text-muted-foreground text-xs'>-</span>
+  }
+
+  const evaluatedAt = channel.adaptive_last_evaluated_at
+    ? formatTimestampToDate(channel.adaptive_last_evaluated_at)
+    : t('Never')
+  const appliedAt = channel.adaptive_last_applied_at
+    ? formatTimestampToDate(channel.adaptive_last_applied_at)
+    : t('Never')
+  const rawReason = channel.adaptive_last_reason?.trim() || ''
+  const reason = rawReason
+    ? rawReason
+        .split(';')
+        .map((item) => {
+          const marker = 'contains non-adaptive channel'
+          if (item.includes(marker)) {
+            return t('Adaptive routing blocked by non-adaptive channels')
+          }
+          return item.trim()
+        })
+        .filter(Boolean)
+        .filter((item, index, items) => items.indexOf(item) === index)
+        .join('; ')
+    : t('No update')
+
+  const handleChange = async (enabled: boolean) => {
+    if (enabled === channel.adaptive_enabled || isSaving) return
+    setIsSaving(true)
+    try {
+      const response = await updateChannelAdaptiveEnabled(channel.id, enabled)
+      if (!response.success) {
+        throw new Error(response.message || t('Failed to update channel'))
+      }
+      toast.success(t('Channel updated successfully'))
+      await queryClient.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : t('Failed to update channel')
+      )
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <span
+              className='inline-flex items-center'
+              onClick={(event) => event.stopPropagation()}
+              onPointerDown={(event) => event.stopPropagation()}
+            >
+              <Switch
+                size='sm'
+                checked={channel.adaptive_enabled}
+                disabled={isSaving}
+                aria-label={t('Adaptive routing')}
+                onCheckedChange={(checked) => void handleChange(!!checked)}
+              />
+            </span>
+          }
+        />
+        <TooltipContent side='top' className='max-w-sm'>
+          <div className='space-y-1 text-xs'>
+            <p>
+              {channel.adaptive_enabled ? t('Enabled') : t('Disabled')}
+            </p>
+            {channel.adaptive_enabled && (
+              <>
+                <p>
+                  {t('Last Evaluated')}: {evaluatedAt}
+                </p>
+                <p>
+                  {t('Last Applied')}: {appliedAt}
+                </p>
+                <p className='break-words'>{reason}</p>
+              </>
+            )}
+          </div>
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
 }
 
 /**
@@ -235,7 +341,7 @@ function ChannelFieldCell({
 }: {
   channelId: number
   value: number | null | undefined
-  field: 'priority' | 'weight'
+  field: 'priority' | 'weight' | 'name'
   min: number
 }) {
   const queryClient = useQueryClient()
@@ -256,6 +362,238 @@ function ChannelFieldCell({
       onCommit={fieldUpdateScheduler.flush}
       min={min}
     />
+  )
+}
+
+function ContactCell({ channel }: { channel: Channel }) {
+  const { t } = useTranslation()
+  const queryClient = useQueryClient()
+  const [editing, setEditing] = useState(false)
+  const [value, setValue] = useState(channel.contact)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    setValue(channel.contact)
+  }, [channel.contact])
+
+  const commit = () => {
+    const nextContact = value.trim()
+    setEditing(false)
+    if (nextContact === channel.contact) return
+    void handleUpdateChannelField(
+      channel.id,
+      'contact',
+      nextContact,
+      queryClient
+    )
+  }
+
+  if (editing) {
+    return (
+      <input
+        ref={inputRef}
+        aria-label={t('Contact')}
+        className='border-input bg-background focus-visible:border-ring focus-visible:ring-ring/30 h-7 w-full rounded-md border px-2 text-xs outline-none focus-visible:ring-2'
+        value={value}
+        onChange={(event) => setValue(event.target.value)}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') commit()
+          if (event.key === 'Escape') {
+            setValue(channel.contact)
+            setEditing(false)
+          }
+        }}
+        autoFocus
+      />
+    )
+  }
+
+  return (
+    <button
+      type='button'
+      className='hover:bg-muted focus-visible:border-ring focus-visible:ring-ring/30 flex h-7 w-full min-w-0 items-center rounded-md px-2 text-left text-xs transition-colors outline-none focus-visible:ring-2'
+      onClick={() => {
+        setEditing(true)
+        requestAnimationFrame(() => inputRef.current?.focus())
+      }}
+      title={t('Edit contact')}
+    >
+      <span className='truncate'>
+        {value || <span className='text-muted-foreground'>-</span>}
+      </span>
+    </button>
+  )
+}
+
+export function NameCell({
+  channel,
+  sensitiveVisible,
+}: {
+  channel: Channel
+  sensitiveVisible: boolean
+}) {
+  const { t } = useTranslation()
+  const queryClient = useQueryClient()
+  const [editing, setEditing] = useState(false)
+  const [value, setValue] = useState(channel.name)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    setValue(channel.name)
+  }, [channel.name])
+
+  const commit = () => {
+    const nextName = value.trim()
+    setEditing(false)
+    if (!nextName || nextName === channel.name) {
+      setValue(channel.name)
+      return
+    }
+    void handleUpdateChannelField(channel.id, 'name', nextName, queryClient)
+  }
+
+  if (!sensitiveVisible) {
+    return (
+      <TruncatedText
+        text={SENSITIVE_MASK}
+        className='font-medium'
+        maxWidth='max-w-full'
+      />
+    )
+  }
+
+  if (editing) {
+    return (
+      <input
+        ref={inputRef}
+        aria-label={t('Name')}
+        className='bg-background h-8 w-full rounded border px-2 text-sm'
+        value={value}
+        onChange={(event) => setValue(event.target.value)}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') commit()
+          if (event.key === 'Escape') {
+            setValue(channel.name)
+            setEditing(false)
+          }
+        }}
+        autoFocus
+      />
+    )
+  }
+
+  const siteURL = channel.base_url?.trim()
+  const canOpenSite = Boolean(siteURL && /^https?:\/\//i.test(siteURL))
+
+  return (
+    <div className='flex min-w-0 items-center gap-1'>
+      <button
+        type='button'
+        aria-label={`${t('Edit')} ${t('Name')}`}
+        className='hover:bg-muted/50 min-w-0 flex-1 rounded px-1 py-1 text-left'
+        onClick={() => {
+          setEditing(true)
+          requestAnimationFrame(() => inputRef.current?.focus())
+        }}
+        title={`${t('Edit')} ${t('Name')}`}
+      >
+        <TruncatedText
+          text={value}
+          className='font-medium'
+          maxWidth='max-w-full'
+        />
+      </button>
+      {canOpenSite && (
+        <TooltipProvider delay={100}>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  variant='ghost'
+                  size='icon'
+                  className='h-6 w-6 shrink-0'
+                  aria-label={t('Open')}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    window.open(siteURL, '_blank', 'noopener,noreferrer')
+                  }}
+                >
+                  <ExternalLink className='h-3.5 w-3.5' />
+                </Button>
+              }
+            />
+            <TooltipContent side='top'>{t('Open')}</TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      )}
+    </div>
+  )
+}
+
+export function SiteTypeCell({ channel }: { channel: Channel }) {
+  const { t } = useTranslation()
+  const queryClient = useQueryClient()
+  const [editing, setEditing] = useState(false)
+  const selectRef = useRef<HTMLSelectElement>(null)
+  const configuredOption = CHANNEL_SITE_TYPE_OPTIONS.find(
+    (option) => option.value === (channel.site_type || '')
+  )
+  const siteTypeLabel = channel.site_type
+    ? t(configuredOption?.label || 'Unknown')
+    : getChannelSiteTypeLabel(channel.type) || t('Auto detect (default)')
+
+  if (editing) {
+    return (
+      <select
+        ref={selectRef}
+        aria-label={t('Site Type')}
+        className='border-input bg-background focus-visible:border-ring focus-visible:ring-ring/30 h-7 w-full min-w-0 rounded-md border px-2 text-xs outline-none focus-visible:ring-2'
+        value={channel.site_type || ''}
+        onBlur={() => setEditing(false)}
+        onChange={(event) => {
+          setEditing(false)
+          void handleUpdateChannelField(
+            channel.id,
+            'site_type',
+            event.target.value || null,
+            queryClient
+          )
+        }}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape') {
+            setEditing(false)
+          }
+        }}
+        autoFocus
+      >
+        {CHANNEL_SITE_TYPE_OPTIONS.map((option) => (
+          <option key={option.value} value={option.value}>
+            {t(option.label)}
+          </option>
+        ))}
+      </select>
+    )
+  }
+
+  return (
+    <button
+      type='button'
+      aria-label={`${t('Edit')} ${t('Site Type')}`}
+      className='border-input bg-muted/40 hover:bg-muted focus-visible:border-ring focus-visible:ring-ring/30 inline-flex h-7 w-full min-w-0 items-center gap-1 rounded-md border px-2 text-xs font-medium transition-colors outline-none focus-visible:ring-2'
+      onClick={() => {
+        setEditing(true)
+        requestAnimationFrame(() => selectRef.current?.focus())
+      }}
+      title={`${t('Edit')} ${t('Site Type')}`}
+    >
+      <span className='truncate'>{siteTypeLabel}</span>
+      <ChevronDown
+        className='text-muted-foreground size-3 shrink-0'
+        aria-hidden
+      />
+    </button>
   )
 }
 
@@ -324,20 +662,75 @@ const MAX_INLINE_BALANCE_CHARS = 8
 const SENSITIVE_MASK = '••••'
 
 /**
- * Balance cell component with click to update
+ * Used quota is independent from the site balance, so it keeps its own column
+ * after splitting the former combined balance cell.
  */
-export function BalanceCell({ channel }: { channel: Channel }) {
+export function UsedQuotaCell({ channel }: { channel: Channel }) {
   const { t, i18n } = useTranslation()
-  const queryClient = useQueryClient()
   const layout = useContext(ChannelRowActionsLayoutContext)
-  const { sensitiveVisible, setCurrentRow } = useChannels()
+  const { sensitiveVisible } = useChannels()
+  const usedQuota = channel.used_quota || 0
+  const currencyLabel = getCurrencyLabel()
+  const tokenSuffix = currencyLabel === 'Tokens' ? ' Tokens' : ''
+  const withSuffix = (value: string) =>
+    tokenSuffix && value !== '-' ? `${value}${tokenSuffix}` : value
+  const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
+  const usedFull = withSuffix(
+    formatQuotaWithCurrency(usedQuota, {
+      digitsLarge: 2,
+      digitsSmall: 4,
+      abbreviate: true,
+      showSymbol: layout !== 'card',
+    })
+  )
+  const usedDisplay =
+    usedFull.length > MAX_INLINE_BALANCE_CHARS
+      ? withSuffix(
+          formatQuotaWithCurrency(usedQuota, {
+            compact: true,
+            locale,
+            showSymbol: layout !== 'card',
+          })
+        )
+      : usedFull
+  const usedLabel = `${t('Used:')} ${usedFull}`
+  const maskedUsedLabel = `${t('Used:')} ${SENSITIVE_MASK}`
+
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <StatusBadge
+              label={sensitiveVisible ? usedDisplay : SENSITIVE_MASK}
+              variant='neutral'
+              size='sm'
+              copyable={false}
+              showDot={false}
+              className='-ml-1.5 cursor-help'
+            />
+          }
+        />
+        <TooltipContent>
+          <p>{sensitiveVisible ? usedLabel : maskedUsedLabel}</p>
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
+
+/**
+ * Site balance remains an explicit, on-demand query. It is not inferred from
+ * quota usage or the upstream model ratio snapshot.
+ */
+export function SiteBalanceCell({ channel }: { channel: Channel }) {
+  const { t, i18n } = useTranslation()
+  const layout = useContext(ChannelRowActionsLayoutContext)
+  const { sensitiveVisible, setCurrentRow, setOpen } = useChannels()
   const isTagRow = isTagAggregateRow(channel)
   const balance = channel.balance || 0
-  const usedQuota = channel.used_quota || 0
+  const hasSiteBalance = channel.balance_updated_time > 0
   const [isUpdating, setIsUpdating] = useState(false)
-  const [rawBalanceResponse, setRawBalanceResponse] = useState<string | null>(
-    null
-  )
   const [codexUsageOpen, setCodexUsageOpen] = useState(false)
   const [codexUsageResponse, setCodexUsageResponse] =
     useState<CodexUsageDialogData | null>(null)
@@ -353,28 +746,9 @@ export function BalanceCell({ channel }: { channel: Channel }) {
     abbreviate: false,
     showSymbol: layout !== 'card',
   } as const
-  // Precise values are kept for the tooltip; long values are shown compactly inline.
-  const usedFull = withSuffix(
-    formatQuotaWithCurrency(usedQuota, {
-      digitsLarge: 2,
-      digitsSmall: 4,
-      abbreviate: true,
-      showSymbol: layout !== 'card',
-    })
-  )
-  const remainingFull = withSuffix(
-    formatCurrencyFromUSD(balance, balanceFormatOptions)
-  )
-  const usedDisplay =
-    usedFull.length > MAX_INLINE_BALANCE_CHARS
-      ? withSuffix(
-          formatQuotaWithCurrency(usedQuota, {
-            compact: true,
-            locale,
-            showSymbol: layout !== 'card',
-          })
-        )
-      : usedFull
+  const remainingFull = hasSiteBalance
+    ? withSuffix(formatCurrencyFromUSD(balance, balanceFormatOptions))
+    : '-'
   const remainingDisplay =
     remainingFull.length > MAX_INLINE_BALANCE_CHARS
       ? withSuffix(
@@ -385,42 +759,14 @@ export function BalanceCell({ channel }: { channel: Channel }) {
           })
         )
       : remainingFull
-  const usedLabel = `${t('Used:')} ${usedFull}`
   const remainingLabel = `${t('Remaining:')} ${remainingFull}`
-  const maskedUsedLabel = `${t('Used:')} ${SENSITIVE_MASK}`
   const maskedRemainingLabel = `${t('Remaining:')} ${SENSITIVE_MASK}`
 
-  // Tag row: only show cumulative used quota
   if (isTagRow) {
-    return (
-      <TooltipProvider>
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <StatusBadge
-                label={
-                  sensitiveVisible
-                    ? `${t('Used:')} ${usedDisplay}`
-                    : maskedUsedLabel
-                }
-                variant='neutral'
-                size='sm'
-                copyable={false}
-                showDot={false}
-                className='-ml-1.5 cursor-help'
-              />
-            }
-          />
-          <TooltipContent>
-            <p>{sensitiveVisible ? usedLabel : maskedUsedLabel}</p>
-          </TooltipContent>
-        </Tooltip>
-      </TooltipProvider>
-    )
+    return <span className='text-muted-foreground text-xs'>-</span>
   }
 
-  // Regular channel row: show used and remaining with click to update
-  const variant = getBalanceVariant(balance)
+  const variant = hasSiteBalance ? getBalanceVariant(balance) : 'neutral'
 
   const handleClickUpdate = async () => {
     if (isUpdating) {
@@ -446,34 +792,9 @@ export function BalanceCell({ channel }: { channel: Channel }) {
       return
     }
 
-    try {
-      const response = await updateChannelBalance(channel.id)
-      if (response.success && response.balance !== undefined) {
-        toast.success(
-          t('Balance updated: {{balance}}', {
-            balance: formatCurrencyFromUSD(response.balance, {
-              digitsLarge: 2,
-              digitsSmall: 4,
-              abbreviate: false,
-            }),
-          })
-        )
-        void queryClient.invalidateQueries({
-          queryKey: channelsQueryKeys.lists(),
-        })
-      } else if (response.success && response.raw_response !== undefined) {
-        setCurrentRow(channel)
-        setRawBalanceResponse(response.raw_response)
-      } else {
-        toast.error(response.message || t('Failed to update balance'))
-      }
-    } catch (error: unknown) {
-      toast.error(
-        error instanceof Error ? error.message : t('Failed to update balance')
-      )
-    } finally {
-      setIsUpdating(false)
-    }
+    setIsUpdating(false)
+    setCurrentRow(channel)
+    setOpen('balance-query')
   }
   let remainingBadgeLabel = sensitiveVisible ? remainingDisplay : SENSITIVE_MASK
   if (sensitiveVisible && isUpdating) {
@@ -496,44 +817,25 @@ export function BalanceCell({ channel }: { channel: Channel }) {
 
   return (
     <TooltipProvider>
-      <div className='-ml-1.5 flex items-center gap-1'>
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <StatusBadge
-                label={sensitiveVisible ? usedDisplay : SENSITIVE_MASK}
-                variant='neutral'
-                size='sm'
-                copyable={false}
-                showDot={false}
-                className='cursor-help'
-              />
-            }
-          />
-          <TooltipContent>
-            <p>{sensitiveVisible ? usedLabel : maskedUsedLabel}</p>
-          </TooltipContent>
-        </Tooltip>
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <StatusBadge
-                label={remainingBadgeLabel}
-                variant={remainingBadgeVariant}
-                size='sm'
-                copyable={false}
-                showDot={false}
-                className='cursor-pointer'
-                onClick={handleClickUpdate}
-              />
-            }
-          />
-          <TooltipContent>
-            <p>{remainingTooltipLabel}</p>
-            {channel.type !== 57 && <p>{t('Click to update balance')}</p>}
-          </TooltipContent>
-        </Tooltip>
-      </div>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <StatusBadge
+              label={remainingBadgeLabel}
+              variant={remainingBadgeVariant}
+              size='sm'
+              copyable={false}
+              showDot={false}
+              className='-ml-1.5 cursor-pointer'
+              onClick={handleClickUpdate}
+            />
+          }
+        />
+        <TooltipContent>
+          <p>{remainingTooltipLabel}</p>
+          {channel.type !== 57 && <p>{t('Click to update balance')}</p>}
+        </TooltipContent>
+      </Tooltip>
 
       <CodexUsageDialog
         open={codexUsageOpen}
@@ -566,18 +868,142 @@ export function BalanceCell({ channel }: { channel: Channel }) {
         }}
         isRefreshing={isUpdating}
       />
-      {rawBalanceResponse !== null && (
-        <BalanceQueryDialog
-          initialRawResponse={rawBalanceResponse}
-          open
-          onOpenChange={(open) => {
-            if (!open) {
-              setRawBalanceResponse(null)
-            }
-          }}
-        />
-      )}
     </TooltipProvider>
+  )
+}
+
+export function ChannelRatioCell({ channel }: { channel: Channel }) {
+  const { t, i18n } = useTranslation()
+  const queryClient = useQueryClient()
+  const initialRatio = channel.channel_ratio ?? null
+  const [currentRatio, setCurrentRatio] = useState(initialRatio)
+  const [draft, setDraft] = useState(
+    initialRatio === null ? '' : String(initialRatio)
+  )
+  const [editing, setEditing] = useState(false)
+  const [isSaving, setIsSaving] = useState(false)
+  const lastPropRatio = useRef(initialRatio)
+  const cancelBlur = useRef(false)
+
+  useEffect(() => {
+    const nextRatio = channel.channel_ratio ?? null
+    if (nextRatio === lastPropRatio.current) return
+    lastPropRatio.current = nextRatio
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setCurrentRatio(nextRatio)
+    if (!editing) {
+      setDraft(nextRatio === null ? '' : String(nextRatio))
+    }
+  }, [channel.channel_ratio, editing])
+
+  if (isTagAggregateRow(channel)) {
+    return <span className='text-muted-foreground text-xs'>-</span>
+  }
+
+  const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
+  const ratioNumberFormat = new Intl.NumberFormat(locale, {
+    maximumSignificantDigits: 6,
+    useGrouping: false,
+  })
+  const formattedRatio =
+    currentRatio === null ? '-' : `${ratioNumberFormat.format(currentRatio)}x`
+
+  const commitRatio = async () => {
+    if (isSaving) return
+
+    const normalizedDraft = draft.trim().replace(',', '.')
+    const nextRatio = normalizedDraft === '' ? null : Number(normalizedDraft)
+    if (
+      (nextRatio !== null && !Number.isFinite(nextRatio)) ||
+      (nextRatio !== null && (nextRatio < 0 || nextRatio > 1_000_000))
+    ) {
+      setDraft(currentRatio === null ? '' : String(currentRatio))
+      setEditing(false)
+      toast.error(t('Failed to update channel'))
+      return
+    }
+    if (nextRatio === currentRatio) {
+      setEditing(false)
+      return
+    }
+
+    setIsSaving(true)
+    try {
+      const response = await updateChannel(channel.id, {
+        channel_ratio: nextRatio,
+      })
+      if (!response.success) {
+        throw new Error(response.message || t('Failed to update channel'))
+      }
+      setCurrentRatio(nextRatio)
+      setDraft(nextRatio === null ? '' : String(nextRatio))
+      setEditing(false)
+      toast.success(t('Channel updated successfully'))
+      void queryClient.invalidateQueries({
+        queryKey: channelsQueryKeys.lists(),
+      })
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : t('Failed to update channel')
+      )
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  if (editing) {
+    return (
+      <input
+        type='text'
+        inputMode='decimal'
+        aria-label={t('Channel Ratio')}
+        value={draft}
+        autoFocus
+        disabled={isSaving}
+        onChange={(event) => {
+          const nextDraft = event.target.value
+          if (/^\d*(?:[.,]\d*)?$/.test(nextDraft)) {
+            setDraft(nextDraft)
+          }
+        }}
+        onBlur={() => {
+          if (cancelBlur.current) {
+            cancelBlur.current = false
+            return
+          }
+          void commitRatio()
+        }}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') {
+            event.preventDefault()
+            event.currentTarget.blur()
+          } else if (event.key === 'Escape') {
+            cancelBlur.current = true
+            setDraft(currentRatio === null ? '' : String(currentRatio))
+            setEditing(false)
+          }
+        }}
+        className='border-input bg-background focus-visible:border-ring focus-visible:ring-ring/30 h-7 w-20 rounded-md border px-2 text-center font-mono text-sm tabular-nums outline-none focus-visible:ring-2'
+      />
+    )
+  }
+
+  return (
+    <button
+      type='button'
+      aria-label={`${t('Edit')} ${t('Channel Ratio')}`}
+      disabled={isSaving}
+      onClick={() => {
+        // A cancelled editor may be unmounted without firing blur in some
+        // browsers. Always clear that one-shot guard before a new edit.
+        cancelBlur.current = false
+        setDraft(currentRatio === null ? '' : String(currentRatio))
+        setEditing(true)
+      }}
+      className='border-input bg-muted/40 hover:bg-muted focus-visible:border-ring focus-visible:ring-ring/30 inline-flex h-7 min-w-14 cursor-text items-center justify-center rounded-md border px-2 font-mono text-sm tabular-nums transition-colors outline-none focus-visible:ring-2 disabled:cursor-default disabled:opacity-60'
+    >
+      {formattedRatio}
+    </button>
   )
 }
 
@@ -591,6 +1017,7 @@ export function useChannelsColumns(
 ): ColumnDef<Channel>[] {
   const { t, i18n } = useTranslation()
   const { sensitiveVisible } = useChannels()
+  const { groupRatio } = usePricingData()
   const enableSelection = options.enableSelection ?? true
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   // The column definitions only depend on the translation function, the active
@@ -700,10 +1127,9 @@ export function useChannelsColumns(
             <div className='flex max-w-full min-w-0 items-center gap-2'>
               <div className='flex max-w-full min-w-0 flex-col gap-1'>
                 <div className='flex max-w-full min-w-0 items-center gap-1.5'>
-                  <TruncatedText
-                    text={sensitiveVisible ? name : SENSITIVE_MASK}
-                    className='font-medium'
-                    maxWidth='max-w-full'
+                  <NameCell
+                    channel={channel}
+                    sensitiveVisible={sensitiveVisible}
                   />
                   {isPassThrough && (
                     <TooltipProvider delay={100}>
@@ -758,7 +1184,46 @@ export function useChannelsColumns(
           )
         },
         size: 260,
-        minSize: 200,
+        // Allow the column to collapse; fixed table layout clips cell content
+        // instead of using text length as the effective minimum width.
+        minSize: 20,
+      },
+
+      {
+        id: 'contact',
+        accessorFn: (row) => (isTagAggregateRow(row) ? '' : row.contact),
+        header: t('Contact'),
+        cell: ({ row }) =>
+          isTagAggregateRow(row.original) ? (
+            <span className='text-muted-foreground'>-</span>
+          ) : (
+            <ContactCell channel={row.original} />
+          ),
+        size: 132,
+      },
+
+      // Site type column
+      {
+        id: 'site_type',
+        accessorFn: (row) => {
+          if (isTagAggregateRow(row)) return ''
+          return (
+            getDetectedChannelSiteTypeLabel(row.site_type) ||
+            getChannelSiteTypeLabel(row.type) ||
+            ''
+          )
+        },
+        header: t('Site Type'),
+        cell: ({ row }) => {
+          if (isTagAggregateRow(row.original)) {
+            return <span className='text-muted-foreground'>-</span>
+          }
+
+          return <SiteTypeCell channel={row.original} />
+        },
+        size: 116,
+        minSize: 20,
+        maxSize: 128,
       },
 
       // Type column
@@ -1060,7 +1525,10 @@ export function useChannelsColumns(
         meta: { mobileHidden: true },
         cell: ({ row }) => {
           const group = row.getValue('group') as string
-          const groupArray = parseGroupsList(group)
+          const groupArray = sortGroupsByRatio(
+            parseGroupsList(group),
+            groupRatio
+          )
           return (
             <BadgeListCell
               items={groupArray.map((g) => (
@@ -1068,6 +1536,7 @@ export function useChannelsColumns(
                   key={g}
                   group={g}
                   label={sensitiveVisible ? undefined : SENSITIVE_MASK}
+                  ratio={groupRatio[g]}
                   size='sm'
                 />
               ))}
@@ -1129,12 +1598,37 @@ export function useChannelsColumns(
         enableSorting: false,
       },
 
-      // Balance column (Used/Remaining)
+      // Adaptive routing column
+      {
+        accessorKey: 'adaptive_enabled',
+        header: t('Adaptive Routing'),
+        meta: { mobileHidden: true },
+        cell: ({ row }) => <AdaptiveRoutingCell channel={row.original} />,
+        size: 130,
+        enableSorting: false,
+      },
+
+      // Usage, channel ratio, and site balance are distinct values.
+      {
+        accessorKey: 'used_quota',
+        header: t('Used Quota'),
+        cell: ({ row }) => <UsedQuotaCell channel={row.original} />,
+        size: 130,
+      },
+
+      {
+        accessorKey: 'channel_ratio',
+        header: t('Channel Ratio'),
+        meta: { mobileHidden: true },
+        cell: ({ row }) => <ChannelRatioCell channel={row.original} />,
+        size: 130,
+      },
+
       {
         accessorKey: 'balance',
-        header: t('Used / Remaining'),
-        cell: ({ row }) => <BalanceCell channel={row.original} />,
-        size: 180,
+        header: t('Site Balance'),
+        cell: ({ row }) => <SiteBalanceCell channel={row.original} />,
+        size: 140,
       },
 
       // Response Time column
@@ -1222,9 +1716,15 @@ export function useChannelsColumns(
         },
         enableSorting: false,
         enableHiding: false,
+        // Four compact actions fit at desktop width without making the
+        // column consume excess space; it remains resizable within a safe
+        // range so the controls do not disappear.
+        size: 148,
+        minSize: 128,
+        maxSize: 180,
         meta: { pinned: 'right' as const },
       },
     ],
-    [enableSelection, t, locale, sensitiveVisible]
+    [enableSelection, t, locale, sensitiveVisible, groupRatio]
   )
 }

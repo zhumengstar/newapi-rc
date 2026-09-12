@@ -27,10 +27,13 @@ services:
     volumes:
       - dev_data:/data
     environment:
-      - SQL_DSN=postgresql://root:123456@postgres:5432/new-api
+      # Use the original remote database so the development frontend sees the existing deployment data.
+      - SQL_DSN=postgresql://postgres.uvjfjfipsqzhlplihopw:Gh%40l9g7%401201@aws-1-us-west-1.pooler.supabase.com:5432/postgres?sslmode=require
       - REDIS_CONN_STRING=redis://redis
       - TZ=Asia/Shanghai
       - BATCH_UPDATE_ENABLED=true
+      - CHANNEL_BALANCE_REFRESH_ENABLED=true
+      - CHANNEL_BALANCE_REFRESH_INTERVAL_MINUTES=60
       # Local HTTP dev mode: keep Secure=false and leave TRUSTED_URL unset. This disables the refresh/logout OriginGuard so the :5173 -> :3000 dev proxy works.
       - SESSION_COOKIE_SECURE=false
       # For HTTPS only: set Secure=true and list every exact trusted HTTPS browser Origin. This does not configure relay CORS.
@@ -41,6 +44,22 @@ services:
         condition: service_started
       postgres:
         condition: service_healthy
+    networks:
+      - dev-network
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    image: new-api-dev-web:local
+    container_name: new-api-dev-web
+    restart: unless-stopped
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_REACT_APP_SERVER_URL=http://new-api:3000
+    depends_on:
+      - new-api
     networks:
       - dev-network
 

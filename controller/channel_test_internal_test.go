@@ -120,6 +120,75 @@ func TestResponsesCompactChannelSupport(t *testing.T) {
 	}
 }
 
+func TestResolveChannelProbeUsesConfiguredEndpoint(t *testing.T) {
+	channel := &model.Channel{}
+	tests := []struct {
+		name         string
+		mode         string
+		wantEndpoint constant.EndpointType
+	}{
+		{name: "chat", mode: model.ChannelProbeModeChat, wantEndpoint: constant.EndpointTypeOpenAI},
+		{name: "responses", mode: model.ChannelProbeModeResponses, wantEndpoint: constant.EndpointTypeOpenAIResponse},
+		{name: "image", mode: model.ChannelProbeModeImage, wantEndpoint: constant.EndpointTypeImageGeneration},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			modelName, endpoint, stream := resolveChannelProbe(&model.ChannelControlPolicy{
+				ProbeEnabled: true,
+				ProbeMode:    test.mode,
+				ProbeModel:   "policy-model",
+			}, channel)
+
+			assert.Equal(t, "policy-model", modelName)
+			assert.Equal(t, string(test.wantEndpoint), endpoint)
+			assert.False(t, stream)
+		})
+	}
+}
+
+func TestSelectChannelsForControlTestHonorsPolicyProbeAndRecovery(t *testing.T) {
+	channels := []*model.Channel{
+		{Id: 1, Group: "gpt", Status: common.ChannelStatusAutoDisabled},
+		{Id: 2, Group: "image", Status: common.ChannelStatusAutoDisabled},
+		{Id: 3, Group: "legacy", Status: common.ChannelStatusAutoDisabled},
+	}
+	policies := map[string]model.ChannelControlPolicy{
+		"gpt":   {Group: "gpt", Enabled: true, ProbeEnabled: true, RecoveryEnabled: true},
+		"image": {Group: "image", Enabled: true, ProbeEnabled: false, RecoveryEnabled: true},
+	}
+
+	selected := selectChannelsForControlTest(
+		channels,
+		operation_setting.ChannelTestModePassiveRecovery,
+		policies,
+	)
+
+	require.Len(t, selected, 2)
+	assert.Equal(t, []int{1, 3}, []int{selected[0].Id, selected[1].Id})
+}
+
+func TestSelectChannelsForControlTestPolicyOnlyExcludesUnconfiguredGroups(t *testing.T) {
+	autoBan := 1
+	channels := []*model.Channel{
+		{Id: 1, Group: "gpt", Status: common.ChannelStatusEnabled, AutoBan: &autoBan},
+		{Id: 2, Group: "legacy", Status: common.ChannelStatusEnabled, AutoBan: &autoBan},
+	}
+	policies := map[string]model.ChannelControlPolicy{
+		"gpt": {Group: "gpt", Enabled: true, ProbeEnabled: true},
+	}
+
+	selected := selectChannelsForControlTest(
+		channels,
+		operation_setting.ChannelTestModeAutoBanOnly,
+		policies,
+		true,
+	)
+
+	require.Len(t, selected, 1)
+	assert.Equal(t, 1, selected[0].Id)
+}
+
 func TestMultiprotocolGatewayEndpointTypes(t *testing.T) {
 	want := []constant.EndpointType{
 		constant.EndpointTypeOpenAI,

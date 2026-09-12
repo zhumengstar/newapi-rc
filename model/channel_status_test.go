@@ -1,6 +1,8 @@
 package model
 
 import (
+	"context"
+	"database/sql"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -51,6 +53,21 @@ func TestUpdateChannelStatusPersistsMultiKeyState(t *testing.T) {
 	assert.Equal(t, 1, stored.ChannelInfo.MultiKeyPollingIndex)
 }
 
+func TestUpdateChannelStatusClearsRecoveryProbeState(t *testing.T) {
+	setupChannelStatusTest(t)
+
+	channel := Channel{Name: "recovery-state", Key: "test-key", Status: common.ChannelStatusEnabled}
+	require.NoError(t, DB.Create(&channel).Error)
+	_, err := RecordChannelRecoveryProbe(context.Background(), channel.Id, true)
+	require.NoError(t, err)
+
+	require.True(t, UpdateChannelStatus(channel.Id, "", common.ChannelStatusAutoDisabled, "test"))
+
+	var count int64
+	require.NoError(t, DB.Model(&ChannelRecoveryState{}).Where("channel_id = ?", channel.Id).Count(&count).Error)
+	assert.Zero(t, count)
+}
+
 func TestSaveStatusStateFromSingleKeySnapshotPreservesUnownedColumns(t *testing.T) {
 	setupChannelStatusTest(t)
 
@@ -99,4 +116,79 @@ func TestSaveStatusStateFromSingleKeySnapshotPreservesUnownedColumns(t *testing.
 	otherInfo := stored.GetOtherInfo()
 	assert.Equal(t, "manual operation", otherInfo["status_reason"])
 	assert.Equal(t, float64(1234), otherInfo["status_time"])
+}
+
+func TestUpdateAbilitiesPreservesAdaptiveWeights(t *testing.T) {
+	setupChannelStatusTest(t)
+
+	weight := uint(10)
+	channel := Channel{
+		Name:            "adaptive-routing",
+		Key:             "key",
+		Status:          common.ChannelStatusEnabled,
+		Models:          "model-a",
+		Group:           "adaptive-group",
+		Weight:          &weight,
+		AdaptiveEnabled: true,
+	}
+	require.NoError(t, DB.Create(&channel).Error)
+	require.NoError(t, channel.AddAbilities(nil))
+	require.NoError(t, DB.Model(&Ability{}).
+		Where("channel_id = ? and model = ?", channel.Id, "model-a").
+		Update("weight", 777).Error)
+
+	// Upstream model refreshes may pass a reduced channel projection. The
+	// persisted adaptive flag must still preserve the existing model weight.
+	channel.AdaptiveEnabled = false
+	channel.Models = "model-a,model-b"
+	require.NoError(t, channel.UpdateAbilities(nil))
+
+	var abilities []Ability
+	require.NoError(t, DB.Where("channel_id = ?", channel.Id).Order("model").Find(&abilities).Error)
+	require.Len(t, abilities, 2)
+	assert.Equal(t, uint(777), abilities[0].Weight)
+	assert.Equal(t, uint(10), abilities[1].Weight)
+}
+
+func TestUpdateAbilitiesTreatsLegacyNullAdaptiveEnabledAsDisabled(t *testing.T) {
+	setupChannelStatusTest(t)
+
+	weight := uint(10)
+	channel := Channel{
+		Name:   "legacy-adaptive-routing",
+		Key:    "key",
+		Status: common.ChannelStatusEnabled,
+		Models: "model-a",
+		Group:  "adaptive-group",
+		Weight: &weight,
+	}
+	require.NoError(t, DB.Create(&channel).Error)
+	require.NoError(t, DB.Exec("UPDATE channels SET adaptive_enabled = NULL WHERE id = ?", channel.Id).Error)
+
+	require.NoError(t, channel.UpdateAbilities(nil))
+
+	var persisted sql.NullBool
+	require.NoError(t, DB.Model(&Channel{}).
+		Select("adaptive_enabled").
+		Where("id = ?", channel.Id).
+		Scan(&persisted).Error)
+	assert.False(t, persisted.Valid)
+}
+
+func TestNormalizeChannelAdaptiveEnabledBackfillsLegacyNull(t *testing.T) {
+	setupChannelStatusTest(t)
+
+	channel := Channel{Name: "legacy-adaptive-default", Key: "key", Status: common.ChannelStatusEnabled}
+	require.NoError(t, DB.Create(&channel).Error)
+	require.NoError(t, DB.Exec("UPDATE channels SET adaptive_enabled = NULL WHERE id = ?", channel.Id).Error)
+
+	require.NoError(t, normalizeChannelAdaptiveEnabled(DB))
+
+	var persisted sql.NullBool
+	require.NoError(t, DB.Model(&Channel{}).
+		Select("adaptive_enabled").
+		Where("id = ?", channel.Id).
+		Scan(&persisted).Error)
+	assert.True(t, persisted.Valid)
+	assert.False(t, persisted.Bool)
 }

@@ -1,0 +1,607 @@
+#!/usr/bin/env python3
+"""Monitor and rebalance the GPT对接组 from recent real requests.
+
+This controller does not send probes, change priorities, or re-enable channels.
+It uses terminal logs from the last 30 seconds and falls back to the latest
+deduplicated requests when that window is sparse. Remaining enabled channels
+receive weights proportional to observed TTFT and the channel cost multiplier.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import fcntl
+import json
+import math
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+
+POSTGRES_CONTAINER = "newapi-standalone-postgres"
+POSTGRES_USER = "newapi"
+POSTGRES_DB = "new-api"
+DEFAULT_GROUP = "GPT对接组"
+GROUP = DEFAULT_GROUP
+DEFAULT_STATE = Path("/var/lib/newapi-gpt-link-ttft-controller/state.json")
+DEFAULT_LOCK = Path("/run/newapi-gpt-link-ttft-controller.lock")
+DEFAULT_EVENT_LOG = Path("/var/log/newapi-gpt-link-ttft-controller/events.jsonl")
+DEFAULT_THRESHOLD_MS = 4000.0
+QUOTA_ERROR_RE = re.compile(r"quota|balance|insufficient|recharge|额度|余额", re.IGNORECASE)
+SECRET_RE = re.compile(r"(?i)(?:sk-|key-)[A-Za-z0-9_-]{10,}")
+
+
+@dataclass
+class Channel:
+    channel_id: int
+    name: str
+    status: int
+    priority: int
+    weight: int
+    attempts: int
+    success_count: int
+    ttft_samples: int
+    avg_ttft_ms: float
+    error_count: int
+    quota_errors: int
+    last_error: str
+    metric_source: str
+
+    @property
+    def observed(self) -> bool:
+        return self.ttft_samples > 0
+
+    @property
+    def speed_score(self) -> float:
+        return 1.0 / max(self.avg_ttft_ms, 1.0)
+
+    @property
+    def cost_multiplier(self) -> float:
+        legacy = re.match(r"^\s*(0\d{2,3})(?:-|$)", self.name)
+        if legacy:
+            digits = legacy.group(1)
+            return max(int(digits) / (10 ** (len(digits) - 1)), 0.01)
+        explicit = re.search(
+            r"(?<![0-9])([0-9]+(?:\.[0-9]+)?)\s*(?:[-_ ]?倍率|x)",
+            self.name,
+            re.IGNORECASE,
+        )
+        if explicit:
+            return max(float(explicit.group(1)), 0.01)
+        decimal = re.match(r"^\s*(0?\.\d+)\s*[-_ ]", self.name)
+        return max(float(decimal.group(1)), 0.01) if decimal else 1.0
+
+    @property
+    def cost_speed_score(self) -> float:
+        # Include reliability in the allocation score. A cheap and fast
+        # channel must not receive most traffic when it is frequently failing.
+        smoothed_success = (self.success_count + 5.0) / (self.attempts + 10.0)
+        return self.speed_score * math.pow(smoothed_success, 4) / self.cost_multiplier
+
+
+def run_psql(sql: str) -> str:
+    proc = subprocess.run(
+        [
+            "docker", "exec", POSTGRES_CONTAINER, "psql", "-X",
+            "-v", "ON_ERROR_STOP=1", "-U", POSTGRES_USER, "-d", POSTGRES_DB,
+            "-Atq", "-F", "\t", "-c", sql,
+        ],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=45,
+    )
+    if proc.returncode:
+        raise RuntimeError(proc.stderr.strip() or "psql failed")
+    return proc.stdout
+
+
+def sql_text(value: str) -> str:
+    encoded = base64.b64encode(value.encode("utf-8")).decode("ascii")
+    return f"convert_from(decode('{encoded}', 'base64'), 'UTF8')"
+
+
+def group_predicate(column: str = 'c."group"') -> str:
+    # Channel groups are stored as a comma-separated list. Match one complete
+    # group name so GPT对接组 does not match a similarly named group.
+    return (
+        f"position(',' || {sql_text(GROUP)} || ',' in ',' || "
+        f"replace(coalesce({column}, ''), ' ', '') || ',') > 0"
+    )
+
+
+def fetch_channels(window_seconds: int, recent_limit: int, min_window_requests: int) -> dict[int, Channel]:
+    predicate = group_predicate()
+    # Keep the scan bounded while allowing request_id de-duplication and a
+    # latest-N fallback when a channel has too little traffic in 30 seconds.
+    recent_scan_limit = max(recent_limit * 10, 300)
+    sql = f"""
+WITH managed AS (
+  SELECT c.id,
+         replace(encode(convert_to(coalesce(c.name, ''), 'UTF8'), 'base64'), E'\\n', '') AS name,
+         c.status, c.priority, c.weight
+  FROM channels c
+  WHERE {predicate}
+), candidate_logs AS (
+  SELECT l.id AS log_id, l.channel_id, l.created_at, l.type, l.quota, l.other,
+         left(concat_ws(' ', nullif(l.other, ''), nullif(l.content, '')), 512) AS error_detail,
+         coalesce(nullif(l.request_id, ''), 'log:' || l.id::text) AS request_key
+  FROM managed m
+  CROSS JOIN LATERAL (
+    SELECT l.* FROM logs l
+    WHERE l.channel_id = m.id AND l.type IN (2, 5)
+    ORDER BY l.id DESC LIMIT {recent_scan_limit}
+  ) l
+), terminal_logs AS (
+  SELECT DISTINCT ON (l.channel_id, l.request_key)
+         l.log_id, l.channel_id, l.created_at, l.type, l.quota, l.other, l.error_detail
+  FROM candidate_logs l
+  ORDER BY l.channel_id, l.request_key, l.log_id DESC
+), ranked_logs AS (
+  SELECT l.*, row_number() OVER (PARTITION BY l.channel_id ORDER BY l.log_id DESC) AS recent_rank
+  FROM terminal_logs l
+), window_metrics AS (
+  SELECT channel_id, count(*) AS attempts,
+         count(*) FILTER (WHERE type = 2 AND quota > 0) AS success_count,
+         count(*) FILTER (WHERE type = 2 AND quota > 0 AND coalesce(other, '') <> ''
+           AND (other::jsonb->>'frt') ~ '^[0-9]+([.][0-9]+)?$') AS ttft_samples,
+         coalesce(avg((other::jsonb->>'frt')::numeric) FILTER (WHERE type = 2 AND quota > 0
+           AND coalesce(other, '') <> '' AND (other::jsonb->>'frt') ~ '^[0-9]+([.][0-9]+)?$'), 0) AS avg_ttft_ms,
+         count(*) FILTER (WHERE type = 5 OR (type = 2 AND quota <= 0)) AS error_count,
+         count(*) FILTER (WHERE (type = 5 OR (type = 2 AND quota <= 0))
+           AND lower(coalesce(error_detail, '')) ~ '(quota|balance|insufficient|recharge|额度|余额)') AS quota_errors,
+         coalesce((array_agg(error_detail ORDER BY log_id DESC) FILTER
+           (WHERE type = 5 OR (type = 2 AND quota <= 0)))[1], '') AS last_error
+  FROM ranked_logs
+  WHERE created_at >= extract(epoch FROM now())::bigint - {int(window_seconds)}
+  GROUP BY channel_id
+), recent_metrics AS (
+  SELECT channel_id, count(*) AS attempts,
+         count(*) FILTER (WHERE type = 2 AND quota > 0) AS success_count,
+         count(*) FILTER (WHERE type = 2 AND quota > 0 AND coalesce(other, '') <> ''
+           AND (other::jsonb->>'frt') ~ '^[0-9]+([.][0-9]+)?$') AS ttft_samples,
+         coalesce(avg((other::jsonb->>'frt')::numeric) FILTER (WHERE type = 2 AND quota > 0
+           AND coalesce(other, '') <> '' AND (other::jsonb->>'frt') ~ '^[0-9]+([.][0-9]+)?$'), 0) AS avg_ttft_ms,
+         count(*) FILTER (WHERE type = 5 OR (type = 2 AND quota <= 0)) AS error_count,
+         count(*) FILTER (WHERE (type = 5 OR (type = 2 AND quota <= 0))
+           AND lower(coalesce(error_detail, '')) ~ '(quota|balance|insufficient|recharge|额度|余额)') AS quota_errors,
+         coalesce((array_agg(error_detail ORDER BY log_id DESC) FILTER
+           (WHERE type = 5 OR (type = 2 AND quota <= 0)))[1], '') AS last_error
+  FROM ranked_logs WHERE recent_rank <= {int(recent_limit)}
+  GROUP BY channel_id
+), chosen AS (
+  SELECT m.id, m.name, m.status, m.priority, m.weight,
+    CASE WHEN coalesce(w.attempts, 0) >= {int(min_window_requests)} THEN w.attempts ELSE coalesce(r.attempts, 0) END AS attempts,
+    CASE WHEN coalesce(w.attempts, 0) >= {int(min_window_requests)} THEN w.success_count ELSE coalesce(r.success_count, 0) END AS success_count,
+    CASE WHEN coalesce(w.attempts, 0) >= {int(min_window_requests)} THEN w.ttft_samples ELSE coalesce(r.ttft_samples, 0) END AS ttft_samples,
+    CASE WHEN coalesce(w.attempts, 0) >= {int(min_window_requests)} THEN w.avg_ttft_ms ELSE coalesce(r.avg_ttft_ms, 0) END AS avg_ttft_ms,
+    CASE WHEN coalesce(w.attempts, 0) >= {int(min_window_requests)} THEN w.error_count ELSE coalesce(r.error_count, 0) END AS error_count,
+    CASE WHEN coalesce(w.attempts, 0) >= {int(min_window_requests)} THEN w.quota_errors ELSE coalesce(r.quota_errors, 0) END AS quota_errors,
+    CASE WHEN coalesce(w.attempts, 0) >= {int(min_window_requests)} THEN w.last_error ELSE coalesce(r.last_error, '') END AS last_error,
+    CASE WHEN coalesce(w.attempts, 0) >= {int(min_window_requests)} THEN 'window_30s'
+         WHEN coalesce(r.attempts, 0) > 0 THEN 'recent_30_requests' ELSE 'none' END AS metric_source
+  FROM managed m LEFT JOIN window_metrics w ON w.channel_id = m.id
+                 LEFT JOIN recent_metrics r ON r.channel_id = m.id
+)
+SELECT id, name, status, priority, weight, attempts, success_count, ttft_samples,
+       avg_ttft_ms, error_count, quota_errors, last_error, metric_source
+FROM chosen ORDER BY id;
+"""
+    channels: dict[int, Channel] = {}
+    for line in run_psql(sql).splitlines():
+        fields = line.split("\t")
+        if len(fields) != 13:
+            continue
+        channels[int(fields[0])] = Channel(
+            channel_id=int(fields[0]), name=base64.b64decode(fields[1]).decode("utf-8", errors="replace"),
+            status=int(fields[2]), priority=int(fields[3]), weight=int(fields[4]),
+            attempts=int(fields[5]), success_count=int(fields[6]), ttft_samples=int(fields[7]),
+            avg_ttft_ms=float(fields[8]), error_count=int(fields[9]), quota_errors=int(fields[10]),
+            last_error=fields[11], metric_source=fields[12] or "none",
+        )
+    return channels
+
+
+def reason_for(channel: Channel, threshold_ms: float) -> str:
+    return (
+        f"GPT对接组首字监控：{channel.metric_source}平均首字 "
+        f"{channel.avg_ttft_ms / 1000.0:.2f}s，超过 {threshold_ms / 1000.0:.2f}s 阈值；"
+        f"有效样本 {channel.ttft_samples}，请求 {channel.attempts}"
+    )
+
+
+def quota_error_reason(channel: Channel) -> str | None:
+    if channel.quota_errors or QUOTA_ERROR_RE.search(channel.last_error):
+        return (
+            f"GPT对接组错误监控：检测到额度/余额错误 {max(channel.quota_errors, 1)} 次；"
+            f"{safe_error(channel.last_error)}"
+        )
+    return None
+
+
+def unavailable_reason(
+    channel: Channel, min_attempts: int, error_threshold: int, max_success_rate: float
+) -> str | None:
+    """Disable channels that are effectively unavailable in recent traffic.
+
+    A sparse or unobserved channel is left untouched. This prevents a single
+    transient upstream error from being treated as channel unavailability.
+    """
+    if channel.attempts < min_attempts:
+        return None
+    if channel.error_count < error_threshold:
+        return None
+    success_rate = channel.success_count / max(channel.attempts, 1)
+    if success_rate > max_success_rate:
+        return None
+    detail = safe_error(channel.last_error)
+    suffix = f"；{detail}" if detail else ""
+    return (
+        f"GPT对接组可用性监控：最近 {channel.attempts} 次请求均未成功，"
+        f"错误 {channel.error_count} 次，成功率 {success_rate:.1%}，"
+        f"达到 {error_threshold} 次长期不可用阈值"
+        f"{suffix}"
+    )
+
+
+def update_status(channel_id: int, reason: str) -> None:
+    updated_at = int(time.time())
+    reason_json = json.dumps(
+        {"status_reason": reason, "status_time": int(time.time()),
+         "status_source": "gpt-link-ttft-controller",
+         "channel_update_time": updated_at,
+         "channel_update_source": "newapi-gpt-link-ttft-controller",
+         "channel_update_action": "status"},
+        ensure_ascii=False,
+    )
+    encoded = base64.b64encode(reason_json.encode("utf-8")).decode("ascii")
+    predicate = group_predicate('"group"')
+    sql = f"""
+BEGIN;
+WITH updated AS (
+  UPDATE channels
+  SET status = 3,
+      other = (coalesce(nullif(other, ''), '{{}}')::jsonb ||
+        convert_from(decode('{encoded}', 'base64'), 'UTF8')::jsonb)::text,
+      other_info = (coalesce(nullif(other_info, ''), '{{}}')::jsonb ||
+        convert_from(decode('{encoded}', 'base64'), 'UTF8')::jsonb)::text
+  WHERE id = {int(channel_id)} AND {predicate}
+  RETURNING id
+)
+UPDATE abilities SET enabled = false
+FROM updated WHERE abilities.channel_id = updated.id;
+COMMIT;
+"""
+    run_psql(sql)
+
+
+def restore_legacy_non_quota_channels() -> list[int]:
+    """Undo old generic-error disables, while preserving quota disables."""
+    now = int(time.time())
+    reason_json = json.dumps({
+        "status_reason": f"{GROUP}策略调整：普通错误不再自动禁用，已恢复启用；本轮按速度和成本重新分配权重",
+        "status_time": now,
+        "status_source": "gpt-link-ttft-controller-policy",
+        "channel_update_time": now,
+        "channel_update_source": "newapi-gpt-link-ttft-controller",
+        "channel_update_action": "status_recovery",
+    }, ensure_ascii=False)
+    encoded = base64.b64encode(reason_json.encode("utf-8")).decode("ascii")
+    predicate = group_predicate('c."group"')
+    sql = f"""
+WITH updated AS (
+  UPDATE channels c
+  SET status = 1, weight = 1,
+      other = (coalesce(nullif(c.other, ''), '{{}}')::jsonb ||
+        convert_from(decode('{encoded}', 'base64'), 'UTF8')::jsonb)::text,
+      other_info = (coalesce(nullif(c.other_info, ''), '{{}}')::jsonb ||
+        convert_from(decode('{encoded}', 'base64'), 'UTF8')::jsonb)::text
+  WHERE c.status = 3 AND {predicate}
+    AND coalesce(nullif(c.other, ''), '{{}}')::jsonb ->> 'status_source' = 'gpt-link-ttft-controller'
+    AND lower(coalesce(nullif(c.other, ''), '{{}}')::jsonb ->> 'status_reason') !~
+      '(quota|balance|insufficient|recharge|额度|余额|长期不可用|可用性监控)'
+  RETURNING c.id
+), ability_update AS (
+  UPDATE abilities a SET enabled = true, weight = 1
+  FROM updated u WHERE a.channel_id = u.id
+)
+SELECT id FROM updated ORDER BY id;
+"""
+    return [int(line) for line in run_psql(sql).splitlines() if line.strip().isdigit()]
+
+
+def update_weights(updates: list[tuple[int, int]]) -> None:
+    """Apply all channel and ability weights in one transaction."""
+    if not updates:
+        return
+    predicate = group_predicate('"group"')
+    values = ",".join(f"({int(channel_id)}, {int(weight)})" for channel_id, weight in updates)
+    updated_at = int(time.time())
+    update_json = json.dumps({
+        "channel_update_time": updated_at,
+        "channel_update_source": "newapi-gpt-link-ttft-controller",
+        "channel_update_action": "weight",
+        "weight_update_time": updated_at,
+    }, ensure_ascii=False)
+    update_sql = sql_text(update_json)
+    sql = f"""
+BEGIN;
+WITH target(channel_id, weight) AS (VALUES {values}), updated AS (
+  UPDATE channels c SET weight = t.weight,
+    other = (coalesce(nullif(c.other, ''), '{{}}')::jsonb || {update_sql}::jsonb)::text,
+    other_info = (coalesce(nullif(c.other_info, ''), '{{}}')::jsonb || {update_sql}::jsonb)::text
+  FROM target t
+  WHERE c.id = t.channel_id AND c.status = 1 AND {predicate}
+  RETURNING c.id
+)
+UPDATE abilities a SET weight = t.weight
+FROM updated u JOIN target t ON t.channel_id = u.id
+WHERE a.channel_id = u.id AND a.enabled;
+COMMIT;
+"""
+    run_psql(sql)
+
+
+def safe_error(value: str) -> str:
+    compact = " ".join((value or "").split())
+    compact = SECRET_RE.sub("[redacted]", compact)
+    labels = (
+        ("status_code", "HTTP"),
+        ("error_code", "错误码"),
+        ("error_type", "错误类型"),
+        ("request_path", "路径"),
+        ("model", "模型"),
+        ("billing_source", "计费来源"),
+        ("usage_billing_path", "上游计费路径"),
+        ("billing_mode", "计费模式"),
+    )
+    fields: list[str] = []
+    for key, label in labels:
+        match = re.search(
+            rf"[\"']{re.escape(key)}[\"']\s*:\s*(?:[\"']([^\"']+)[\"']|(-?\d+))",
+            compact,
+        )
+        if match:
+            fields.append(f"{label}={match.group(1) or match.group(2)}")
+    if fields:
+        return "；".join(fields)
+    return compact[:180]
+
+
+def append_event(path: Path, payload: dict) -> None:
+    path.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+        handle.flush()
+        os.fchmod(handle.fileno(), 0o640)
+
+
+def allocate_weights(
+    channels: list[Channel], min_weight: int, total_weight: int, low_weight_ids: set[int]
+) -> dict[int, int]:
+    """Allocate exactly total_weight across enabled channels.
+
+    Slow channels remain enabled for fallback but stay at min_weight. Healthy
+    observed channels receive the remaining budget using speed and cost.
+    """
+    enabled = [c for c in channels if c.status == 1]
+    if not enabled:
+        return {}
+
+    targets = {c.channel_id: min_weight for c in enabled}
+    remaining = max(total_weight - sum(targets.values()), 0)
+    candidates = [c for c in enabled if c.channel_id not in low_weight_ids]
+    if not candidates:
+        candidates = enabled
+    observed = [c for c in candidates if c.observed]
+    scored = observed or candidates
+    scores = {
+        c.channel_id: c.cost_speed_score if c.observed else 1.0 / c.cost_multiplier
+        for c in scored
+    }
+    total_score = sum(scores.values())
+    if total_score <= 0:
+        return targets
+
+    assigned = 0
+    fractions: list[tuple[float, int]] = []
+    for channel in scored:
+        share = remaining * scores[channel.channel_id] / total_score
+        whole = math.floor(share)
+        targets[channel.channel_id] += whole
+        assigned += whole
+        fractions.append((share - whole, channel.channel_id))
+    for _, channel_id in sorted(fractions, reverse=True)[:remaining - assigned]:
+        targets[channel_id] += 1
+    return targets
+
+
+def save_state(path: Path, payload: dict) -> None:
+    path.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=".state.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp_name, 0o600)
+        os.replace(temp_name, path)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
+
+
+def self_test() -> None:
+    fast = Channel(1, "005-fast", 1, 10, 10, 2, 2, 2, 1000, 0, 0, "", "recent_30_requests")
+    slow = Channel(2, "010-slow", 1, 20, 10, 2, 2, 2, 3000, 0, 0, "", "window_30s")
+    targets = allocate_weights([fast, slow], 1, 1000, {slow.channel_id})
+    assert targets[1] == 999 and targets[2] == 1 and sum(targets.values()) == 1000
+    assert reason_for(slow, DEFAULT_THRESHOLD_MS).startswith("GPT对接组首字监控")
+    assert fast.cost_multiplier == 0.05
+    expensive_fast = Channel(3, "1x-fast", 1, 10, 10, 2, 2, 2, 1000, 0, 0, "", "window_30s")
+    assert fast.cost_speed_score > expensive_fast.cost_speed_score
+    unreliable_fast = Channel(8, "005-unreliable", 1, 10, 10, 10, 2, 2, 1000, 8, 0, "", "window_30s")
+    assert fast.cost_speed_score > unreliable_fast.cost_speed_score
+    empty = Channel(4, "005-empty", 1, 10, 1, 0, 0, 0, 1, 1, 1, "insufficient quota", "recent_30_requests")
+    assert "额度" in quota_error_reason(empty)
+    generic = Channel(5, "005-generic", 1, 10, 1, 5, 0, 0, 0, 5, 0, "HTTP 500", "recent_30_requests")
+    assert quota_error_reason(generic) is None
+    assert unavailable_reason(generic, 5, 5, 0.1) is not None
+    assert unavailable_reason(Channel(6, "005-sparse", 1, 10, 1, 2, 0, 0, 0, 2, 0, "HTTP 500", "recent_30_requests"), 5, 5, 0.1) is None
+    almost_unavailable = Channel(7, "005-almost-unavailable", 1, 10, 1, 30, 1, 0, 0, 29, 0, "HTTP 500", "recent_30_requests")
+    assert unavailable_reason(almost_unavailable, 10, 10, 0.1) is not None
+    print("self-test: ok")
+
+
+def main() -> int:
+    global GROUP
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--group", default=DEFAULT_GROUP,
+                        help="要监控和调度的完整渠道分组名称")
+    parser.add_argument("--window-seconds", type=int, default=30)
+    parser.add_argument("--threshold-ms", type=float, default=DEFAULT_THRESHOLD_MS)
+    parser.add_argument("--min-samples", type=int, default=1)
+    parser.add_argument("--min-window-requests", type=int, default=2)
+    parser.add_argument("--recent-limit", type=int, default=30)
+    parser.add_argument("--error-threshold", type=int, default=3,
+                        help="兼容旧参数；普通错误不再触发禁用")
+    parser.add_argument("--unavailable-error-threshold", type=int, default=10,
+                        help="持续不可用时所需的最近错误数")
+    parser.add_argument("--unavailable-min-attempts", type=int, default=10,
+                        help="判断持续不可用所需的最少请求数")
+    parser.add_argument("--unavailable-max-success-rate", type=float, default=0.1,
+                        help="持续不可用允许的最高成功率")
+    parser.add_argument("--total-weight", type=int, default=1000)
+    parser.add_argument("--min-weight", type=int, default=1)
+    parser.add_argument("--max-step", type=int, default=5)
+    parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
+    parser.add_argument("--event-log", type=Path, default=DEFAULT_EVENT_LOG)
+    parser.add_argument("--lock", type=Path, default=DEFAULT_LOCK)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--self-test", action="store_true")
+    args = parser.parse_args()
+    if args.self_test:
+        self_test()
+        return 0
+    if (args.window_seconds != 30 or args.threshold_ms <= 0 or args.min_samples < 1
+            or args.min_window_requests < 1 or args.recent_limit < 1
+            or args.error_threshold < 1 or args.unavailable_error_threshold < 1
+            or args.unavailable_min_attempts < 1 or not 0 <= args.unavailable_max_success_rate <= 1
+            or args.total_weight < 1):
+        raise ValueError("window-seconds must be 30; thresholds and limits must be positive")
+
+    GROUP = args.group.strip()
+    if not GROUP:
+        raise ValueError("group must not be empty")
+
+    args.lock.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+    with args.lock.open("w", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        restored = [] if args.dry_run else restore_legacy_non_quota_channels()
+        channels = fetch_channels(args.window_seconds, args.recent_limit, args.min_window_requests)
+        actions: list[dict] = [
+            {"channel": channel_id, "action": "restore_non_quota_disable",
+             "reason": f"{GROUP}普通错误不再自动禁用，恢复启用后进入低风险权重调度"}
+            for channel_id in restored
+        ]
+
+        slow_channels: set[int] = set()
+        for channel in channels.values():
+            if channel.status != 1:
+                continue
+            quota_reason = quota_error_reason(channel)
+            if quota_reason is not None:
+                actions.append({"channel": channel.channel_id, "action": "disable", "reason": quota_reason})
+                if not args.dry_run:
+                    update_status(channel.channel_id, quota_reason)
+                    channel.status = 3
+                continue
+            unavailable = unavailable_reason(
+                channel, args.unavailable_min_attempts, args.unavailable_error_threshold,
+                args.unavailable_max_success_rate,
+            )
+            if unavailable is not None:
+                actions.append({"channel": channel.channel_id, "action": "disable", "reason": unavailable})
+                if not args.dry_run:
+                    update_status(channel.channel_id, unavailable)
+                    channel.status = 3
+                continue
+            if channel.ttft_samples >= args.min_samples and channel.avg_ttft_ms > args.threshold_ms:
+                slow_channels.add(channel.channel_id)
+                actions.append({
+                    "channel": channel.channel_id, "action": "keep_enabled_low_weight",
+                    "reason": reason_for(channel, args.threshold_ms), "weight": args.min_weight,
+                })
+
+        targets = allocate_weights(list(channels.values()), args.min_weight, args.total_weight, slow_channels)
+        weight_updates: list[tuple[int, int]] = []
+        for channel_id, target in sorted(targets.items()):
+            channel = channels[channel_id]
+            desired = target if args.max_step <= 0 else max(
+                args.min_weight, min(channel.weight + args.max_step,
+                                     max(channel.weight - args.max_step, target))
+            )
+            if desired == channel.weight:
+                continue
+            actions.append({
+                "channel": channel_id, "action": "rebalance_weight",
+                "from_weight": channel.weight, "to_weight": desired,
+                "target_weight": target, "avg_ttft_ms": round(channel.avg_ttft_ms, 1),
+            })
+            if not args.dry_run:
+                weight_updates.append((channel_id, desired))
+                channel.weight = desired
+        if not args.dry_run:
+            update_weights(weight_updates)
+
+        payload = {
+            "timestamp": int(time.time()), "group": GROUP,
+            "window_seconds": args.window_seconds, "threshold_ms": args.threshold_ms,
+            "error_threshold": args.error_threshold,
+            "unavailable_error_threshold": args.unavailable_error_threshold,
+            "unavailable_min_attempts": args.unavailable_min_attempts,
+            "unavailable_max_success_rate": args.unavailable_max_success_rate,
+            "min_samples": args.min_samples,
+            "min_window_requests": args.min_window_requests,
+            "recent_limit": args.recent_limit,
+            "total_weight": args.total_weight,
+            "channels": [
+                {"channel": c.channel_id, "status": c.status, "priority": c.priority,
+                 "weight": c.weight, "attempts": c.attempts, "success_count": c.success_count,
+                 "success_rate": round(c.success_count / c.attempts, 6) if c.attempts else 0.0,
+                 "ttft_samples": c.ttft_samples,
+                 "avg_ttft_ms": round(c.avg_ttft_ms, 1), "cost_multiplier": round(c.cost_multiplier, 6),
+                 "cost_speed_score": round(c.cost_speed_score, 8), "error_count": c.error_count,
+                 "quota_errors": c.quota_errors, "last_error": safe_error(c.last_error),
+                 "metric_source": c.metric_source}
+                for c in channels.values()
+            ],
+            "actions": actions, "dry_run": args.dry_run,
+            "invariants": {"priority_changed": False, "probe_sent": False,
+                            "disable_policy": "quota_or_long_term_unavailable",
+                            "enabled_weight_total": sum(c.weight for c in channels.values() if c.status == 1)},
+        }
+        if not args.dry_run:
+            save_state(args.state, payload)
+            append_event(args.event_log, payload)
+        print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except BlockingIOError:
+        print("another instance is running")
+        raise SystemExit(0)
+    except Exception as exc:
+        print(f"controller failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        raise SystemExit(1)

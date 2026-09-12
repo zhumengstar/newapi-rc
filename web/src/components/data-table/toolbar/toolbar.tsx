@@ -40,7 +40,14 @@ type FilterDef = {
     iconNode?: React.ReactNode
     count?: number
   }[]
+  renderOptionActions?: (option: {
+    label: string
+    value: string
+    count?: number
+  }) => React.ReactNode
   singleSelect?: boolean
+  onClear?: () => void
+  onOptionReorder?: (sourceValue: string, targetValue: string) => void
 }
 
 type SearchDraft = {
@@ -117,6 +124,10 @@ export type DataTableToolbarProps<TData> = {
    * Hide the View Options (column visibility) dropdown.
    */
   hideViewOptions?: boolean
+  /**
+   * Show per-column move controls in the View Options dropdown.
+   */
+  enableColumnReordering?: boolean
   /**
    * Optional view-mode toggle (e.g. table vs. card) rendered in the right
    * action cluster, before the View Options dropdown. Typically a
@@ -266,6 +277,9 @@ export function DataTableToolbar<TData>(props: DataTableToolbarProps<TData>) {
             title={filter.title}
             options={filter.options}
             singleSelect={filter.singleSelect}
+            onClear={filter.onClear}
+            renderOptionActions={filter.renderOptionActions}
+            onOptionReorder={filter.onOptionReorder}
           />
         )
       }),
@@ -312,7 +326,10 @@ export function DataTableToolbar<TData>(props: DataTableToolbarProps<TData>) {
   ) : null
 
   const viewOptionsNode = !props.hideViewOptions ? (
-    <DataTableViewOptions table={props.table} />
+    <DataTableViewOptions
+      table={props.table}
+      enableColumnReordering={props.enableColumnReordering}
+    />
   ) : null
 
   const viewToggleNode = props.viewToggle ?? null

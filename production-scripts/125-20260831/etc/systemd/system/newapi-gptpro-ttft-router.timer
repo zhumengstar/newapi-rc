@@ -1,0 +1,12 @@
+[Unit]
+Description=Route NewAPI GPTPro channels every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=60s
+AccuracySec=5s
+Persistent=true
+Unit=newapi-gptpro-ttft-router.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,515 @@
+#!/usr/bin/env python3
+"""Dynamically route the NewAPI gpt discount group for availability and cost.
+
+The controller runs once per minute. It uses one-hour terminal request data to
+rank healthy channels, isolates redundant unhealthy channels, and keeps the
+last provider for a model online at minimum traffic. Script-disabled channels
+return as low-volume canaries after a cooldown.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import fcntl
+import json
+import math
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+
+POSTGRES_CONTAINER = "newapi-standalone-postgres"
+POSTGRES_USER = "newapi"
+POSTGRES_DB = "new-api"
+DEFAULT_STATE = Path("/var/lib/newapi-gpt-discount-ha-controller/state.json")
+DEFAULT_LOCK = Path("/run/newapi-gpt-discount-ha-controller.lock")
+GROUP = "gpt特惠组"
+MANAGED_REASON = "脚本动态调控："
+
+
+@dataclass
+class Channel:
+    channel_id: int
+    status: int
+    priority: int
+    weight: int
+    auto_ban: bool
+    name: str
+    other: dict
+    models: set[str]
+    attempts: int = 0
+    success: int = 0
+    errors: int = 0
+    zero_quota: int = 0
+    p95_seconds: float = 120.0
+    ttft_samples: int = 0
+    avg_ttft_ms: float = 0.0
+
+    @property
+    def bad(self) -> int:
+        return self.errors + self.zero_quota
+
+    @property
+    def bad_rate(self) -> float:
+        return self.bad / self.attempts if self.attempts else 0.0
+
+    @property
+    def cost(self) -> float:
+        match = re.match(r"^(\d{3,4})(?:-|$)", self.name)
+        if not match:
+            return 1.0
+        digits = match.group(1)
+        value = int(digits) / (10 ** (len(digits) - 1))
+        return value if value > 0 else 1.0
+
+    @property
+    def score(self) -> float:
+        # A 20-attempt prior prevents a low-sample channel from becoming primary.
+        smoothed_success = (self.success + 18.0) / (self.attempts + 20.0)
+        latency_factor = 1.0 + min(max(self.p95_seconds, 0.0), 300.0) / 120.0
+        # TTFT is milliseconds in logs.other.frt. Keep it a moderate factor so
+        # reliability remains more important than a fast first token.
+        ttft_factor = 1.0 + min(max(self.avg_ttft_ms, 0.0), 120_000.0) / 60_000.0
+        return math.pow(smoothed_success, 4) / (self.cost * latency_factor * ttft_factor)
+
+
+def run_psql(sql: str) -> str:
+    proc = subprocess.run(
+        [
+            "docker", "exec", POSTGRES_CONTAINER, "psql", "-X",
+            "-v", "ON_ERROR_STOP=1", "-U", POSTGRES_USER, "-d", POSTGRES_DB,
+            "-Atq", "-F", "\t", "-c", sql,
+        ],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=45,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"psql failed with exit code {proc.returncode}")
+    return proc.stdout
+
+
+def sql_text(value: str) -> str:
+    encoded = base64.b64encode(value.encode("utf-8")).decode("ascii")
+    return f"convert_from(decode('{encoded}', 'base64'), 'UTF8')"
+
+
+def load_state(path: Path) -> dict:
+    if not path.exists():
+        return {"version": 1, "channels": {}, "rank_candidate": [], "rank_streak": 0}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("version") != 1:
+        raise RuntimeError("unsupported state version")
+    data.setdefault("channels", {})
+    data.setdefault("rank_candidate", [])
+    data.setdefault("rank_streak", 0)
+    return data
+
+
+def save_state(path: Path, state: dict) -> None:
+    path.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=".state.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp_name, 0o600)
+        os.replace(tmp_name, path)
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+
+
+def parse_json(value: str) -> dict:
+    try:
+        parsed = json.loads(value or "{}")
+        return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def fetch_channels(window_minutes: int) -> dict[int, Channel]:
+    group_sql = sql_text(GROUP)
+    sql = f"""
+WITH group_channels AS (
+  SELECT c.id, c.status, c.priority, c.weight, c.auto_ban, c.name, c.other
+  FROM channels c
+  -- Channel priority/weight is global in NewAPI. Never manage a channel that
+  -- is shared with another group, otherwise routing changes leak across groups.
+  WHERE btrim(coalesce(c."group", '')) = {group_sql}
+), stats AS (
+  SELECT l.channel_id,
+         count(*) FILTER (WHERE l.type = 5 OR l.type = 2) AS attempts,
+         count(*) FILTER (WHERE l.type = 2 AND l.quota > 0) AS success,
+         count(*) FILTER (WHERE l.type = 5) AS errors,
+         count(*) FILTER (WHERE l.type = 2 AND l.quota <= 0) AS zero_quota,
+         coalesce(percentile_cont(0.95) WITHIN GROUP (ORDER BY l.use_time)
+           FILTER (WHERE l.type = 2 AND l.quota > 0), 120) AS p95_seconds,
+         count(*) FILTER (
+           WHERE l.type = 2 AND l.quota > 0 AND coalesce(l.other, '') <> ''
+             AND (l.other::jsonb->>'frt') ~ '^[0-9]+([.][0-9]+)?$'
+         ) AS ttft_samples,
+         coalesce(avg((l.other::jsonb->>'frt')::numeric) FILTER (
+           WHERE l.type = 2 AND l.quota > 0 AND coalesce(l.other, '') <> ''
+             AND (l.other::jsonb->>'frt') ~ '^[0-9]+([.][0-9]+)?$'
+         ), 0) AS avg_ttft_ms
+  FROM logs l JOIN group_channels gc ON gc.id = l.channel_id
+  WHERE l.created_at >= extract(epoch FROM now())::bigint - {int(window_minutes) * 60}
+    AND l.type IN (2, 5)
+  GROUP BY l.channel_id
+), model_sets AS (
+  SELECT a.channel_id, string_agg(DISTINCT a.model, E'\\x1f') AS models
+  FROM abilities a JOIN group_channels gc ON gc.id = a.channel_id
+  WHERE a.enabled
+  GROUP BY a.channel_id
+)
+SELECT gc.id, gc.status, gc.priority, gc.weight, gc.auto_ban,
+       replace(encode(convert_to(coalesce(gc.name, ''), 'UTF8'), 'base64'), E'\\n', ''),
+       replace(encode(convert_to(coalesce(gc.other, ''), 'UTF8'), 'base64'), E'\\n', ''),
+       replace(encode(convert_to(coalesce(ms.models, ''), 'UTF8'), 'base64'), E'\\n', ''),
+       coalesce(s.attempts, 0), coalesce(s.success, 0), coalesce(s.errors, 0),
+       coalesce(s.zero_quota, 0), coalesce(s.p95_seconds, 120),
+       coalesce(s.ttft_samples, 0), coalesce(s.avg_ttft_ms, 0)
+FROM group_channels gc
+LEFT JOIN stats s ON s.channel_id = gc.id
+LEFT JOIN model_sets ms ON ms.channel_id = gc.id
+ORDER BY gc.id;
+"""
+    channels: dict[int, Channel] = {}
+    for line in run_psql(sql).splitlines():
+        fields = line.split("\t")
+        if len(fields) != 15:
+            continue
+        decode = lambda value: base64.b64decode(value).decode("utf-8", errors="replace") if value else ""
+        models_text = decode(fields[7])
+        channel = Channel(
+            channel_id=int(fields[0]), status=int(fields[1]), priority=int(fields[2]),
+            weight=int(fields[3]), auto_ban=fields[4] == "t", name=decode(fields[5]),
+            other=parse_json(decode(fields[6])),
+            models={item for item in models_text.split("\x1f") if item},
+            attempts=int(fields[8]), success=int(fields[9]), errors=int(fields[10]),
+            zero_quota=int(fields[11]), p95_seconds=float(fields[12]),
+            ttft_samples=int(fields[13]), avg_ttft_ms=float(fields[14]),
+        )
+        channels[channel.channel_id] = channel
+    return channels
+
+
+def fetch_since(channel_id: int, since: int) -> tuple[int, int]:
+    sql = f"""
+SELECT count(*) FILTER (WHERE type = 2 AND quota > 0),
+       count(*) FILTER (WHERE type = 5 OR (type = 2 AND quota <= 0))
+FROM logs
+WHERE channel_id = {int(channel_id)} AND created_at >= {int(since)} AND type IN (2, 5);
+"""
+    value = run_psql(sql).strip()
+    success, bad = value.split("\t") if value else ("0", "0")
+    return int(success), int(bad)
+
+
+def unique_models(channel: Channel, channels: dict[int, Channel]) -> set[str]:
+    result = set()
+    for model in channel.models:
+        peers = [
+            item for item in channels.values()
+            if item.channel_id != channel.channel_id and item.status == 1 and model in item.models
+        ]
+        if not peers:
+            result.add(model)
+    return result
+
+
+def reason_json(reason: str) -> str:
+    encoded = base64.b64encode(reason.encode("utf-8")).decode("ascii")
+    return f"to_jsonb(convert_from(decode('{encoded}', 'base64'), 'UTF8'))"
+
+
+def update_channel(
+    channel_id: int, status: int, priority: int, weight: int, reason: str,
+    auto_ban: bool | None = None,
+) -> None:
+    auto_ban_sql = "" if auto_ban is None else f", auto_ban = {str(auto_ban).lower()}"
+    group_sql = sql_text(GROUP)
+    sql = f"""
+BEGIN;
+WITH updated AS (
+UPDATE channels
+SET status = {int(status)}, priority = {int(priority)}, weight = {int(weight)},
+    other = jsonb_set(
+      jsonb_set(CASE WHEN coalesce(other, '') = '' THEN '{{}}'::jsonb ELSE other::jsonb END,
+        '{{status_reason}}', {reason_json(reason)}, true),
+      '{{status_time}}', to_jsonb(extract(epoch FROM now())::bigint), true)::text,
+    other_info = jsonb_set(
+      jsonb_set(CASE WHEN coalesce(other_info, '') = '' THEN '{{}}'::jsonb ELSE other_info::jsonb END,
+        '{{status_reason}}', {reason_json(reason)}, true),
+      '{{status_time}}', to_jsonb(extract(epoch FROM now())::bigint), true)::text
+    {auto_ban_sql}
+WHERE id = {int(channel_id)} AND btrim(coalesce("group", '')) = {group_sql}
+RETURNING id
+)
+UPDATE abilities SET enabled = {str(status == 1).lower()}, priority = {int(priority)}, weight = {int(weight)}
+FROM updated WHERE abilities.channel_id = updated.id;
+COMMIT;
+"""
+    run_psql(sql)
+
+
+def update_route(channel_id: int, priority: int, weight: int) -> None:
+    group_sql = sql_text(GROUP)
+    sql = f"""
+BEGIN;
+WITH updated AS (
+UPDATE channels SET priority = {int(priority)}, weight = {int(weight)}
+WHERE id = {int(channel_id)} AND status = 1
+  AND btrim(coalesce("group", '')) = {group_sql}
+RETURNING id
+)
+UPDATE abilities SET priority = {int(priority)}, weight = {int(weight)}
+FROM updated WHERE abilities.channel_id = updated.id AND abilities.enabled;
+COMMIT;
+"""
+    run_psql(sql)
+
+
+def clear_status_reason(channel_id: int) -> None:
+    group_sql = sql_text(GROUP)
+    sql = f"""
+UPDATE channels
+SET other = (CASE WHEN coalesce(other, '') = '' THEN '{{}}'::jsonb ELSE other::jsonb END
+             - 'status_reason' - 'status_time')::text,
+    other_info = (CASE WHEN coalesce(other_info, '') = '' THEN '{{}}'::jsonb ELSE other_info::jsonb END
+                  - 'status_reason' - 'status_time')::text
+WHERE id = {int(channel_id)} AND status = 1
+  AND btrim(coalesce("group", '')) = {group_sql};
+"""
+    run_psql(sql)
+
+
+def managed_reason(channel: Channel) -> str:
+    value = channel.other.get("status_reason", "")
+    return value if isinstance(value, str) else ""
+
+
+def route_plan(channels: dict[int, Channel], excluded: set[int]) -> list[tuple[int, int, int]]:
+    eligible = [
+        channel for channel in channels.values()
+        if channel.status == 1 and channel.channel_id not in excluded and channel.attempts >= 20
+    ]
+    eligible.sort(key=lambda channel: (-channel.score, channel.channel_id))
+    plan = []
+    for index, channel in enumerate(eligible):
+        priority = 20 if index == 0 else 19 if index == 1 else 18
+        weight = max(2, min(10, round(10 * channel.score / eligible[0].score))) if eligible else 2
+        plan.append((channel.channel_id, priority, weight))
+    return plan
+
+
+def self_test() -> None:
+    channel = Channel(1, 1, 10, 1, True, "0065-example", {}, {"m"}, attempts=100, success=90, p95_seconds=30)
+    assert abs(channel.cost - 0.065) < 0.000001
+    peer = Channel(2, 1, 10, 1, True, "008-example", {}, {"m"})
+    assert unique_models(channel, {1: channel, 2: peer}) == set()
+    peer.status = 3
+    assert unique_models(channel, {1: channel, 2: peer}) == {"m"}
+    print("self-test: ok")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
+    parser.add_argument("--window-minutes", type=int, default=60)
+    parser.add_argument("--min-attempts", type=int, default=20)
+    parser.add_argument("--breaker-rate", type=float, default=0.50)
+    parser.add_argument("--cooldown-minutes", type=int, default=15)
+    parser.add_argument("--recovery-successes", type=int, default=3)
+    parser.add_argument("--rank-streak", type=int, default=3)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--self-test", action="store_true")
+    args = parser.parse_args()
+    if args.self_test:
+        self_test()
+        return 0
+
+    DEFAULT_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    with DEFAULT_LOCK.open("w") as lock_handle:
+        fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        now = int(time.time())
+        state = load_state(args.state)
+        channels = fetch_channels(args.window_minutes)
+        actions: list[dict] = []
+        excluded: set[int] = set()
+
+        for channel in channels.values():
+            key = str(channel.channel_id)
+            channel_state = state["channels"].setdefault(key, {})
+            reason = managed_reason(channel)
+            mode = channel_state.get("mode", "")
+
+            if channel.status == 1 and reason.startswith("脚本禁用："):
+                actions.append({"action": "clear_stale_reason", "channel": channel.channel_id})
+                if not args.dry_run:
+                    clear_status_reason(channel.channel_id)
+                reason = ""
+
+            # Recover state after an interrupted run that committed DB changes
+            # before the atomic state file was written.
+            if channel.status == 3 and reason.startswith(MANAGED_REASON) and not mode:
+                channel_state.update({
+                    "mode": "disabled",
+                    "disabled_at": int(channel.other.get("status_time", now)),
+                })
+                mode = "disabled"
+
+            # A manually disabled channel must never be revived by an old
+            # controller state. Only this controller's own status reason is
+            # eligible for its cooldown/canary recovery path.
+            if channel.status != 1 and mode and not reason.startswith(MANAGED_REASON):
+                actions.append({"action": "respect_manual_disable", "channel": channel.channel_id})
+                channel_state.clear()
+                continue
+
+            if mode == "disabled" and channel.status == 3:
+                disabled_at = int(channel_state.get("disabled_at", now))
+                if now - disabled_at >= args.cooldown_minutes * 60:
+                    top_priority = max((item.priority for item in channels.values() if item.status == 1), default=20)
+                    action = {"action": "canary", "channel": channel.channel_id, "priority": top_priority, "weight": 1}
+                    actions.append(action)
+                    if not args.dry_run:
+                        update_channel(
+                            channel.channel_id, 1, top_priority, 1,
+                            f"{MANAGED_REASON}冷却结束，低流量恢复观察", auto_ban=True,
+                        )
+                        channel.status, channel.priority, channel.weight = 1, top_priority, 1
+                        channel_state.update({"mode": "canary", "canary_since": now})
+                excluded.add(channel.channel_id)
+                continue
+
+            if mode == "canary" and channel.status == 1:
+                success, bad = fetch_since(channel.channel_id, int(channel_state.get("canary_since", now)))
+                excluded.add(channel.channel_id)
+                if bad > 0:
+                    action = {"action": "re_disable_canary", "channel": channel.channel_id, "bad": bad}
+                    actions.append(action)
+                    if not args.dry_run:
+                        update_channel(
+                            channel.channel_id, 3, channel.priority, 1,
+                            f"{MANAGED_REASON}恢复观察失败，重新冷却", auto_ban=False,
+                        )
+                        channel.status = 3
+                        channel_state.update({"mode": "disabled", "disabled_at": now})
+                elif success >= args.recovery_successes:
+                    action = {"action": "recover", "channel": channel.channel_id, "success": success}
+                    actions.append(action)
+                    if not args.dry_run:
+                        channel_state.clear()
+                        channel_state["mode"] = "normal"
+                        update_channel(channel.channel_id, 1, channel.priority, max(channel.weight, 2), f"{MANAGED_REASON}恢复观察通过")
+                        excluded.discard(channel.channel_id)
+                continue
+
+            unhealthy = (
+                channel.status == 1 and channel.auto_ban and channel.attempts >= args.min_attempts
+                and channel.bad_rate >= args.breaker_rate
+            )
+            if unhealthy:
+                protected = unique_models(channel, channels)
+                if protected:
+                    excluded.add(channel.channel_id)
+                    action = {
+                        "action": "degrade_protected", "channel": channel.channel_id,
+                        "bad_rate": round(channel.bad_rate, 4), "unique_models": sorted(protected),
+                    }
+                    actions.append(action)
+                    if not args.dry_run and (channel.priority != 5 or channel.weight != 1 or not reason.startswith(MANAGED_REASON)):
+                        update_channel(
+                            channel.channel_id, 1, 5, 1,
+                            f"{MANAGED_REASON}失败率 {channel.bad_rate:.1%}，唯一模型渠道保底运行",
+                        )
+                        channel.priority, channel.weight = 5, 1
+                    continue
+
+                excluded.add(channel.channel_id)
+                action = {"action": "disable", "channel": channel.channel_id, "bad_rate": round(channel.bad_rate, 4)}
+                actions.append(action)
+                if not args.dry_run:
+                    update_channel(
+                        channel.channel_id, 3, channel.priority, channel.weight,
+                        f"{MANAGED_REASON}最近 {channel.attempts} 次失败率 {channel.bad_rate:.1%}，冷却 {args.cooldown_minutes} 分钟",
+                        auto_ban=False,
+                    )
+                    channel.status = 3
+                    channel_state.update({"mode": "disabled", "disabled_at": now})
+
+        plan = route_plan(channels, excluded)
+        candidate = [channel_id for channel_id, _, _ in plan]
+        if candidate == state.get("rank_candidate", []):
+            state["rank_streak"] = int(state.get("rank_streak", 0)) + 1
+        else:
+            state["rank_candidate"] = candidate
+            state["rank_streak"] = 1
+
+        if state["rank_streak"] >= args.rank_streak:
+            for channel_id, priority, weight in plan:
+                channel = channels[channel_id]
+                if channel.priority == priority and (
+                    channel.weight == weight or abs(channel.weight - weight) < 2
+                ):
+                    continue
+                actions.append({
+                    "action": "route", "channel": channel_id, "priority": priority,
+                    "weight": weight, "cost": round(channel.cost, 4),
+                    "bad_rate": round(channel.bad_rate, 4), "p95": round(channel.p95_seconds, 1),
+                    "avg_ttft_ms": round(channel.avg_ttft_ms, 1),
+                })
+                if not args.dry_run:
+                    update_route(channel_id, priority, weight)
+
+        if not args.dry_run:
+            save_state(args.state, state)
+        metrics = [
+            {
+                "channel": channel.channel_id, "status": channel.status,
+                "attempts": channel.attempts, "success": channel.success,
+                "bad_rate": round(channel.bad_rate, 4), "p95": round(channel.p95_seconds, 1),
+                "ttft_samples": channel.ttft_samples,
+                "avg_ttft_ms": round(channel.avg_ttft_ms, 1),
+                "avg_ttft_seconds": round(channel.avg_ttft_ms / 1000.0, 3),
+                "cost": round(channel.cost, 4), "score": round(channel.score, 4),
+                "priority": channel.priority, "weight": channel.weight,
+            }
+            for channel in channels.values() if channel.status == 1
+        ]
+        ttft_samples = sum(channel.ttft_samples for channel in channels.values() if channel.status == 1)
+        group_avg_ttft_ms = (
+            sum(channel.avg_ttft_ms * channel.ttft_samples for channel in channels.values() if channel.status == 1)
+            / ttft_samples if ttft_samples else 0.0
+        )
+        print(json.dumps({
+            "group": GROUP, "channels": len(channels), "rank_streak": state["rank_streak"],
+            "ttft_samples": ttft_samples,
+            "avg_ttft_ms": round(group_avg_ttft_ms, 1),
+            "avg_ttft_seconds": round(group_avg_ttft_ms / 1000.0, 3),
+            "actions": actions, "metrics": metrics, "dry_run": args.dry_run,
+        }, ensure_ascii=False, separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except BlockingIOError:
+        print("another instance is running")
+        raise SystemExit(0)
+    except Exception as exc:
+        print(f"controller failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        raise SystemExit(1)

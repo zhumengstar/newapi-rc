@@ -1,0 +1,17 @@
+[Unit]
+Description=Muling account manager weekly quota refresh
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/muling-account-manager/deploy/run-weekly-auto-refresh-server.sh
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/muling-account-manager/data /opt/muling-account-manager/logs

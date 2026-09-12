@@ -1,11 +1,13 @@
 package model
 
 import (
+	"context"
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand"
+	"sort"
 	"strings"
 	"sync"
 
@@ -21,39 +23,74 @@ import (
 )
 
 type Channel struct {
-	Id                 int     `json:"id"`
-	Type               int     `json:"type" gorm:"default:0"`
-	Key                string  `json:"key" gorm:"not null"`
-	OpenAIOrganization *string `json:"openai_organization"`
-	TestModel          *string `json:"test_model"`
-	Status             int     `json:"status" gorm:"default:1"`
-	Name               string  `json:"name" gorm:"index"`
-	Weight             *uint   `json:"weight" gorm:"default:0"`
-	CreatedTime        int64   `json:"created_time" gorm:"bigint"`
-	TestTime           int64   `json:"test_time" gorm:"bigint"`
-	ResponseTime       int     `json:"response_time"` // in milliseconds
-	BaseURL            *string `json:"base_url" gorm:"column:base_url;default:''"`
-	Other              string  `json:"other"`
-	Balance            float64 `json:"balance"` // in USD
-	BalanceUpdatedTime int64   `json:"balance_updated_time" gorm:"bigint"`
-	Models             string  `json:"models"`
-	Group              string  `json:"group" gorm:"type:varchar(64);default:'default'"`
-	UsedQuota          int64   `json:"used_quota" gorm:"bigint;default:0"`
-	ModelMapping       *string `json:"model_mapping" gorm:"type:text"`
+	Id                 int      `json:"id"`
+	Type               int      `json:"type" gorm:"default:0"`
+	Key                string   `json:"key" gorm:"not null"`
+	OpenAIOrganization *string  `json:"openai_organization"`
+	TestModel          *string  `json:"test_model"`
+	Status             int      `json:"status" gorm:"default:1"`
+	Name               string   `json:"name" gorm:"index"`
+	Contact            string   `json:"contact" gorm:"type:varchar(255);index"`
+	Weight             *uint    `json:"weight" gorm:"default:0"`
+	CreatedTime        int64    `json:"created_time" gorm:"bigint"`
+	TestTime           int64    `json:"test_time" gorm:"bigint"`
+	ResponseTime       int      `json:"response_time"` // in milliseconds
+	BaseURL            *string  `json:"base_url" gorm:"column:base_url;default:''"`
+	Other              string   `json:"other"`
+	Balance            float64  `json:"balance"` // in USD
+	BalanceUpdatedTime int64    `json:"balance_updated_time" gorm:"bigint"`
+	ChannelRatio       *float64 `json:"channel_ratio"`
+	// ChannelRatioProvided distinguishes an omitted ratio from an explicit null
+	// in partial update requests. It is never persisted or returned to clients.
+	ChannelRatioProvided bool    `json:"-" gorm:"-"`
+	Models               string  `json:"models"`
+	Group                string  `json:"group" gorm:"type:varchar(64);default:'default'"`
+	UsedQuota            int64   `json:"used_quota" gorm:"bigint;default:0"`
+	ModelMapping         *string `json:"model_mapping" gorm:"type:text"`
 	//MaxInputTokens     *int    `json:"max_input_tokens" gorm:"default:0"`
 	StatusCodeMapping *string `json:"status_code_mapping" gorm:"type:varchar(1024);default:''"`
 	Priority          *int64  `json:"priority" gorm:"bigint;default:0"`
-	AutoBan           *int    `json:"auto_ban" gorm:"default:1"`
-	OtherInfo         string  `json:"other_info"`
-	Tag               *string `json:"tag" gorm:"index"`
-	Setting           *string `json:"setting" gorm:"type:text"` // 渠道额外设置
-	ParamOverride     *string `json:"param_override" gorm:"type:text"`
-	HeaderOverride    *string `json:"header_override" gorm:"type:text"`
-	Remark            *string `json:"remark" gorm:"type:varchar(255)" validate:"max=255"`
+	// CostTier is the provider cost layer used by routing. InputPrice and
+	// OutputPrice are optional upstream unit-price hints, not user billing data.
+	CostTier    int     `json:"cost_tier" gorm:"index"`
+	InputPrice  float64 `json:"input_price"`
+	OutputPrice float64 `json:"output_price"`
+	AutoBan     *int    `json:"auto_ban" gorm:"default:1"`
+	// RPMLimit caps requests routed through this channel in a fixed
+	// one-minute window. Zero disables the channel-level limit.
+	RPMLimit int `json:"rpm_limit" gorm:"default:0;index"`
+	// Adaptive routing adjusts enabled ability weights from recent per-channel
+	// request quality. It never changes channel status or priority.
+	AdaptiveEnabled         bool   `json:"adaptive_enabled"`
+	AdaptiveWindowSeconds   int    `json:"adaptive_window_seconds"`
+	AdaptiveMinSamples      int    `json:"adaptive_min_samples"`
+	AdaptiveSlowThresholdMs int    `json:"adaptive_slow_threshold_ms"`
+	AdaptiveMinWeight       uint   `json:"adaptive_min_weight"`
+	AdaptiveMaxWeight       uint   `json:"adaptive_max_weight"`
+	AdaptiveRecoveryWeight  uint   `json:"adaptive_recovery_weight"`
+	AdaptiveCooldownSeconds int    `json:"adaptive_cooldown_seconds"`
+	AdaptiveLastEvaluatedAt int64  `json:"adaptive_last_evaluated_at" gorm:"bigint"`
+	AdaptiveLastAppliedAt   int64  `json:"adaptive_last_applied_at" gorm:"bigint"`
+	AdaptiveLastReason      string `json:"adaptive_last_reason" gorm:"type:text"`
+	OtherInfo               string `json:"other_info"`
+	// SiteType is the independently editable NewAPI/Sub2API site classification.
+	SiteType       *string `json:"site_type" gorm:"type:varchar(16);index"`
+	Tag            *string `json:"tag" gorm:"index"`
+	Setting        *string `json:"setting" gorm:"type:text"` // 渠道额外设置
+	ParamOverride  *string `json:"param_override" gorm:"type:text"`
+	HeaderOverride *string `json:"header_override" gorm:"type:text"`
+	Remark         *string `json:"remark" gorm:"type:varchar(255)" validate:"max=255"`
 	// add after v0.8.5
 	ChannelInfo ChannelInfo `json:"channel_info" gorm:"type:json"`
 
 	OtherSettings string `json:"settings" gorm:"column:settings"` // 其他设置，存储azure版本等不需要检索的信息，详见dto.ChannelOtherSettings
+	// Balance credentials are encrypted at rest and never serialized in API responses.
+	BalanceAccessToken           string `json:"-" gorm:"column:balance_access_token;type:text"`
+	BalanceUsername              string `json:"-" gorm:"column:balance_username;type:varchar(255)"`
+	BalancePassword              string `json:"-" gorm:"column:balance_password;type:text"`
+	BalanceMode                  string `json:"balance_mode" gorm:"column:balance_mode;type:varchar(16)"`
+	BalanceAccessTokenConfigured bool   `json:"balance_access_token_configured" gorm:"-"`
+	BalanceLoginConfigured       bool   `json:"balance_login_configured" gorm:"-"`
 
 	// cache info
 	Keys []string `json:"-" gorm:"-"`
@@ -70,21 +107,26 @@ type ChannelInfo struct {
 }
 
 type ChannelSortOptions struct {
-	SortBy    string
-	SortOrder string
-	IDSort    bool
+	SortBy     string
+	SortOrder  string
+	IDSort     bool
+	GroupOrder []string
 }
 
 var channelSortColumns = map[string]string{
 	"id":            "id",
 	"name":          "name",
+	"site_type":     "site_type",
+	"type":          "type",
 	"priority":      "priority",
 	"balance":       "balance",
+	"channel_ratio": "channel_ratio",
+	"used_quota":    "used_quota",
 	"response_time": "response_time",
 	"test_time":     "test_time",
 }
 
-func NewChannelSortOptions(sortBy string, sortOrder string, idSort bool) ChannelSortOptions {
+func NewChannelSortOptions(sortBy string, sortOrder string, idSort bool, groupOrder ...string) ChannelSortOptions {
 	normalizedSortBy := strings.ToLower(strings.TrimSpace(sortBy))
 	normalizedSortOrder := strings.ToLower(strings.TrimSpace(sortOrder))
 	if _, ok := channelSortColumns[normalizedSortBy]; !ok {
@@ -95,18 +137,44 @@ func NewChannelSortOptions(sortBy string, sortOrder string, idSort bool) Channel
 	}
 
 	return ChannelSortOptions{
-		SortBy:    normalizedSortBy,
-		SortOrder: normalizedSortOrder,
-		IDSort:    idSort,
+		SortBy:     normalizedSortBy,
+		SortOrder:  normalizedSortOrder,
+		IDSort:     idSort,
+		GroupOrder: normalizeChannelGroupOrder(groupOrder),
 	}
 }
 
 func (options ChannelSortOptions) Apply(query *gorm.DB) *gorm.DB {
+	if options.SortBy == "" && len(options.GroupOrder) > 0 {
+		caseSQL := "CASE"
+		args := make([]any, 0, len(options.GroupOrder)*5+1)
+		for index, group := range options.GroupOrder {
+			caseSQL += " WHEN " + commonGroupCol + " = ? OR " + commonGroupCol + " LIKE ? OR " + commonGroupCol + " LIKE ? OR " + commonGroupCol + " LIKE ? THEN CAST(? AS INTEGER)"
+			args = append(args, group, group+",%", "%,"+group, "%,"+group+",%", index)
+		}
+		caseSQL += " ELSE CAST(? AS INTEGER) END, priority DESC, weight DESC, id"
+		args = append(args, len(options.GroupOrder))
+		// Keep the complete ordering expression in one clause. GORM prepends
+		// columns from subsequent Order calls, which would make priority sort
+		// before the group rank and split groups apart.
+		return query.Clauses(clause.OrderBy{Expression: clause.Expr{SQL: caseSQL, Vars: args}})
+	}
 	if columnName, ok := channelSortColumns[options.SortBy]; ok {
-		return query.Order(clause.OrderByColumn{
+		if columnName == "channel_ratio" {
+			// Keep NULL ratios after concrete values on every supported database.
+			// PostgreSQL otherwise puts NULLs first for descending order.
+			query = query.Order(gorm.Expr("CASE WHEN channel_ratio IS NULL THEN 1 ELSE 0 END ASC"))
+		}
+		query = query.Order(clause.OrderByColumn{
 			Column: clause.Column{Name: columnName},
 			Desc:   options.SortOrder != "asc",
 		})
+		// Keep pagination deterministic when multiple channels have the same
+		// value for the selected column.
+		if columnName != "id" {
+			query = query.Order(clause.OrderByColumn{Column: clause.Column{Name: "id"}})
+		}
+		return query
 	}
 	if options.IDSort {
 		return query.Order(clause.OrderByColumn{
@@ -118,6 +186,25 @@ func (options ChannelSortOptions) Apply(query *gorm.DB) *gorm.DB {
 		Column: clause.Column{Name: "priority"},
 		Desc:   true,
 	})
+}
+
+func normalizeChannelGroupOrder(groups []string) []string {
+	ordered := make([]string, 0, len(groups))
+	seen := make(map[string]struct{}, len(groups))
+	for _, raw := range groups {
+		for _, part := range strings.Split(raw, ",") {
+			group := strings.TrimSpace(part)
+			if group == "" {
+				continue
+			}
+			if _, exists := seen[group]; exists {
+				continue
+			}
+			seen[group] = struct{}{}
+			ordered = append(ordered, group)
+		}
+	}
+	return ordered
 }
 
 func resolveChannelSortOptions(idSort bool, sortOptions []ChannelSortOptions) ChannelSortOptions {
@@ -297,11 +384,320 @@ func (channel *Channel) GetGroups() []string {
 	if channel.Group == "" {
 		return []string{}
 	}
-	groups := strings.Split(strings.Trim(channel.Group, ","), ",")
-	for i, group := range groups {
-		groups[i] = strings.TrimSpace(group)
+	parts := strings.Split(strings.Trim(channel.Group, ","), ",")
+	groups := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		group := strings.TrimSpace(part)
+		if group == "" {
+			continue
+		}
+		if _, exists := seen[group]; exists {
+			continue
+		}
+		seen[group] = struct{}{}
+		groups = append(groups, group)
 	}
 	return groups
+}
+
+func GetChannelGroups() ([]string, error) {
+	var channels []Channel
+	if err := DB.Model(&Channel{}).Select(commonGroupCol).Find(&channels).Error; err != nil {
+		return nil, err
+	}
+
+	groupSet := make(map[string]struct{})
+	for i := range channels {
+		for _, group := range channels[i].GetGroups() {
+			if group != "" {
+				groupSet[group] = struct{}{}
+			}
+		}
+	}
+
+	groups := make([]string, 0, len(groupSet))
+	for group := range groupSet {
+		groups = append(groups, group)
+	}
+	sort.Strings(groups)
+	return groups, nil
+}
+
+// UpdateChannelGroupAdaptiveEnabled updates every channel that belongs to the
+// exact group. Group membership is stored as a comma-separated list, so use
+// the shared cross-database filter instead of a dialect-specific expression.
+func UpdateChannelGroupAdaptiveEnabled(group string, enabled bool) (int64, error) {
+	group = NormalizeChannelGroupFilter(group)
+	if group == "" || strings.Contains(group, ",") {
+		return 0, errors.New("group is required")
+	}
+	result := ApplyChannelGroupFilter(DB.Model(&Channel{}), group).
+		Update("adaptive_enabled", enabled)
+	return result.RowsAffected, result.Error
+}
+
+// UpdateChannelAdaptiveEnabled updates only one channel's adaptive-routing flag.
+func UpdateChannelAdaptiveEnabled(id int, enabled bool) error {
+	if id <= 0 {
+		return errors.New("channel ID is invalid")
+	}
+	result := DB.Model(&Channel{}).Where("id = ?", id).
+		Update("adaptive_enabled", enabled)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
+}
+
+// ApplyChannelGroupPriorityOrder assigns each group a reserved priority range:
+// 1-9, 11-19, 21-29... . A channel in multiple groups receives the earliest
+// matching group's range, while each ability uses the top value of its group's
+// range. Existing channel priorities are kept as an offset inside the new
+// range whenever possible.
+func ApplyChannelGroupPriorityOrder(groups []string) (int64, error) {
+	return ApplyChannelGroupPriorityOrderWithStep(context.Background(), groups, 10)
+}
+
+// ApplyChannelGroupPriorityOrderWithStep is the shared atomic implementation
+// for both an operator-supplied group order and scheduled normalization.
+func ApplyChannelGroupPriorityOrderWithStep(ctx context.Context, groups []string, step int64) (int64, error) {
+	if step < 2 {
+		return 0, errors.New("priority step must reserve at least one value")
+	}
+	ordered := make([]string, 0, len(groups))
+	seen := make(map[string]struct{}, len(groups))
+	for _, raw := range groups {
+		group := NormalizeChannelGroupFilter(raw)
+		if group == "" {
+			continue
+		}
+		if strings.Contains(group, ",") {
+			return 0, errors.New("group must be a single group")
+		}
+		if _, ok := seen[group]; ok {
+			continue
+		}
+		seen[group] = struct{}{}
+		ordered = append(ordered, group)
+	}
+	if len(ordered) == 0 {
+		return 0, errors.New("groups are required")
+	}
+
+	var updated int64
+	err := DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var channels []Channel
+		if err := lockForUpdate(tx.Model(&Channel{})).Select("id", commonGroupCol, "priority", "weight").Find(&channels).Error; err != nil {
+			return err
+		}
+		channelPriority := make(map[int]int64)
+		for index, group := range ordered {
+			rangeStart := int64(index)*step + 1
+			groupPriority := rangeStart + step - 2
+			for _, channel := range channels {
+				for _, member := range channel.GetGroups() {
+					if member == group {
+						if _, exists := channelPriority[channel.Id]; !exists {
+							offset := int64(0)
+							if channel.Priority != nil {
+								offset = *channel.Priority % step
+							}
+							if offset < 1 || offset > step-1 {
+								offset = step - 1
+							}
+							channelPriority[channel.Id] = rangeStart + offset - 1
+						}
+						break
+					}
+				}
+			}
+			if err := tx.Model(&Ability{}).Where(commonGroupCol+" = ?", group).Update("priority", groupPriority).Error; err != nil {
+				return err
+			}
+		}
+		for channelID, priority := range channelPriority {
+			result := tx.Model(&Channel{}).Where("id = ?", channelID).Update("priority", priority)
+			if result.Error != nil {
+				return result.Error
+			}
+			updated += result.RowsAffected
+		}
+		// Keep every group's actual routing weights within a fixed 300-point
+		// budget. Multi-group channels receive a separate ability weight for each
+		// group; a channel-level weight alone cannot represent that relationship.
+		if err := rebalanceChannelGroupWeights(tx, ordered, channels, 0); err != nil {
+			return err
+		}
+		return nil
+	})
+	return updated, err
+}
+
+const channelGroupWeightBudget uint = 300
+
+func rebalanceChannelGroupWeights(tx *gorm.DB, groups []string, channels []Channel, fixedChannelID int) error {
+	visibleWeightAssigned := make(map[int]bool)
+	for _, group := range groups {
+		members := make([]Channel, 0)
+		for _, channel := range channels {
+			for _, member := range channel.GetGroups() {
+				if member == group {
+					members = append(members, channel)
+					break
+				}
+			}
+		}
+		if len(members) == 0 {
+			continue
+		}
+		weights := make([]uint, len(members))
+		var total uint64
+		for index := range members {
+			if members[index].Weight != nil {
+				weights[index] = *members[index].Weight
+			}
+			total += uint64(weights[index])
+		}
+		fixedIndex := -1
+		if fixedChannelID > 0 {
+			for index := range members {
+				if members[index].Id == fixedChannelID {
+					fixedIndex = index
+					break
+				}
+			}
+		}
+		remaining := channelGroupWeightBudget
+		if fixedIndex >= 0 {
+			fixed := weights[fixedIndex]
+			if len(weights) == 1 {
+				fixed = channelGroupWeightBudget
+			}
+			if fixed > channelGroupWeightBudget {
+				fixed = channelGroupWeightBudget
+			}
+			weights[fixedIndex] = fixed
+			remaining -= fixed
+			var otherTotal uint64
+			for index, weight := range weights {
+				if index != fixedIndex {
+					otherTotal += uint64(weight)
+				}
+			}
+			if otherTotal == 0 {
+				others := uint(len(weights) - 1)
+				if others > 0 {
+					for index := range weights {
+						if index != fixedIndex {
+							weights[index] = remaining / others
+							remaining -= weights[index]
+						}
+					}
+				}
+			} else {
+				for index, weight := range weights {
+					if index != fixedIndex {
+						weights[index] = uint((uint64(weight) * uint64(remaining)) / otherTotal)
+						remaining -= weights[index]
+					}
+				}
+			}
+		} else if total == 0 {
+			for index := range weights {
+				weights[index] = channelGroupWeightBudget / uint(len(weights))
+				remaining -= weights[index]
+			}
+		} else {
+			for index := range weights {
+				weights[index] = uint((uint64(weights[index]) * uint64(channelGroupWeightBudget)) / total)
+				remaining -= weights[index]
+			}
+		}
+		for index := uint(0); remaining > 0; index++ {
+			target := index % uint(len(weights))
+			if int(target) == fixedIndex {
+				continue
+			}
+			weights[target]++
+			remaining--
+		}
+		for index, channel := range members {
+			// The table has one channel-level weight, so expose the first group in
+			// the supplied order. Every group still receives its own ability weight
+			// below, which is what routing actually consumes.
+			if !visibleWeightAssigned[channel.Id] {
+				if err := tx.Model(&Channel{}).Where("id = ?", channel.Id).Update("weight", weights[index]).Error; err != nil {
+					return err
+				}
+				visibleWeightAssigned[channel.Id] = true
+			}
+			// Routing uses abilities, so update every model ability in this group
+			// together with the visible channel weight. This keeps manual edits and
+			// the actual selection path consistent.
+			if err := tx.Model(&Ability{}).
+				Where("channel_id = ? AND "+commonGroupCol+" = ?", channel.Id, group).
+				Update("weight", weights[index]).Error; err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// RebalanceChannelWeightsForChannel keeps the 300-point invariant after a
+// direct channel or tag weight edit. When channelID is set, that channel's
+// edited weight is preserved and the other channels are scaled proportionally.
+// Group order is taken from persisted ability priorities.
+func RebalanceChannelWeightsForChannel(channelID int) error {
+	if commonGroupCol == "" {
+		initCol()
+	}
+	return DB.Transaction(func(tx *gorm.DB) error {
+		var channels []Channel
+		if err := lockForUpdate(tx.Model(&Channel{})).Select("id", commonGroupCol, "weight").Find(&channels).Error; err != nil {
+			return err
+		}
+		groupSet := make(map[string]struct{})
+		for _, channel := range channels {
+			for _, group := range channel.GetGroups() {
+				groupSet[group] = struct{}{}
+			}
+		}
+		groups := make([]string, 0, len(groupSet))
+		for group := range groupSet {
+			groups = append(groups, group)
+		}
+		var abilities []Ability
+		if err := lockForUpdate(tx.Model(&Ability{})).Select(commonGroupCol, "priority").Find(&abilities).Error; err != nil {
+			return err
+		}
+		groupPriority := make(map[string]int64)
+		for _, ability := range abilities {
+			priority := int64(0)
+			if ability.Priority != nil {
+				priority = *ability.Priority
+			}
+			if current, ok := groupPriority[ability.Group]; !ok || priority < current {
+				groupPriority[ability.Group] = priority
+			}
+		}
+		sort.SliceStable(groups, func(i, j int) bool {
+			pi, iok := groupPriority[groups[i]]
+			pj, jok := groupPriority[groups[j]]
+			if iok != jok {
+				return iok
+			}
+			if iok && pi != pj {
+				return pi < pj
+			}
+			return groups[i] < groups[j]
+		})
+		return rebalanceChannelGroupWeights(tx, groups, channels, channelID)
+	})
 }
 
 func (channel *Channel) GetOtherInfo() map[string]interface{} {
@@ -372,6 +768,9 @@ func GetAllChannels(startIdx int, num int, selectAll bool, idSort bool, sortOpti
 	} else {
 		err = order.Apply(DB).Limit(num).Offset(startIdx).Omit("key").Find(&channels).Error
 	}
+	for _, channel := range channels {
+		channel.NormalizeBalanceSettings()
+	}
 	return channels, err
 }
 
@@ -383,6 +782,9 @@ func GetChannelsByTag(tag string, idSort bool, selectAll bool, sortOptions ...Ch
 		query = query.Omit("key")
 	}
 	err := query.Find(&channels).Error
+	for _, channel := range channels {
+		channel.NormalizeBalanceSettings()
+	}
 	return channels, err
 }
 
@@ -416,6 +818,9 @@ func SearchChannels(keyword string, group string, model string, idSort bool, sor
 	if err != nil {
 		return nil, err
 	}
+	for _, channel := range channels {
+		channel.NormalizeBalanceSettings()
+	}
 	return channels, nil
 }
 
@@ -439,6 +844,7 @@ func GetChannelById(id int, selectAll bool) (*Channel, error) {
 	if err != nil {
 		return nil, err
 	}
+	channel.NormalizeBalanceSettings()
 	return channel, nil
 }
 
@@ -504,6 +910,19 @@ func (channel *Channel) GetPriority() int64 {
 		return 0
 	}
 	return *channel.Priority
+}
+
+// GetRoutingPriority is the cost-layer priority used by failover selection.
+// CostTier takes precedence when explicitly configured; legacy channels keep
+// their existing priority semantics.
+func (channel *Channel) GetRoutingPriority() int64 {
+	if channel == nil {
+		return 0
+	}
+	if channel.CostTier > 0 {
+		return int64(channel.CostTier)
+	}
+	return channel.GetPriority()
 }
 
 func (channel *Channel) GetWeight() int {
@@ -587,14 +1006,59 @@ func (channel *Channel) Update() error {
 			}
 		}
 	}
-	var err error
-	err = DB.Model(channel).Updates(channel).Error
+	// Keep the scalar ratio update in the same transaction as the rest of the
+	// channel edit. Struct Updates intentionally omits nil/zero fields, so an
+	// explicit null (clear) or zero ratio must be written through a map update.
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		channelUpdates := tx.Model(channel)
+		if channel.ChannelRatioProvided {
+			channelUpdates = channelUpdates.Omit("channel_ratio")
+		}
+		if err := channelUpdates.Updates(channel).Error; err != nil {
+			return err
+		}
+		if !channel.ChannelRatioProvided {
+			return nil
+		}
+
+		var ratioValue any
+		if channel.ChannelRatio != nil {
+			ratioValue = *channel.ChannelRatio
+		}
+		return tx.Model(&Channel{}).
+			Where("id = ?", channel.Id).
+			Updates(map[string]any{"channel_ratio": ratioValue}).Error
+	})
 	if err != nil {
 		return err
 	}
-	DB.Model(channel).First(channel, "id = ?", channel.Id)
+	if err := DB.Model(channel).First(channel, "id = ?", channel.Id).Error; err != nil {
+		return err
+	}
 	err = channel.UpdateAbilities(nil)
 	return err
+}
+
+// UpdateChannelRatio updates only the channel-level upstream multiplier. A
+// direct editor sends a partial channel payload, so it must not run the normal
+// channel update path or recalculate abilities from an incomplete snapshot.
+func (channel *Channel) UpdateChannelRatio() error {
+	if channel == nil || channel.Id == 0 {
+		return errors.New("channel ID is 0")
+	}
+
+	var ratioValue any
+	if channel.ChannelRatio != nil {
+		ratioValue = *channel.ChannelRatio
+	}
+	return DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&Channel{}).
+			Where("id = ?", channel.Id).
+			Updates(map[string]any{"channel_ratio": ratioValue}).Error; err != nil {
+			return err
+		}
+		return tx.First(channel, "id = ?", channel.Id).Error
+	})
 }
 
 func (channel *Channel) UpdateResponseTime(responseTime int64) {
@@ -615,6 +1079,47 @@ func (channel *Channel) UpdateBalance(balance float64) {
 	if err != nil {
 		common.SysLog(fmt.Sprintf("failed to update balance: channel_id=%d, error=%v", channel.Id, err))
 	}
+}
+
+func (channel *Channel) SetBalanceCredentials(token, username, password string) error {
+	var err error
+	if channel.BalanceAccessToken, err = common.EncryptSecret(strings.TrimSpace(token)); err != nil {
+		return err
+	}
+	channel.BalanceUsername = strings.TrimSpace(username)
+	if channel.BalancePassword, err = common.EncryptSecret(password); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (channel *Channel) GetBalanceCredentials() (token, username, password string) {
+	token, username, password, _ = channel.GetBalanceCredentialsWithError()
+	return token, username, password
+}
+
+// GetBalanceCredentialsWithError distinguishes an empty credential from a
+// stored ciphertext that can no longer be decrypted (for example after a
+// CRYPTO_SECRET change). Callers updating credentials must fail closed rather
+// than silently replacing the unreadable secret.
+func (channel *Channel) GetBalanceCredentialsWithError() (token, username, password string, err error) {
+	token, err = common.DecryptSecret(channel.BalanceAccessToken)
+	if err != nil {
+		return "", channel.BalanceUsername, "", fmt.Errorf("decrypt balance access token: %w", err)
+	}
+	password, err = common.DecryptSecret(channel.BalancePassword)
+	if err != nil {
+		return "", channel.BalanceUsername, "", fmt.Errorf("decrypt balance password: %w", err)
+	}
+	return token, channel.BalanceUsername, password, nil
+}
+
+func (channel *Channel) NormalizeBalanceSettings() {
+	if channel.BalanceMode != "manual" {
+		channel.BalanceMode = "auto"
+	}
+	channel.BalanceAccessTokenConfigured = channel.BalanceAccessToken != ""
+	channel.BalanceLoginConfigured = channel.BalanceUsername != "" && channel.BalancePassword != ""
 }
 
 func (channel *Channel) Delete() error {
@@ -799,6 +1304,9 @@ func UpdateChannelStatus(channelId int, usingKey string, status int, reason stri
 		if err != nil {
 			common.SysLog(fmt.Sprintf("failed to update channel status: channel_id=%d, status=%d, error=%v", channel.Id, status, err))
 			return false
+		}
+		if err := ClearChannelRecoveryState(context.Background(), channel.Id); err != nil {
+			common.SysError(fmt.Sprintf("failed to clear channel recovery state: channel_id=%d, error=%v", channel.Id, err))
 		}
 	}
 	return true

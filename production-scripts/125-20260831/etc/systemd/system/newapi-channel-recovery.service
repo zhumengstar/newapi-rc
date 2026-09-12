@@ -1,0 +1,22 @@
+[Unit]
+Description=NewAPI automatic channel recovery probes
+After=docker.service
+Requires=docker.service
+ConditionPathExists=/var/run/docker.sock
+
+[Service]
+Type=oneshot
+TimeoutStartSec=120s
+ExecStart=/usr/local/sbin/newapi-channel-error-guard --recovery-only --threshold 10 --recent-requests 20 --error-window-seconds 300 --hard-threshold 3 --hard-recent-requests 5 --transient-streak 10 --hard-streak 2 --recovery-fast-threshold 2 --recovery-fast-recent-requests 5 --recovery-fast-streak 2 --recovery-cooldown-seconds 180 --hard-error-cooldown-seconds 1800 --probe-timeout 8 --image-probe-timeout 90 --recovery-max-probes 1 --state /var/lib/newapi-channel-error-guard/recovery-state.json --lock /run/newapi-channel-error-guard-recovery.lock
+User=root
+Group=root
+Nice=15
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/newapi-channel-error-guard /run
+StandardOutput=append:/var/log/newapi-channel-recovery.log
+StandardError=append:/var/log/newapi-channel-recovery.log

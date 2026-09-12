@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""Persist safe NewAPI consume-log metrics without storing request/response bodies."""
+
+import argparse
+import json
+import os
+import re
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+RECORD_RE = re.compile(r"record consume log: userId=(\d+), params=(\{.*\})\s*$")
+
+
+def parse_line(line: str) -> dict | None:
+    match = RECORD_RE.search(line.rstrip("\n"))
+    if not match:
+        return None
+    try:
+        params = json.loads(match.group(2))
+    except json.JSONDecodeError:
+        return None
+    other = params.get("other") if isinstance(params.get("other"), dict) else {}
+    stream = other.get("stream_status") if isinstance(other.get("stream_status"), dict) else {}
+    segments = line.split(" | ")
+    request_id = segments[1].strip() if len(segments) > 1 else ""
+    return {
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "request_id": request_id,
+        "user_id": int(match.group(1)),
+        "channel_id": params.get("channel_id"),
+        "model": params.get("model_name"),
+        "token_name": params.get("token_name"),
+        "group": params.get("group"),
+        "prompt_tokens": params.get("prompt_tokens", 0),
+        "completion_tokens": params.get("completion_tokens", 0),
+        "cache_tokens": other.get("cache_tokens", 0),
+        "first_response_ms": other.get("frt"),
+        "use_time_seconds": params.get("use_time_seconds"),
+        "quota": params.get("quota"),
+        "is_stream": params.get("is_stream"),
+        "status": stream.get("status"),
+        "end_reason": stream.get("end_reason"),
+        "billing_source": other.get("billing_source"),
+        "billing_mode": other.get("billing_mode"),
+        "group_ratio": other.get("group_ratio"),
+        "content_recorded": bool(params.get("content")),
+    }
+
+
+def files(log_dir: Path) -> list[Path]:
+    return sorted(log_dir.glob("oneapi-*.log"), key=lambda p: p.stat().st_mtime)
+
+
+def run_once(log_dir: Path, output_dir: Path, state_path: Path) -> int:
+    if not state_path.exists():
+        state = {"offsets": {str(path): path.stat().st_size for path in files(log_dir)}}
+        state_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        state_path.write_text(json.dumps(state, ensure_ascii=True), encoding="utf-8")
+        os.chmod(state_path, 0o600)
+        return 0
+    state = json.loads(state_path.read_text())
+    seen = set(state.get("request_ids", []))
+    count = 0
+    output_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    out_path = output_dir / f"requests-{datetime.now().strftime('%Y-%m-%d')}.jsonl"
+    out_path.touch(mode=0o600, exist_ok=True)
+    os.chmod(out_path, 0o600)
+    with out_path.open("a", encoding="utf-8") as output:
+        for path in files(log_dir):
+            key = str(path)
+            offset = int(state.get("offsets", {}).get(key, 0))
+            try:
+                with path.open("r", encoding="utf-8", errors="replace") as source:
+                    source.seek(offset)
+                    for line in source:
+                        item = parse_line(line)
+                        if not item or not item["request_id"] or item["request_id"] in seen:
+                            continue
+                        output.write(json.dumps(item, ensure_ascii=True, separators=(",", ":")) + "\n")
+                        seen.add(item["request_id"])
+                        count += 1
+                    state.setdefault("offsets", {})[key] = source.tell()
+            except FileNotFoundError:
+                continue
+    state["request_ids"] = list(seen)[-10000:]
+    state_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    state_path.write_text(json.dumps(state, ensure_ascii=True), encoding="utf-8")
+    os.chmod(state_path, 0o600)
+    return count
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--log-dir", default="/opt/new-api-standalone/logs")
+    parser.add_argument("--output-dir", default="/var/log/newapi-request-monitor")
+    parser.add_argument("--state", default="/var/lib/newapi-request-monitor/state.json")
+    parser.add_argument("--interval", type=float, default=2)
+    parser.add_argument("--once", action="store_true")
+    args = parser.parse_args()
+    while True:
+        run_once(Path(args.log_dir), Path(args.output_dir), Path(args.state))
+        if args.once:
+            return
+        time.sleep(max(args.interval, 0.5))
+
+
+if __name__ == "__main__":
+    main()

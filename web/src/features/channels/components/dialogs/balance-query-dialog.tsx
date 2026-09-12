@@ -30,10 +30,17 @@ import { Dialog } from '@/components/dialog'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { IconBadge } from '@/components/ui/icon-badge'
+import { Input } from '@/components/ui/input'
 import { formatCurrencyFromUSD } from '@/lib/currency'
 import { formatTimestampToDate } from '@/lib/format'
 
-import { getCodexUsage, updateChannelBalance } from '../../api'
+import {
+  getChannelBalanceSettings,
+  getCodexUsage,
+  setChannelBalance,
+  updateChannelBalance,
+  updateChannelBalanceSettings,
+} from '../../api'
 import { channelsQueryKeys } from '../../lib'
 import { useChannels } from '../channels-provider'
 import {
@@ -61,6 +68,13 @@ export function BalanceQueryDialog(props: BalanceQueryDialogProps) {
   )
   const [codexUsageResponse, setCodexUsageResponse] =
     useState<CodexUsageDialogData | null>(null)
+  const [manualBalance, setManualBalance] = useState('')
+  const [balanceMode, setBalanceMode] = useState<'auto' | 'manual'>('auto')
+  const [balanceToken, setBalanceToken] = useState('')
+  const [balanceUsername, setBalanceUsername] = useState('')
+  const [balancePassword, setBalancePassword] = useState('')
+  const [storedCredentialsConfigured, setStoredCredentialsConfigured] =
+    useState(false)
 
   const isCodex = currentRow?.type === 57
 
@@ -90,11 +104,77 @@ export function BalanceQueryDialog(props: BalanceQueryDialogProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.open, isCodex])
 
+  useEffect(() => {
+    if (props.open && currentRow && !isCodex) {
+      // Reset values whenever the dialog switches rows to avoid displaying a
+      // previous channel's credentials while the new settings are loading.
+      setBalanceToken('')
+      setBalancePassword('')
+      setStoredCredentialsConfigured(false)
+      setBalanceMode(currentRow.balance_mode === 'manual' ? 'manual' : 'auto')
+
+      void getChannelBalanceSettings(currentRow.id)
+        .then((response) => {
+          if (!response.success || !response.data) return
+          setBalanceUsername(response.data.username)
+          setBalancePassword(response.data.password)
+          setBalanceToken(response.data.access_token)
+          setBalanceMode(response.data.mode)
+          setStoredCredentialsConfigured(
+            response.data.access_token_configured ||
+              response.data.login_configured
+          )
+        })
+        .catch((error: unknown) => {
+          toast.error(
+            error instanceof Error
+              ? error.message
+              : t('Failed to load balance settings')
+          )
+        })
+    }
+  }, [props.open, currentRow, isCodex, t])
+
   if (!currentRow) return null
 
   const handleQueryBalance = async () => {
     setIsQuerying(true)
     try {
+      const hasCredentialInput = Boolean(
+        balanceToken.trim() || balanceUsername.trim() || balancePassword
+      )
+      const hasConfiguredCredentials = Boolean(
+        currentRow.balance_access_token_configured ||
+        currentRow.balance_login_configured ||
+        storedCredentialsConfigured
+      )
+      if (!hasCredentialInput && !hasConfiguredCredentials) {
+        toast.error(t('Please log in with the appropriate credentials'))
+        return
+      }
+
+      // The update button is the primary action in this dialog. Persist any
+      // newly entered site credentials before querying, so users do not have
+      // to perform two separate actions and the backend sees the same values.
+      if (hasCredentialInput) {
+        await updateChannelBalanceSettings(currentRow.id, {
+          access_token: balanceToken.trim() || undefined,
+          username: balanceUsername.trim() || undefined,
+          password: balancePassword || undefined,
+          mode: balanceMode,
+        })
+        setCurrentRow({
+          ...currentRow,
+          balance_access_token_configured:
+            currentRow.balance_access_token_configured ||
+            Boolean(balanceToken.trim()),
+          balance_login_configured:
+            currentRow.balance_login_configured ||
+            Boolean(balanceUsername.trim() && balancePassword),
+          balance_mode: balanceMode,
+        })
+      }
+
       const response = await updateChannelBalance(currentRow.id)
       if (response.success && response.balance !== undefined) {
         const newBalance = response.balance
@@ -130,11 +210,72 @@ export function BalanceQueryDialog(props: BalanceQueryDialogProps) {
     }
   }
 
+  const handleSaveBalanceSettings = async () => {
+    try {
+      await updateChannelBalanceSettings(currentRow.id, {
+        access_token: balanceToken || undefined,
+        username: balanceUsername || undefined,
+        password: balancePassword || undefined,
+        mode: balanceMode,
+      })
+      toast.success(t('Balance settings saved'))
+      setCurrentRow({
+        ...currentRow,
+        balance_access_token_configured:
+          currentRow.balance_access_token_configured ||
+          Boolean(balanceToken.trim()),
+        balance_login_configured:
+          currentRow.balance_login_configured ||
+          Boolean(balanceUsername.trim() && balancePassword),
+        balance_mode: balanceMode,
+      })
+      await queryClient.invalidateQueries({
+        queryKey: channelsQueryKeys.lists(),
+      })
+    } catch (error: unknown) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : t('Failed to save balance settings')
+      )
+    }
+  }
+
+  const handleSaveManualBalance = async () => {
+    const value = Number(manualBalance)
+    if (!Number.isFinite(value) || value < 0) {
+      toast.error(t('Enter a valid non-negative balance'))
+      return
+    }
+    try {
+      await setChannelBalance(currentRow.id, value, balanceMode)
+      setBalance(value)
+      setBalanceUpdatedTime(Math.floor(Date.now() / 1000))
+      setCurrentRow({
+        ...currentRow,
+        balance: value,
+        balance_mode: balanceMode,
+      })
+      toast.success(t('Balance saved'))
+      await queryClient.invalidateQueries({
+        queryKey: channelsQueryKeys.lists(),
+      })
+    } catch (error: unknown) {
+      toast.error(
+        error instanceof Error ? error.message : t('Failed to save balance')
+      )
+    }
+  }
+
   const handleClose = () => {
     setBalance(null)
     setBalanceUpdatedTime(null)
     setRawResponse(null)
     setCodexUsageResponse(null)
+    setManualBalance('')
+    setBalanceToken('')
+    setBalanceUsername('')
+    setBalancePassword('')
     props.onOpenChange(false)
   }
 
@@ -241,6 +382,55 @@ export function BalanceQueryDialog(props: BalanceQueryDialogProps) {
           {!isQuerying && <RefreshCw className='mr-2 h-4 w-4' />}
           {isQuerying ? t('Querying...') : t('Update Balance')}
         </Button>
+        <div className='space-y-3 rounded-lg border p-4'>
+          <div className='text-sm font-medium'>{t('Balance access')}</div>
+          <Input
+            value={balanceUsername}
+            onChange={(e) => setBalanceUsername(e.target.value)}
+            placeholder={t('Login username or email')}
+          />
+          <Input
+            type='text'
+            value={balancePassword}
+            onChange={(e) => setBalancePassword(e.target.value)}
+            placeholder={t('Login password (leave empty to keep)')}
+          />
+          <Input
+            type='text'
+            value={balanceToken}
+            onChange={(e) => setBalanceToken(e.target.value)}
+            placeholder={t('Access token (leave empty to keep)')}
+          />
+          <div className='flex items-center gap-2'>
+            <span className='text-muted-foreground text-sm'>{t('Mode')}</span>
+            <select
+              className='bg-background h-9 rounded-md border px-2 text-sm'
+              value={balanceMode}
+              onChange={(e) =>
+                setBalanceMode(e.target.value as 'auto' | 'manual')
+              }
+            >
+              <option value='auto'>{t('Automatic refresh')}</option>
+              <option value='manual'>{t('Manual balance')}</option>
+            </select>
+          </div>
+          <Button variant='outline' onClick={handleSaveBalanceSettings}>
+            {t('Save balance settings')}
+          </Button>
+          <div className='flex gap-2'>
+            <Input
+              type='number'
+              min='0'
+              step='any'
+              value={manualBalance}
+              onChange={(e) => setManualBalance(e.target.value)}
+              placeholder={t('Manual balance value')}
+            />
+            <Button onClick={handleSaveManualBalance}>
+              {t('Save balance')}
+            </Button>
+          </div>
+        </div>
       </div>
     </Dialog>
   )

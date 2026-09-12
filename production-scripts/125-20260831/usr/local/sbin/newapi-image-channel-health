@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+"""Probe and recover image-generation channels without touching manual disables."""
+
+from __future__ import annotations
+
+import argparse
+import binascii
+import fcntl
+import json
+import os
+import subprocess
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+
+GROUP = "生成图片组"
+POSTGRES_CONTAINER = "newapi-standalone-postgres"
+POSTGRES_USER = "newapi"
+POSTGRES_DB = "new-api"
+STATE_PATH = Path("/var/lib/newapi-image-channel-health/state.json")
+LOCK_PATH = Path("/run/newapi-image-channel-health.lock")
+LOG_PATH = Path("/var/log/newapi-image-channel-health.log")
+DEFAULT_TIMEOUT = 90
+
+
+def psql(sql: str) -> str:
+    proc = subprocess.run(
+        ["docker", "exec", POSTGRES_CONTAINER, "psql", "-X", "-v", "ON_ERROR_STOP=1",
+         "-U", POSTGRES_USER, "-d", POSTGRES_DB, "-Atq", "-F", "\t", "-c", sql],
+        check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=45,
+    )
+    if proc.returncode:
+        raise RuntimeError(proc.stderr.strip() or "psql failed")
+    return proc.stdout
+
+
+def decode(value: str) -> str:
+    return binascii.unhexlify(value or "").decode("utf-8", errors="replace")
+
+
+def sql_text(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def load_channels() -> list[dict]:
+    group = sql_text(GROUP)
+    query = f"""
+SELECT id,type,status,auto_ban,priority,weight,
+       encode(convert_to(coalesce(nullif(base_url,''),' '),'UTF8'),'hex'),
+       encode(convert_to(coalesce(nullif(key,''),' '),'UTF8'),'hex'),
+       encode(convert_to(coalesce(nullif(models,''),' '),'UTF8'),'hex'),
+       encode(convert_to(coalesce(nullif(model_mapping,''),'{{}}'),'UTF8'),'hex'),
+       encode(convert_to(coalesce(nullif(other,''),'{{}}'),'UTF8'),'hex')
+FROM channels WHERE btrim(coalesce(\"group\",''))={group} ORDER BY id;
+"""
+    result = []
+    for line in psql(query).splitlines():
+        fields = line.split("\t")
+        if len(fields) != 11:
+            continue
+        result.append({
+            "id": int(fields[0]), "type": int(fields[1]), "status": int(fields[2]),
+            "auto_ban": fields[3] == "t", "priority": int(fields[4]), "weight": int(fields[5]),
+            "base_url": decode(fields[6]).strip().rstrip("/"), "key": decode(fields[7]).strip(),
+            "models": [x.strip() for x in decode(fields[8]).split(",") if x.strip()],
+            "mapping": json.loads(decode(fields[9]) or "{}"),
+            "other": json.loads(decode(fields[10]) or "{}"),
+        })
+    return result
+
+
+def load_state() -> dict:
+    if not STATE_PATH.exists():
+        return {"version": 1, "channels": {}}
+    data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    if data.get("version") != 1:
+        raise RuntimeError("unsupported state version")
+    data.setdefault("channels", {})
+    return data
+
+
+def save_state(data: dict) -> None:
+    STATE_PATH.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=".state.", dir=STATE_PATH.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False, separators=(",", ":"))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(name, 0o600)
+        os.replace(name, STATE_PATH)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def choose_model(channel: dict) -> tuple[str, str]:
+    """Prefer a low-cost alias, then flash/low, then the first configured model."""
+    candidates = []
+    for alias in channel["models"]:
+        target = str(channel["mapping"].get(alias, alias))
+        name = f"{alias} {target}".lower()
+        if "flash" in name or "low" in name:
+            rank = 0
+        elif "medium" in name or "2k" in name:
+            rank = 1
+        elif "pro" in name or "high" in name or "4k" in name:
+            rank = 2
+        else:
+            rank = 1
+        candidates.append((rank, alias, target))
+    if not candidates:
+        raise RuntimeError("channel has no configured model")
+    _, alias, target = sorted(candidates)[0]
+    return alias, target
+
+
+def request_payload(channel: dict, model: str) -> tuple[str, bytes, dict]:
+    prompt = "健康检查：生成一张极简图片，白色背景中央一个黑色圆点。"
+    if channel["type"] == 24:
+        payload = {"contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                   "generationConfig": {"responseModalities": ["IMAGE"],
+                                         "imageConfig": {"imageSize": "1K"}}}
+        return f"{channel['base_url']}/v1beta/models/{model}:generateContent", json.dumps(payload, ensure_ascii=False).encode(), {"Authorization": f"Bearer {channel['key']}"}
+    if channel["type"] == 1:
+        payload = {"model": model, "prompt": prompt, "n": 1, "size": "1024x1024", "quality": "low"}
+        return f"{channel['base_url']}/v1/images/generations", json.dumps(payload, ensure_ascii=False).encode(), {"Authorization": f"Bearer {channel['key']}"}
+    raise RuntimeError(f"unsupported image channel type {channel['type']}")
+
+
+def probe(channel: dict, timeout: int) -> tuple[bool, str, str]:
+    alias, model = choose_model(channel)
+    url, body, headers = request_payload(channel, model)
+    request = urllib.request.Request(url, data=body, method="POST", headers={"Content-Type": "application/json", **headers})
+    started = time.monotonic()
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            data = response.read(512 * 1024)
+            code = response.status
+        if code < 200 or code >= 300:
+            return False, alias, f"HTTP {code}"
+        if b"inlineData" not in data and b"b64_json" not in data and b"url" not in data:
+            return False, alias, "响应未包含图片结果"
+        return True, alias, f"HTTP {code} {time.monotonic() - started:.1f}s"
+    except urllib.error.HTTPError as exc:
+        detail = exc.read(512).decode("utf-8", errors="replace").replace("\n", " ")
+        return False, alias, f"HTTP {exc.code} {detail[:180]}"
+    except Exception as exc:
+        return False, alias, f"{type(exc).__name__}: {str(exc)[:180]}"
+
+
+def update_channel(channel_id: int, status: int, reason: str) -> None:
+    group = sql_text(GROUP)
+    reason_json = json.dumps({"status_reason": reason, "status_time": int(time.time())}, ensure_ascii=False)
+    sql = f"""
+UPDATE channels
+SET status={status},
+    other=(coalesce(nullif(other,''),'{{}}')::jsonb || {sql_text(reason_json)}::jsonb)::text,
+    other_info=(coalesce(nullif(other_info,''),'{{}}')::jsonb || {sql_text(reason_json)}::jsonb)::text
+WHERE id={channel_id}
+  AND btrim(coalesce(\"group\",''))={group}
+  AND status IN (1,3);
+"""
+    psql(sql)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
+    args = parser.parse_args()
+    LOG_PATH.parent.mkdir(mode=0o750, exist_ok=True)
+    with LOCK_PATH.open("w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 0
+        state = load_state()
+        lines = []
+        for channel in load_channels():
+            key = str(channel["id"])
+            entry = state["channels"].setdefault(key, {"managed": False})
+            if channel["status"] == 2 and not entry.get("managed"):
+                lines.append(f"channel={key} skip=manual-disabled")
+                continue
+            reason = str(channel["other"].get("status_reason", ""))
+            if channel["status"] == 3 and not entry.get("managed") and not reason.startswith("图片健康探测"):
+                lines.append(f"channel={key} skip=owned-by-other-script")
+                continue
+            if channel["status"] not in (1, 3):
+                lines.append(f"channel={key} skip=status-{channel['status']}")
+                continue
+            try:
+                ok, alias, detail = probe(channel, args.timeout)
+            except Exception as exc:
+                ok, alias, detail = False, "unknown", str(exc)
+            desired = 1 if ok else 3
+            if not args.dry_run and channel["status"] != desired:
+                update_channel(channel["id"], desired, f"图片健康探测：{'恢复启用' if ok else '探测失败'}；模型 {alias}；{detail}")
+            entry.update({"managed": True, "last_ok": ok, "model": alias, "detail": detail, "time": int(time.time())})
+            lines.append(f"channel={key} model={alias} result={'ok' if ok else 'failed'} desired_status={desired} detail={detail}")
+        save_state(state)
+        message = time.strftime("%Y-%m-%dT%H:%M:%S%z ") + " ".join(lines)
+        with LOG_PATH.open("a", encoding="utf-8") as log:
+            log.write(message + "\n")
+        print(message)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

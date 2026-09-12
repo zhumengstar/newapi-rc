@@ -1,0 +1,8 @@
+[Unit]
+Description=Validate and repair the NewAPI peer mesh allowlist on node 159
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/newapi-peer-mesh-guard --config-dir /opt/entry-nginx-private/conf.d --container entry-nginx-private --nodes-file /etc/newapi-peer-mesh.nodes --repair --reload

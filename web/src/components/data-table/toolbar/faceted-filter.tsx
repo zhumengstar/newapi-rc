@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { type Column } from '@tanstack/react-table'
+import type { Column } from '@tanstack/react-table'
 import { Check as CheckIcon, PlusCircle as PlusCircledIcon } from 'lucide-react'
 import * as React from 'react'
 import { useTranslation } from 'react-i18next'
@@ -50,8 +50,17 @@ type DataTableFacetedFilterProps<TData, TValue> = {
     iconNode?: React.ReactNode
     count?: number
   }[]
+  renderOptionActions?: (option: {
+    label: string
+    value: string
+    count?: number
+  }) => React.ReactNode
   /** Enable single select mode (only one option can be selected at a time) */
   singleSelect?: boolean
+  /** Invoked after this filter is cleared. */
+  onClear?: () => void
+  /** Enables mouse drag-and-drop reordering of options. */
+  onOptionReorder?: (sourceValue: string, targetValue: string) => void
 }
 
 function DataTableFacetedFilterInner<TData, TValue>({
@@ -59,11 +68,15 @@ function DataTableFacetedFilterInner<TData, TValue>({
   title,
   options,
   singleSelect = false,
+  onClear,
+  renderOptionActions,
+  onOptionReorder,
 }: DataTableFacetedFilterProps<TData, TValue>) {
   const { t } = useTranslation()
   const facets = column?.getFacetedUniqueValues()
   const filterValue = column?.getFilterValue() as string[] | undefined
   const selectedValues = new Set(filterValue)
+  const draggedOption = React.useRef<string | null>(null)
 
   const handleOptionSelect = (optionValue: string) => {
     const nextSelectedValues = getNextSelectedValues(
@@ -75,6 +88,11 @@ function DataTableFacetedFilterInner<TData, TValue>({
     column?.setFilterValue(
       nextSelectedValues.length ? nextSelectedValues : undefined
     )
+  }
+
+  const handleClear = () => {
+    column?.setFilterValue(undefined)
+    onClear?.()
   }
 
   return (
@@ -120,7 +138,10 @@ function DataTableFacetedFilterInner<TData, TValue>({
           </>
         )}
       </PopoverTrigger>
-      <PopoverContent className='max-w-[360px] min-w-[200px] p-0' align='start'>
+      <PopoverContent
+        className='w-max min-w-[260px] max-w-[min(420px,calc(100vw-2rem))] p-0'
+        align='start'
+      >
         <Command>
           <CommandInput placeholder={title} />
           <CommandList>
@@ -128,9 +149,61 @@ function DataTableFacetedFilterInner<TData, TValue>({
             <CommandGroup>
               {options.map((option) => {
                 const isSelected = selectedValues.has(option.value)
+                const facetCount = facets?.get(option.value)
+                let icon: React.ReactNode = null
+                if (option.iconNode) {
+                  icon = (
+                    <span className='text-muted-foreground flex size-4 items-center justify-center'>
+                      {option.iconNode}
+                    </span>
+                  )
+                } else if (option.icon) {
+                  icon = (
+                    <option.icon className='text-muted-foreground size-4' />
+                  )
+                }
+
+                let count: React.ReactNode = null
+                if (typeof option.count === 'number') {
+                  count = (
+                    <span className='text-muted-foreground ms-auto flex h-4 min-w-4 items-center justify-center font-mono text-xs'>
+                      {option.count}
+                    </span>
+                  )
+                } else if (facetCount) {
+                  count = (
+                    <span className='ms-auto flex h-4 w-4 items-center justify-center font-mono text-xs'>
+                      {facetCount}
+                    </span>
+                  )
+                }
+
                 return (
                   <CommandItem
                     key={option.value}
+                    draggable={Boolean(onOptionReorder) && option.value !== 'all'}
+                    onDragStart={() => {
+                      draggedOption.current = option.value
+                    }}
+                    onDragOver={(event) => {
+                      if (onOptionReorder && draggedOption.current) {
+                        event.preventDefault()
+                      }
+                    }}
+                    onDrop={(event) => {
+                      event.preventDefault()
+                      if (onOptionReorder && draggedOption.current) {
+                        onOptionReorder(draggedOption.current, option.value)
+                      }
+                      draggedOption.current = null
+                    }}
+                    onDragEnd={() => {
+                      draggedOption.current = null
+                    }}
+                    className={cn(
+                      'min-w-0',
+                      renderOptionActions && '[&>svg:last-child]:hidden'
+                    )}
                     onSelect={() => handleOptionSelect(option.value)}
                   >
                     <div
@@ -143,26 +216,22 @@ function DataTableFacetedFilterInner<TData, TValue>({
                     >
                       <CheckIcon className={cn('text-background h-4 w-4')} />
                     </div>
-                    {option.iconNode ? (
-                      <span className='text-muted-foreground flex size-4 items-center justify-center'>
-                        {option.iconNode}
-                      </span>
-                    ) : option.icon ? (
-                      <option.icon className='text-muted-foreground size-4' />
-                    ) : null}
+                    {icon}
                     <span
-                      className='min-w-0 flex-1 truncate'
+                      className={cn(
+                        'min-w-0 truncate whitespace-nowrap',
+                        renderOptionActions
+                          ? 'max-w-[min(280px,calc(100vw-7rem))] flex-none'
+                          : 'flex-1'
+                      )}
                       title={t(option.label)}
                     >
                       {t(option.label)}
                     </span>
-                    {typeof option.count === 'number' ? (
-                      <span className='text-muted-foreground ms-auto flex h-4 min-w-4 items-center justify-center font-mono text-xs'>
-                        {option.count}
-                      </span>
-                    ) : facets?.get(option.value) ? (
-                      <span className='ms-auto flex h-4 w-4 items-center justify-center font-mono text-xs'>
-                        {facets.get(option.value)}
+                    {count}
+                    {renderOptionActions ? (
+                      <span className='ms-auto flex shrink-0 items-center gap-1'>
+                        {renderOptionActions(option)}
                       </span>
                     ) : null}
                   </CommandItem>
@@ -174,7 +243,7 @@ function DataTableFacetedFilterInner<TData, TValue>({
                 <CommandSeparator />
                 <CommandGroup>
                   <CommandItem
-                    onSelect={() => column?.setFilterValue(undefined)}
+                    onSelect={handleClear}
                     className='justify-center text-center'
                   >
                     {t('Clear filters')}
@@ -209,5 +278,5 @@ function getNextSelectedValues(
     nextSelectedValues.add(optionValue)
   }
 
-  return Array.from(nextSelectedValues)
+  return [...nextSelectedValues]
 }

@@ -1,0 +1,20 @@
+[Unit]
+Description=Recover script-disabled NewAPI banana channels after two successful image probes
+After=docker.service
+Requires=docker.service
+ConditionPathExists=/var/run/docker.sock
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/newapi-banana-channel-recovery --timeout 90 --successes-required 2 --recovery-weight 1 --state /var/lib/newapi-banana-channel-recovery/state.json --log /var/log/newapi-banana-channel-recovery.log
+User=root
+Group=root
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+StateDirectory=newapi-banana-channel-recovery
+ReadWritePaths=/var/lib/newapi-banana-channel-recovery /var/log /run

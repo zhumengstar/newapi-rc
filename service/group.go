@@ -6,15 +6,56 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
 )
 
+func ParseUserGroups(userGroup string) []string {
+	seen := map[string]struct{}{}
+	groups := make([]string, 0)
+	for _, group := range strings.Split(userGroup, ",") {
+		group = strings.TrimSpace(group)
+		if group != "" {
+			if _, ok := seen[group]; !ok {
+				seen[group] = struct{}{}
+				groups = append(groups, group)
+			}
+		}
+	}
+	return groups
+}
+
+func JoinUserGroups(groups []string) string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(groups))
+	for _, group := range groups {
+		group = strings.TrimSpace(group)
+		if group != "" {
+			if _, ok := seen[group]; !ok {
+				seen[group] = struct{}{}
+				out = append(out, group)
+			}
+		}
+	}
+	return strings.Join(out, ",")
+}
+
+func JoinUserGroupsWithDefault(groups []string) string {
+	groups = ParseUserGroups(JoinUserGroups(groups))
+	for _, group := range groups {
+		if group == "default" {
+			return JoinUserGroups(groups)
+		}
+	}
+	return JoinUserGroups(append([]string{"default"}, groups...))
+}
+
 func GetUserUsableGroups(userGroup string) map[string]string {
 	groupsCopy := setting.GetUserUsableGroupsCopy()
-	if userGroup != "" {
-		specialSettings, b := ratio_setting.GetGroupRatioSetting().GroupSpecialUsableGroup.Get(userGroup)
+	for _, singleUserGroup := range ParseUserGroups(userGroup) {
+		specialSettings, b := ratio_setting.GetGroupRatioSetting().GroupSpecialUsableGroup.Get(singleUserGroup)
 		if b {
 			// 处理特殊可用分组
 			for specialGroup, desc := range specialSettings {
@@ -33,8 +74,8 @@ func GetUserUsableGroups(userGroup string) map[string]string {
 			}
 		}
 		// 如果userGroup不在UserUsableGroups中，返回UserUsableGroups + userGroup
-		if _, ok := groupsCopy[userGroup]; !ok {
-			groupsCopy[userGroup] = "用户分组"
+		if _, ok := groupsCopy[singleUserGroup]; !ok {
+			groupsCopy[singleUserGroup] = "用户分组"
 		}
 	}
 	return groupsCopy
@@ -125,9 +166,22 @@ func GetGroupsEnabledModels(groups []string) []string {
 // userGroup 用户分组
 // group 需要获取倍率的分组
 func GetUserGroupRatio(userGroup, group string) float64 {
-	ratio, ok := ratio_setting.GetGroupGroupRatio(userGroup, group)
-	if ok {
-		return ratio
+	selected := 0.0
+	found := false
+	for _, single := range ParseUserGroups(userGroup) {
+		if ratio, ok := ratio_setting.GetGroupGroupRatio(single, group); ok && (!found || ratio < selected) {
+			selected, found = ratio, true
+		}
+	}
+	if found {
+		return selected
 	}
 	return ratio_setting.GetGroupRatio(group)
+}
+
+func GetUserGroupRatioWithSetting(userSetting dto.UserSetting, userGroup, group string) float64 {
+	if ratio, ok := userSetting.UserGroupRatios[group]; ok {
+		return ratio
+	}
+	return GetUserGroupRatio(userGroup, group)
 }

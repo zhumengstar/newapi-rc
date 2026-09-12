@@ -21,6 +21,8 @@ import { formatTimestampToDate } from '@/lib/format'
 
 import {
   CHANNEL_STATUS_CONFIG,
+  CHANNEL_TYPE_NEW_API,
+  CHANNEL_TYPE_SUB2_API,
   CHANNEL_TYPES,
   MULTI_KEY_STATUS_CONFIG,
   RESPONSE_TIME_CONFIG,
@@ -28,6 +30,7 @@ import {
   TYPE_TO_KEY_PROMPT,
 } from '../constants'
 import type { Channel, ChannelSettings, ChannelOtherSettings } from '../types'
+import { getModelCategory } from './model-categories'
 
 // ============================================================================
 // Channel Type Utilities
@@ -38,6 +41,41 @@ import type { Channel, ChannelSettings, ChannelOtherSettings } from '../types'
  */
 export function getChannelTypeLabel(type: number): string {
   return CHANNEL_TYPES[type as keyof typeof CHANNEL_TYPES] || 'Unknown'
+}
+
+/**
+ * Return the gateway site family for channel types that identify a NewAPI-compatible site.
+ */
+export function getChannelSiteTypeLabel(type: number): string | null {
+  if (type === CHANNEL_TYPE_SUB2_API) {
+    return 'Sub2API'
+  }
+  if (type === CHANNEL_TYPE_NEW_API) {
+    return 'NewAPI'
+  }
+  return null
+}
+
+export function getDetectedChannelSiteTypeLabel(
+  siteType: string | null | undefined
+): string | null {
+  if (siteType === 'newapi') return 'NewAPI'
+  if (siteType === 'sub2api') return 'Sub2API'
+  return null
+}
+
+const trailingContactPattern =
+  /(?:\s*[-|_/：:]\s*|\s+)([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|1\d{10}|\d{5,12}|@[A-Za-z][A-Za-z0-9_]{2,31})\s*$/
+
+export function extractTrailingContact(name: string): string {
+  return trailingContactPattern.exec(name.trim())?.[1] ?? ''
+}
+
+export function replaceTrailingContact(name: string, contact: string): string {
+  const trimmedName = name.trim()
+  const baseName = trimmedName.replace(trailingContactPattern, '').trimEnd()
+  const trimmedContact = contact.trim()
+  return trimmedContact ? `${baseName} - ${trimmedContact}` : baseName
 }
 
 /**
@@ -251,6 +289,163 @@ export function parseGroupsList(groups: string): string[] {
       return 1
     }
     return a.localeCompare(b)
+  })
+}
+
+export function sortGroupsByRatio(
+  groups: string[],
+  groupRatio: Record<string, number>
+): string[] {
+  return [...groups].sort((a, b) => compareGroupRatio(a, b, groupRatio))
+}
+
+const GROUP_MODEL_CATEGORY_ORDER = [
+  'OpenAI',
+  'Anthropic',
+  'Gemini',
+  'DeepSeek',
+  'Qwen',
+  'xAI',
+  'Moonshot',
+  'MiniMax',
+  'Doubao',
+  'Zhipu',
+] as const
+
+const GROUP_MODEL_FAMILY_KEYWORDS: readonly {
+  category: string
+  keywords: readonly string[]
+}[] = [
+  {
+    category: 'OpenAI',
+    keywords: [
+      'gpt',
+      'openai',
+      'chatgpt',
+      'codex',
+      'dall-e',
+      'whisper',
+      'sora',
+    ],
+  },
+  { category: 'Anthropic', keywords: ['claude', 'anthropic'] },
+  {
+    category: 'Gemini',
+    keywords: ['gemini', 'gemma', 'imagen', 'veo', 'nano-banana'],
+  },
+  { category: 'DeepSeek', keywords: ['deepseek'] },
+  { category: 'Qwen', keywords: ['qwen', 'qwq', 'qvq', 'tongyi'] },
+  { category: 'xAI', keywords: ['grok', 'xai', 'x-ai'] },
+  { category: 'Moonshot', keywords: ['kimi', 'moonshot'] },
+  { category: 'MiniMax', keywords: ['minimax', 'abab', 'hailuo'] },
+  { category: 'Doubao', keywords: ['doubao', 'seedance', 'seedream'] },
+  { category: 'Zhipu', keywords: ['zhipu', 'chatglm', 'cogview', 'cogvideo'] },
+]
+
+const MIXED_GROUP_MODEL_CATEGORY = 'Mixed'
+const UNKNOWN_GROUP_MODEL_CATEGORY = 'Other'
+
+function compareGroupRatio(
+  a: string,
+  b: string,
+  groupRatio: Record<string, number>
+): number {
+  const ratioA = groupRatio[a]
+  const ratioB = groupRatio[b]
+  const hasRatioA = typeof ratioA === 'number' && Number.isFinite(ratioA)
+  const hasRatioB = typeof ratioB === 'number' && Number.isFinite(ratioB)
+
+  if (hasRatioA && hasRatioB && ratioA !== ratioB) {
+    return ratioB - ratioA
+  }
+  if (hasRatioA !== hasRatioB) {
+    return hasRatioA ? -1 : 1
+  }
+  return 0
+}
+
+function getGroupModelCategory(
+  group: string,
+  groupModels?: ReadonlyMap<string, readonly string[]>
+): string {
+  const categoryCounts = new Map<string, number>()
+  let categorizedModelCount = 0
+  for (const modelName of groupModels?.get(group) ?? []) {
+    const category = getModelCategory(modelName)
+    if (category !== UNKNOWN_GROUP_MODEL_CATEGORY) {
+      categoryCounts.set(category, (categoryCounts.get(category) ?? 0) + 1)
+      categorizedModelCount += 1
+    }
+  }
+
+  let primaryCategory: string | undefined
+  let primaryCategoryCount = 0
+  let isPrimaryCategoryTied = false
+  for (const [category, count] of categoryCounts) {
+    if (count > primaryCategoryCount) {
+      primaryCategory = category
+      primaryCategoryCount = count
+      isPrimaryCategoryTied = false
+    } else if (count === primaryCategoryCount) {
+      isPrimaryCategoryTied = true
+    }
+  }
+
+  if (
+    primaryCategory &&
+    !isPrimaryCategoryTied &&
+    primaryCategoryCount * 3 >= categorizedModelCount * 2
+  ) {
+    return primaryCategory
+  }
+  if (categoryCounts.size > 0) {
+    return MIXED_GROUP_MODEL_CATEGORY
+  }
+
+  const normalizedGroup = group.trim().toLowerCase()
+  const family = GROUP_MODEL_FAMILY_KEYWORDS.find(({ keywords }) =>
+    keywords.some((keyword) => normalizedGroup.includes(keyword))
+  )
+
+  return family?.category ?? UNKNOWN_GROUP_MODEL_CATEGORY
+}
+
+function getGroupModelFamilyRank(category: string): number {
+  const categoryIndex = GROUP_MODEL_CATEGORY_ORDER.indexOf(
+    category as (typeof GROUP_MODEL_CATEGORY_ORDER)[number]
+  )
+  if (categoryIndex !== -1) {
+    return categoryIndex
+  }
+  if (category === MIXED_GROUP_MODEL_CATEGORY) {
+    return GROUP_MODEL_CATEGORY_ORDER.length + 1
+  }
+  if (category === UNKNOWN_GROUP_MODEL_CATEGORY) {
+    return GROUP_MODEL_CATEGORY_ORDER.length + 2
+  }
+
+  return GROUP_MODEL_CATEGORY_ORDER.length
+}
+
+export function sortGroupsByModelAndRatio(
+  groups: string[],
+  groupRatio: Record<string, number>,
+  groupModels?: ReadonlyMap<string, readonly string[]>
+): string[] {
+  return [...groups].sort((a, b) => {
+    const categoryA = getGroupModelCategory(a, groupModels)
+    const categoryB = getGroupModelCategory(b, groupModels)
+    const familyRankA = getGroupModelFamilyRank(categoryA)
+    const familyRankB = getGroupModelFamilyRank(categoryB)
+    if (familyRankA !== familyRankB) {
+      return familyRankA - familyRankB
+    }
+    if (categoryA !== categoryB) {
+      return categoryA.localeCompare(categoryB)
+    }
+
+    const ratioComparison = compareGroupRatio(a, b, groupRatio)
+    return ratioComparison !== 0 ? ratioComparison : a.localeCompare(b)
   })
 }
 
@@ -658,6 +853,7 @@ export function aggregateChannelsByTag(
         test_time: 0,
         created_time: 0,
         balance_updated_time: 0,
+        channel_ratio: null,
         models: '',
         children: [],
       } as TagRow

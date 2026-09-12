@@ -1,6 +1,7 @@
 package model
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"sort"
@@ -135,6 +136,10 @@ func GetChannelExcluding(
 			return !excludedChannelIds[ability.ChannelId]
 		})
 	}
+	// Keep the database path consistent with the cache path: an explicitly
+	// configured channel cost tier is the routing priority, while legacy
+	// channels continue to use the ability priority.
+	abilities = applyChannelRoutingPriorities(abilities)
 	if len(abilities) > 0 {
 		priorities := make([]int64, 0)
 		seen := make(map[int64]bool)
@@ -171,15 +176,22 @@ func GetChannelExcluding(
 			})
 			channel.Id = abilities[0].ChannelId
 		} else {
-			// Randomly choose one
 			weightSum := uint(0)
 			for _, ability_ := range abilities {
-				weightSum += ability_.Weight + 10
+				weightSum += ability_.Weight
+			}
+			allZero := weightSum == 0
+			if allZero {
+				weightSum = uint(len(abilities))
 			}
 			// Randomly choose one
 			weight := common.GetRandomInt(int(weightSum))
 			for _, ability_ := range abilities {
-				weight -= int(ability_.Weight) + 10
+				abilityWeight := ability_.Weight
+				if allZero {
+					abilityWeight = 1
+				}
+				weight -= int(abilityWeight)
 				//log.Printf("weight: %d, ability weight: %d", weight, *ability_.Weight)
 				if weight <= 0 {
 					channel.Id = ability_.ChannelId
@@ -192,6 +204,41 @@ func GetChannelExcluding(
 	}
 	err = DB.First(&channel, "id = ?", channel.Id).Error
 	return &channel, err
+}
+
+func applyChannelRoutingPriorities(abilities []Ability) []Ability {
+	if len(abilities) == 0 {
+		return abilities
+	}
+	channelIDs := make([]int, 0, len(abilities))
+	seen := make(map[int]struct{}, len(abilities))
+	for _, ability := range abilities {
+		if _, ok := seen[ability.ChannelId]; ok {
+			continue
+		}
+		seen[ability.ChannelId] = struct{}{}
+		channelIDs = append(channelIDs, ability.ChannelId)
+	}
+	var channels []Channel
+	if err := DB.Select("id", "cost_tier").Where("id IN ?", channelIDs).Find(&channels).Error; err != nil {
+		return abilities
+	}
+	costTiers := make(map[int]int, len(channels))
+	for _, channel := range channels {
+		if channel.CostTier > 0 {
+			costTiers[channel.Id] = channel.CostTier
+		}
+	}
+	if len(costTiers) == 0 {
+		return abilities
+	}
+	for index := range abilities {
+		if tier, ok := costTiers[abilities[index].ChannelId]; ok {
+			value := int64(tier)
+			abilities[index].Priority = &value
+		}
+	}
+	return abilities
 }
 
 // filterAbilitiesByConstraints applies the same ChannelSatisfiesFilters
@@ -307,6 +354,42 @@ func (channel *Channel) UpdateAbilities(tx *gorm.DB) error {
 		}()
 	}
 
+	// Adaptive routing owns ability weights for opted-in channels. Preserve
+	// weights for unchanged group/model pairs when a channel is edited or its
+	// upstream model list is refreshed; otherwise recreating abilities would
+	// reset the scheduler's decision to the channel default weight.
+	existingWeights := make(map[string]uint)
+	adaptiveEnabled := channel.AdaptiveEnabled
+	if !adaptiveEnabled && channel.Id > 0 {
+		// Some upstream-model refresh paths load a reduced channel projection.
+		// Read the persisted flag so those paths cannot reset adaptive weights.
+		var persistedAdaptiveEnabled sql.NullBool
+		if err := tx.Model(&Channel{}).
+			Select("adaptive_enabled").
+			Where("id = ?", channel.Id).
+			Scan(&persistedAdaptiveEnabled).Error; err != nil {
+			if isNewTx {
+				tx.Rollback()
+			}
+			return err
+		}
+		// Legacy channel rows predate the adaptive-routing column and may
+		// contain NULL. Treat that as the feature's opt-in default (disabled).
+		adaptiveEnabled = persistedAdaptiveEnabled.Valid && persistedAdaptiveEnabled.Bool
+	}
+	if adaptiveEnabled {
+		var existingAbilities []Ability
+		if err := tx.Where("channel_id = ?", channel.Id).Find(&existingAbilities).Error; err != nil {
+			if isNewTx {
+				tx.Rollback()
+			}
+			return err
+		}
+		for _, ability := range existingAbilities {
+			existingWeights[ability.Group+"|"+ability.Model] = ability.Weight
+		}
+	}
+
 	// First delete all abilities of this channel
 	err := tx.Where("channel_id = ?", channel.Id).Delete(&Ability{}).Error
 	if err != nil {
@@ -328,13 +411,17 @@ func (channel *Channel) UpdateAbilities(tx *gorm.DB) error {
 				continue
 			}
 			abilitySet[key] = struct{}{}
+			weight := uint(channel.GetWeight())
+			if existingWeight, exists := existingWeights[key]; exists {
+				weight = existingWeight
+			}
 			ability := Ability{
 				Group:     group,
 				Model:     model,
 				ChannelId: channel.Id,
 				Enabled:   channel.Status == common.ChannelStatusEnabled,
 				Priority:  channel.Priority,
-				Weight:    uint(channel.GetWeight()),
+				Weight:    weight,
 				Tag:       channel.Tag,
 			}
 			abilities = append(abilities, ability)

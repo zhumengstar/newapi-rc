@@ -1,0 +1,15 @@
+[Unit]
+Description=Probe and recover NewAPI image-generation channels
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/newapi-image-channel-health --timeout 90
+User=root
+Group=root
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/newapi-image-channel-health /var/log /run

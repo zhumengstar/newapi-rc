@@ -1,0 +1,378 @@
+#!/usr/bin/env python3
+"""Health-check and cost/latency rebalance the gpt discount group.
+
+Every run checks all configured channels with one small non-streaming request,
+sets three priority tiers, then distributes weight among channels that have
+enough recent real traffic. The controller discovers channels from the
+database, so new channels are included automatically at the minimum weight.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import concurrent.futures
+import fcntl
+import json
+import math
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
+from pathlib import Path
+
+
+GROUP = "gpt特惠组"
+EXCLUSIVE_GROUP = "GPT对接组"
+POSTGRES_CONTAINER = "newapi-standalone-postgres"
+POSTGRES_USER = "newapi"
+POSTGRES_DB = "new-api"
+DEFAULT_STATE = Path("/var/lib/newapi-gpt-discount-controller/state.json")
+DEFAULT_LOCK = Path("/run/newapi-gpt-discount-controller.lock")
+MANAGED_REASON = "脚本全量检测："
+PRIORITY_HIGH = 30
+PRIORITY_MEDIUM = 20
+PRIORITY_LOW = 10
+
+
+@dataclass
+class Channel:
+    channel_id: int
+    name: str
+    channel_type: int
+    priority: int
+    weight: int
+    status: int
+    auto_ban: int
+    base_url: str
+    key: str
+    models: list[str]
+    attempts: int = 0
+    success: int = 0
+    failed: int = 0
+    p95_seconds: float = 120.0
+    avg_ttft_ms: float = 0.0
+
+    @property
+    def cost_multiplier(self) -> float:
+        # Existing channel names such as 0065-... and 007-倍率... encode
+        # 0.065 and 0.07 respectively. Parse this legacy form before the
+        # explicit 2x/0.5倍率 form so the suffix does not change its meaning.
+        legacy = re.match(r"^\s*(0\d{2,3})(?:-|$)", self.name)
+        if legacy:
+            digits = legacy.group(1)
+            return max(int(digits) / (10 ** (len(digits) - 1)), 0.01)
+        explicit = re.search(
+            r"(?<![0-9])([0-9]+(?:\.[0-9]+)?)\s*(?:[-_ ]?倍率|x)",
+            self.name, re.IGNORECASE,
+        )
+        if explicit:
+            value = float(explicit.group(1))
+            return value if value > 0 else 1.0
+        decimal = re.match(r"^\s*(0?\.\d+)\s*[-_ ]", self.name)
+        if decimal:
+            return max(float(decimal.group(1)), 0.01)
+        return 1.0
+
+    @property
+    def success_rate(self) -> float:
+        return self.success / self.attempts if self.attempts else 0.0
+
+    @property
+    def score(self) -> float:
+        smoothed_success = (self.success + 18.0) / (self.attempts + 20.0)
+        latency = 1.0 + min(max(self.p95_seconds, 0.0), 300.0) / 120.0
+        ttft = 1.0 + min(max(self.avg_ttft_ms, 0.0), 120_000.0) / 60_000.0
+        return math.pow(smoothed_success, 5) / (max(self.cost_multiplier, 0.01) * latency * ttft)
+
+
+def run_psql(sql: str) -> str:
+    proc = subprocess.run(
+        ["docker", "exec", POSTGRES_CONTAINER, "psql", "-X", "-v", "ON_ERROR_STOP=1",
+         "-U", POSTGRES_USER, "-d", POSTGRES_DB, "-Atq", "-F", "\t", "-c", sql],
+        check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=45,
+    )
+    if proc.returncode:
+        raise RuntimeError(proc.stderr.strip() or "psql failed")
+    return proc.stdout
+
+
+def sql_text(value: str) -> str:
+    encoded = base64.b64encode(value.encode("utf-8")).decode("ascii")
+    return f"convert_from(decode('{encoded}', 'base64'), 'UTF8')"
+
+
+def decode(value: str) -> str:
+    return base64.b64decode(value).decode("utf-8", errors="replace") if value else ""
+
+
+def fetch_channels(window_seconds: int) -> dict[int, Channel]:
+    group = sql_text(GROUP)
+    exclusive_group = sql_text(EXCLUSIVE_GROUP)
+    sql = f"""
+WITH group_channels AS (
+  SELECT id,name,type,priority,weight,status,auto_ban,base_url,key,models
+  FROM channels
+  WHERE position(',' || {group} || ',' in ',' || replace(coalesce("group",''),' ','') || ',') > 0
+    AND position(',' || {exclusive_group} || ',' in ',' || replace(coalesce("group",''),' ','') || ',') = 0
+), stats AS (
+  SELECT l.channel_id,
+         count(*) AS attempts,
+         count(*) FILTER (WHERE l.type=2 AND l.quota>0) AS success,
+         count(*) FILTER (WHERE l.type=5 OR (l.type=2 AND l.quota<=0)) AS failed,
+         coalesce(percentile_cont(0.95) WITHIN GROUP (ORDER BY l.use_time)
+           FILTER (WHERE l.type=2 AND l.quota>0), 120) AS p95,
+         coalesce(avg((l.other::jsonb->>'frt')::numeric) FILTER (
+           WHERE l.type=2 AND l.quota>0 AND coalesce(l.other,'')<>''
+             AND (l.other::jsonb->>'frt') ~ '^[0-9]+([.][0-9]+)?$'), 0) AS avg_ttft
+  FROM logs l JOIN group_channels gc ON gc.id=l.channel_id
+  WHERE l.created_at >= extract(epoch FROM now())::bigint - {int(window_seconds)}
+    AND l.type IN (2,5)
+  GROUP BY l.channel_id
+)
+SELECT gc.id,
+ replace(encode(convert_to(coalesce(gc.name,''),'UTF8'),'base64'),E'\\n',''),
+ gc.type,gc.priority,gc.weight,gc.status,gc.auto_ban,
+ replace(encode(convert_to(coalesce(gc.base_url,''),'UTF8'),'base64'),E'\\n',''),
+ replace(encode(convert_to(coalesce(gc.key,''),'UTF8'),'base64'),E'\\n',''),
+ replace(encode(convert_to(coalesce(gc.models,''),'UTF8'),'base64'),E'\\n',''),
+ coalesce(s.attempts,0),coalesce(s.success,0),coalesce(s.failed,0),
+ coalesce(s.p95,120),coalesce(s.avg_ttft,0)
+FROM group_channels gc LEFT JOIN stats s ON s.channel_id=gc.id ORDER BY gc.id;
+"""
+    channels: dict[int, Channel] = {}
+    for line in run_psql(sql).splitlines():
+        fields = line.split("\t")
+        if len(fields) != 15:
+            continue
+        channels[int(fields[0])] = Channel(
+            channel_id=int(fields[0]), name=decode(fields[1]), channel_type=int(fields[2]),
+            priority=int(fields[3]), weight=int(fields[4]), status=int(fields[5]),
+            auto_ban=int(fields[6]), base_url=decode(fields[7]).rstrip("/"), key=decode(fields[8]),
+            models=[x.strip() for x in decode(fields[9]).split(",") if x.strip()],
+            attempts=int(fields[10]), success=int(fields[11]), failed=int(fields[12]),
+            p95_seconds=float(fields[13]), avg_ttft_ms=float(fields[14]),
+        )
+    return channels
+
+
+def preferred_model(channel: Channel) -> str:
+    if not channel.models:
+        raise RuntimeError("no configured model")
+    preferred = [m for m in channel.models if "sol" in m.lower()]
+    return sorted(preferred or channel.models)[0]
+
+
+def apply_probe_latency(channel: Channel, detail: str) -> None:
+    """Use probe latency only until real request samples are available."""
+    if channel.attempts:
+        return
+    match = re.search(r"seconds=([0-9]+(?:\.[0-9]+)?)", detail)
+    if match:
+        channel.p95_seconds = float(match.group(1))
+
+
+def probe(channel: Channel, timeout: int) -> tuple[bool, str]:
+    model = preferred_model(channel)
+    if channel.channel_type != 1:
+        return False, f"unsupported_type={channel.channel_type} model={model}"
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": "reply ok"}],
+        "max_tokens": 1,
+        "stream": False,
+    }
+    request = urllib.request.Request(
+        f"{channel.base_url}/v1/chat/completions",
+        data=json.dumps(payload).encode("utf-8"), method="POST",
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {channel.key}"},
+    )
+    started = time.monotonic()
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            response.read(64 * 1024)
+            elapsed = time.monotonic() - started
+            if 200 <= response.status < 300:
+                return True, f"model={model} HTTP={response.status} seconds={elapsed:.2f}"
+            return False, f"model={model} HTTP={response.status} seconds={elapsed:.2f}"
+    except urllib.error.HTTPError as exc:
+        detail = exc.read(256).decode("utf-8", errors="replace").replace("\n", " ")
+        return False, f"model={model} HTTP={exc.code} {detail[:120]}"
+    except Exception as exc:
+        return False, f"model={model} {type(exc).__name__}: {str(exc)[:120]}"
+
+
+def update_channel(channel_id: int, status: int, weight: int, priority: int, reason: str) -> None:
+    group = sql_text(GROUP)
+    reason_json = json.dumps({"status_reason": MANAGED_REASON + reason, "status_time": int(time.time())}, ensure_ascii=False)
+    encoded = base64.b64encode(reason_json.encode("utf-8")).decode("ascii")
+    sql = f"""
+WITH updated AS (
+ UPDATE channels SET status={int(status)}, priority={int(priority)}, weight={int(weight)},
+   other=(coalesce(nullif(other,''),'{{}}')::jsonb || convert_from(decode('{encoded}','base64'),'UTF8')::jsonb)::text,
+   other_info=(coalesce(nullif(other_info,''),'{{}}')::jsonb || convert_from(decode('{encoded}','base64'),'UTF8')::jsonb)::text
+ WHERE id={int(channel_id)} AND btrim(coalesce("group",''))={group} RETURNING id
+)
+UPDATE abilities SET enabled={str(status == 1).lower()}, priority={int(priority)}, weight={int(weight)}
+FROM updated WHERE abilities.channel_id=updated.id;
+"""
+    run_psql(sql)
+
+
+def set_weight(channel_id: int, weight: int, priority: int) -> None:
+    group = sql_text(GROUP)
+    sql = f"""
+WITH updated AS (UPDATE channels SET weight={int(weight)},priority={int(priority)}
+ WHERE id={int(channel_id)} AND status=1 AND btrim(coalesce("group",''))={group} RETURNING id)
+UPDATE abilities SET priority={int(priority)},weight={int(weight)}
+ FROM updated WHERE abilities.channel_id=updated.id AND abilities.enabled;
+"""
+    run_psql(sql)
+
+
+def priority_plan(channels: dict[int, Channel], high: int, medium: int, low: int) -> dict[int, int]:
+    """Place healthy channels into 30/20/10 tiers by current score.
+
+    New or sparsely sampled channels are kept in the lower tier until they
+    accumulate real traffic. This prevents a newly added channel from
+    immediately taking the primary route on one successful probe.
+    """
+    eligible = [channel for channel in channels.values() if channel.status == 1]
+    eligible.sort(key=lambda channel: (channel.attempts < 2, -channel.score, channel.channel_id))
+    if not eligible:
+        return {}
+    primary_count = max(1, math.ceil(len(eligible) / 3))
+    secondary_count = max(0, math.ceil((len(eligible) - primary_count) / 2))
+    plan: dict[int, int] = {}
+    for index, channel in enumerate(eligible):
+        if index < primary_count:
+            priority = high
+        elif index < primary_count + secondary_count:
+            priority = medium
+        else:
+            priority = low
+        plan[channel.channel_id] = priority
+    return plan
+
+
+def targets(channels: dict[int, Channel], minimum: int) -> dict[int, int]:
+    sampled = [c for c in channels.values() if c.status == 1 and c.attempts >= 2]
+    unsampled = [c for c in channels.values() if c.status == 1 and c.attempts < 2]
+    if not sampled:
+        return {c.channel_id: max(c.weight, minimum) for c in unsampled}
+    budget = max(sum(max(c.weight, minimum) for c in channels.values()), len(channels) * minimum)
+    fixed = sum(max(c.weight, minimum) for c in unsampled)
+    available = max(budget - fixed, len(sampled) * minimum)
+    extra = available - len(sampled) * minimum
+    total = sum(c.score for c in sampled)
+    result = {c.channel_id: minimum for c in sampled}
+    if total <= 0:
+        return result
+    assigned = 0
+    fractions: list[tuple[float, int]] = []
+    for c in sampled:
+        share = extra * c.score / total
+        whole = math.floor(share)
+        result[c.channel_id] += whole
+        assigned += whole
+        fractions.append((share - whole, c.channel_id))
+    for _, channel_id in sorted(fractions, reverse=True)[:extra - assigned]:
+        result[channel_id] += 1
+    return result
+
+
+def self_test() -> None:
+    assert Channel(1, "0065-a", 1, 99, 1, 1, 1, "", "", ["gpt-5.6-sol"]).cost_multiplier == 0.065
+    assert Channel(3, "007-倍率-a", 1, 99, 1, 1, 1, "", "", ["gpt-5.6-sol"]).cost_multiplier == 0.07
+    assert Channel(2, "0.5倍率-a", 1, 99, 1, 1, 1, "", "", ["gpt-5.6-sol"]).cost_multiplier == 0.5
+    print("self-test: ok")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--window-seconds", type=int, default=300)
+    parser.add_argument("--probe-timeout", type=int, default=20)
+    parser.add_argument("--priority-high", type=int, default=PRIORITY_HIGH)
+    parser.add_argument("--priority-medium", type=int, default=PRIORITY_MEDIUM)
+    parser.add_argument("--priority-low", type=int, default=PRIORITY_LOW)
+    parser.add_argument("--fixed-priority", type=int, default=None)
+    parser.add_argument("--min-weight", type=int, default=1)
+    parser.add_argument("--max-step", type=int, default=5)
+    parser.add_argument("--probe-workers", type=int, default=6)
+    parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
+    parser.add_argument("--lock", type=Path, default=DEFAULT_LOCK)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--self-test", action="store_true")
+    args = parser.parse_args()
+    if args.fixed_priority is not None:
+        args.priority_high = args.fixed_priority
+        args.priority_medium = args.fixed_priority
+        args.priority_low = args.fixed_priority
+    if args.self_test:
+        self_test()
+        return 0
+    args.lock.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+    with args.lock.open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        channels = fetch_channels(args.window_seconds)
+        results: dict[int, tuple[bool, str]] = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.probe_workers)) as pool:
+            futures = {pool.submit(probe, c, args.probe_timeout): c.channel_id for c in channels.values()}
+            for future in concurrent.futures.as_completed(futures):
+                channel_id = futures[future]
+                try:
+                    results[channel_id] = future.result()
+                except Exception as exc:
+                    results[channel_id] = False, f"{type(exc).__name__}: {exc}"
+        actions = []
+        for channel_id, channel in channels.items():
+            ok, detail = results.get(channel_id, (False, "probe_missing"))
+            apply_probe_latency(channel, detail)
+            desired_status = 1 if ok else 3
+            desired_priority = args.priority_low
+            if channel.status != desired_status or channel.priority != desired_priority or (ok and channel.weight < args.min_weight):
+                actions.append({"channel": channel_id, "status": desired_status, "priority": desired_priority, "weight": max(channel.weight, args.min_weight), "probe": detail})
+                if not args.dry_run:
+                    update_channel(channel_id, desired_status, max(channel.weight, args.min_weight), desired_priority, ("可用；" if ok else "不可用；") + detail)
+                    channel.status = desired_status
+                    channel.priority = desired_priority
+                    channel.weight = max(channel.weight, args.min_weight)
+        active = {c.channel_id: c for c in channels.values() if c.status == 1}
+        tier_plan = priority_plan(active, args.priority_high, args.priority_medium, args.priority_low)
+        plan: dict[int, int] = {}
+        for priority in (args.priority_high, args.priority_medium, args.priority_low):
+            tier = {channel_id: channel for channel_id, channel in active.items()
+                    if tier_plan.get(channel_id) == priority}
+            plan.update(targets(tier, args.min_weight))
+        for channel_id, target in plan.items():
+            channel = channels[channel_id]
+            desired_priority = tier_plan[channel_id]
+            desired = max(args.min_weight, min(channel.weight + args.max_step, max(channel.weight - args.max_step, target)))
+            if desired != channel.weight or channel.priority != desired_priority:
+                actions.append({"channel": channel_id, "priority_from": channel.priority, "priority_to": desired_priority, "weight_from": channel.weight, "weight_to": desired, "target": target, "cost_multiplier": round(channel.cost_multiplier, 6), "success_rate": round(channel.success_rate, 4), "p95_seconds": round(channel.p95_seconds, 2), "avg_ttft_ms": round(channel.avg_ttft_ms, 1), "score": round(channel.score, 8)})
+                if not args.dry_run:
+                    set_weight(channel_id, desired, desired_priority)
+                    channel.weight = desired
+                    channel.priority = desired_priority
+        payload = {"group": GROUP, "priority_tiers": {"high": args.priority_high, "medium": args.priority_medium, "low": args.priority_low}, "probe_count": len(results), "available": sum(ok for ok, _ in results.values()), "unavailable": sum(not ok for ok, _ in results.values()), "actions": actions, "channels": [{"channel": c.channel_id, "status": c.status, "priority": c.priority, "weight": c.weight, "cost_multiplier": round(c.cost_multiplier, 6), "attempts": c.attempts, "success_rate": round(c.success_rate, 4), "p95_seconds": round(c.p95_seconds, 2), "avg_ttft_ms": round(c.avg_ttft_ms, 1), "probe_ok": results.get(c.channel_id, (False, ""))[0], "probe_detail": results.get(c.channel_id, (False, ""))[1]} for c in channels.values()]}
+        args.state.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+        if not args.dry_run:
+            args.state.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
+        print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except BlockingIOError:
+        print("another instance is running")
+        raise SystemExit(0)
+    except Exception as exc:
+        print(f"controller failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        raise SystemExit(1)

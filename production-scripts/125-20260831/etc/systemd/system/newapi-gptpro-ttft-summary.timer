@@ -1,0 +1,12 @@
+[Unit]
+Description=Summarize NewAPI GPTPro TTFT routing hourly
+
+[Timer]
+OnCalendar=hourly
+AccuracySec=30s
+Persistent=true
+Unit=newapi-gptpro-ttft-summary.service
+
+[Install]
+WantedBy=timers.target
+

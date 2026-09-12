@@ -1,0 +1,13 @@
+[Unit]
+Description=Rebalance NewAPI image group weights every minute
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=60s
+AccuracySec=5s
+RandomizedDelaySec=5s
+Persistent=true
+Unit=newapi-image-weight-controller.service
+
+[Install]
+WantedBy=timers.target

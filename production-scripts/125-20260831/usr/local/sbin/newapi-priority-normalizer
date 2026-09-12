@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""Assign one distinct priority value to every non-empty channel group.
+
+This is an intentional one-shot migration. It changes only channel and
+ability priorities; status, weight, keys, models, and billing data remain
+untouched. Existing group-specific controllers can continue to manage weight
+and health afterward.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import re
+import subprocess
+from dataclasses import dataclass
+
+
+POSTGRES_CONTAINER = "newapi-standalone-postgres"
+POSTGRES_USER = "newapi"
+POSTGRES_DB = "new-api"
+PRIORITY_STEP = 10
+
+
+@dataclass
+class Channel:
+    channel_id: int
+    group: str
+    name: str
+    status: int
+    priority: int
+    weight: int
+    attempts: int
+    success: int
+    p95_seconds: float
+    avg_ttft_ms: float
+
+    @property
+    def cost(self) -> float:
+        legacy = re.match(r"^\s*(0\d{2,3})(?:-|$)", self.name)
+        if legacy:
+            digits = legacy.group(1)
+            return max(int(digits) / (10 ** (len(digits) - 1)), 0.01)
+        explicit = re.search(
+            r"(?<![0-9])([0-9]+(?:\.[0-9]+)?)\s*(?:[-_ ]?倍率|x)",
+            self.name,
+            re.IGNORECASE,
+        )
+        if explicit:
+            return max(float(explicit.group(1)), 0.01)
+        decimal = re.match(r"^\s*(0?\.\d+)\s*[-_ ]", self.name)
+        return max(float(decimal.group(1)), 0.01) if decimal else 1.0
+
+    @property
+    def score(self) -> float:
+        reliability = (self.success + 18.0) / (self.attempts + 20.0)
+        latency = 1.0 + min(max(self.p95_seconds, 0.0), 300.0) / 120.0
+        ttft = 1.0 + min(max(self.avg_ttft_ms, 0.0), 120_000.0) / 60_000.0
+        return reliability**5 / (self.cost * latency * ttft)
+
+
+def run_psql(sql: str) -> str:
+    result = subprocess.run(
+        ["docker", "exec", POSTGRES_CONTAINER, "psql", "-X", "-v", "ON_ERROR_STOP=1",
+         "-U", POSTGRES_USER, "-d", POSTGRES_DB, "-Atq", "-F", "\t", "-c", sql],
+        capture_output=True, text=True, timeout=45,
+    )
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or "psql failed")
+    return result.stdout
+
+
+def decode(value: str) -> str:
+    return base64.b64decode(value).decode("utf-8", errors="replace") if value else ""
+
+
+def fetch_channels(window_seconds: int) -> list[Channel]:
+    sql = f"""
+WITH stats AS (
+  SELECT channel_id,
+         count(*) AS attempts,
+         count(*) FILTER (WHERE type=2 AND quota>0) AS success,
+         coalesce(percentile_cont(0.95) WITHIN GROUP (ORDER BY use_time)
+           FILTER (WHERE type=2 AND quota>0), 120) AS p95,
+         coalesce(avg((other::jsonb->>'frt')::numeric) FILTER (
+           WHERE type=2 AND quota>0 AND coalesce(other,'')<>''
+             AND (other::jsonb->>'frt') ~ '^[0-9]+([.][0-9]+)?$'), 0) AS avg_ttft
+  FROM logs
+  WHERE created_at >= extract(epoch FROM now())::bigint - {int(window_seconds)}
+    AND type IN (2,5)
+  GROUP BY channel_id
+)
+SELECT c.id,
+       encode(convert_to(coalesce(c."group",''),'UTF8'),'base64'),
+       encode(convert_to(coalesce(c.name,''),'UTF8'),'base64'),
+       c.status,c.priority,c.weight,
+       coalesce(s.attempts,0),coalesce(s.success,0),
+       coalesce(s.p95,120),coalesce(s.avg_ttft,0)
+FROM channels c LEFT JOIN stats s ON s.channel_id=c.id
+WHERE btrim(coalesce(c."group",'')) <> ''
+ORDER BY c.id;
+"""
+    channels: list[Channel] = []
+    for line in run_psql(sql).splitlines():
+        fields = line.split("\t")
+        if len(fields) != 10:
+            continue
+        channels.append(Channel(
+            channel_id=int(fields[0]), group=decode(fields[1]), name=decode(fields[2]),
+            status=int(fields[3]), priority=int(fields[4]), weight=int(fields[5]),
+            attempts=int(fields[6]), success=int(fields[7]),
+            p95_seconds=float(fields[8]), avg_ttft_ms=float(fields[9]),
+        ))
+    return channels
+
+
+def group_priority_plan(grouped: dict[str, list[Channel]]) -> dict[int, int]:
+    """Give every group one stable, distinct priority based on first channel id."""
+    plan: dict[int, int] = {}
+    ordered_groups = sorted(grouped.items(), key=lambda item: min(c.channel_id for c in item[1]))
+    for index, (_, channels) in enumerate(ordered_groups, start=1):
+        priority = index * PRIORITY_STEP
+        for channel in channels:
+            plan[channel.channel_id] = priority
+    return plan
+
+
+def apply(channels: list[Channel], plan: dict[int, int]) -> None:
+    statements = ["BEGIN;"]
+    for channel in channels:
+        priority = plan[channel.channel_id]
+        statements.append(f"UPDATE channels SET priority={priority} WHERE id={channel.channel_id};")
+        statements.append(f"UPDATE abilities SET priority={priority} WHERE channel_id={channel.channel_id};")
+    statements.append("COMMIT;")
+    run_psql("\n".join(statements))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--window-seconds", type=int, default=3600)
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+    channels = fetch_channels(args.window_seconds)
+    grouped: dict[str, list[Channel]] = {}
+    for channel in channels:
+        grouped.setdefault(channel.group, []).append(channel)
+    plan: dict[int, int] = {}
+    plan = group_priority_plan(grouped)
+    groups: dict[str, list[dict]] = {}
+    for channel in channels:
+        groups.setdefault(channel.group, []).append({
+            "channel": channel.channel_id,
+            "status": channel.status,
+            "from": channel.priority,
+            "to": plan[channel.channel_id],
+            "score": round(channel.score, 8),
+            "attempts": channel.attempts,
+            "success_rate": round(channel.success / channel.attempts, 4) if channel.attempts else 0,
+        })
+    if not args.dry_run:
+        apply(channels, plan)
+    print(json.dumps({"window_seconds": args.window_seconds, "dry_run": args.dry_run,
+                      "groups": groups}, ensure_ascii=False, separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

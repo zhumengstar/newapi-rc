@@ -24,10 +24,25 @@ import { isContentSizedColumn } from './content-sized-columns'
 export function getTableSizeStyle<TData>(
   table: TanstackTable<TData>
 ): React.CSSProperties {
-  const width = table
-    .getVisibleLeafColumns()
-    .filter((column) => !isContentSizedColumn(column.id))
+  const visibleColumns = table.getVisibleLeafColumns()
+  const width = visibleColumns
+    .filter(
+      (column) =>
+        table.options.enableColumnResizing === true ||
+        !isContentSizedColumn(column.id)
+    )
     .reduce((total, column) => total + column.getSize(), 0)
+
+  if (table.options.enableColumnResizing === true) {
+    // Keep the table exactly as wide as its columns. Filling the container
+    // makes the browser distribute unused space across the other columns when
+    // one column is narrowed, even with a fixed table layout.
+    return {
+      minWidth: `${width}px`,
+      tableLayout: 'fixed',
+      width: `${width}px`,
+    }
+  }
 
   return {
     minWidth: `max(100%, ${width}px)`,

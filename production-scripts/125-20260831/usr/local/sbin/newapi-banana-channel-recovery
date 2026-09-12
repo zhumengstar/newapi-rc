@@ -1,0 +1,261 @@
+#!/usr/bin/env python3
+"""Recover only script-disabled banana channels after two real image probes.
+
+Manual disables are intentionally ignored. A recovered channel starts at the
+small recovery weight and is then managed by the one-minute weight controller.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import fcntl
+import json
+import os
+import subprocess
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+
+GROUP = "小香蕉对接组"
+POSTGRES_CONTAINER = "newapi-standalone-postgres"
+POSTGRES_USER = "newapi"
+POSTGRES_DB = "new-api"
+MANAGED_REASON_PREFIX = "脚本禁用："
+DEFAULT_STATE = Path("/var/lib/newapi-banana-channel-recovery/state.json")
+DEFAULT_LOCK = Path("/run/newapi-banana-channel-recovery.lock")
+DEFAULT_LOG = Path("/var/log/newapi-banana-channel-recovery.log")
+
+
+def run_psql(sql: str) -> str:
+    proc = subprocess.run(
+        [
+            "docker", "exec", POSTGRES_CONTAINER, "psql", "-X",
+            "-v", "ON_ERROR_STOP=1", "-U", POSTGRES_USER, "-d", POSTGRES_DB,
+            "-Atq", "-F", "\t", "-c", sql,
+        ],
+        check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, timeout=45,
+    )
+    if proc.returncode:
+        raise RuntimeError(proc.stderr.strip() or "psql failed")
+    return proc.stdout
+
+
+def sql_text(value: str) -> str:
+    encoded = base64.b64encode(value.encode("utf-8")).decode("ascii")
+    return f"convert_from(decode('{encoded}', 'base64'), 'UTF8')"
+
+
+def decode(value: str) -> str:
+    return base64.b64decode(value).decode("utf-8", errors="replace") if value else ""
+
+
+def load_channels(group_name: str) -> list[dict]:
+    group = sql_text(group_name)
+    sql = f"""
+SELECT id,type,status,auto_ban,weight,
+       replace(encode(convert_to(coalesce(base_url, ''), 'UTF8'), 'base64'), E'\\n', ''),
+       replace(encode(convert_to(coalesce(key, ''), 'UTF8'), 'base64'), E'\\n', ''),
+       replace(encode(convert_to(coalesce(models, ''), 'UTF8'), 'base64'), E'\\n', ''),
+       replace(encode(convert_to(coalesce(model_mapping, '{{}}'), 'UTF8'), 'base64'), E'\\n', ''),
+       replace(encode(convert_to(coalesce(other, '{{}}'), 'UTF8'), 'base64'), E'\\n', '')
+FROM channels
+WHERE status = 3
+  AND auto_ban = 1
+  AND btrim(coalesce("group", '')) = {group}
+  AND coalesce(nullif(other, ''), '{{}}')::jsonb ->> 'status_reason' LIKE {sql_text(MANAGED_REASON_PREFIX + '%')}
+ORDER BY id;
+"""
+    channels = []
+    for line in run_psql(sql).splitlines():
+        fields = line.split("\t")
+        if len(fields) != 10:
+            continue
+        try:
+            channels.append({
+                "id": int(fields[0]),
+                "type": int(fields[1]),
+                "status": int(fields[2]),
+                "auto_ban": fields[3] == "t",
+                "weight": int(fields[4]),
+                "base_url": decode(fields[5]).rstrip("/"),
+                "key": decode(fields[6]),
+                "models": [x.strip() for x in decode(fields[7]).split(",") if x.strip()],
+                "mapping": json.loads(decode(fields[8]) or "{}"),
+                "other": json.loads(decode(fields[9]) or "{}"),
+            })
+        except (ValueError, json.JSONDecodeError):
+            continue
+    return channels
+
+
+def choose_model(channel: dict) -> tuple[str, str]:
+    candidates = []
+    for alias in channel["models"]:
+        target = str(channel["mapping"].get(alias, alias))
+        name = f"{alias} {target}".lower()
+        if "flash" in name or "low" in name:
+            rank = 0
+        elif "medium" in name or "2k" in name:
+            rank = 1
+        elif "pro" in name or "high" in name or "4k" in name:
+            rank = 2
+        else:
+            rank = 1
+        candidates.append((rank, alias, target))
+    if not candidates:
+        raise RuntimeError("channel has no configured model")
+    _, alias, target = sorted(candidates)[0]
+    return alias, target
+
+
+def build_request(channel: dict) -> tuple[str, bytes, dict, str]:
+    alias, model = choose_model(channel)
+    prompt = "健康检查：生成一张极简图片，白色背景中央一个黑色圆点。"
+    if channel["type"] == 24:
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {"responseModalities": ["IMAGE"], "imageConfig": {"imageSize": "1K"}},
+        }
+        url = f"{channel['base_url']}/v1beta/models/{model}:generateContent"
+    elif channel["type"] == 1:
+        payload = {"model": model, "prompt": prompt, "n": 1, "size": "1024x1024", "quality": "low"}
+        url = f"{channel['base_url']}/v1/images/generations"
+    else:
+        raise RuntimeError(f"unsupported image channel type {channel['type']}")
+    return (
+        url,
+        json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        {"Content-Type": "application/json", "Authorization": f"Bearer {channel['key']}"},
+        alias,
+    )
+
+
+def probe(channel: dict, timeout: int) -> tuple[bool, str]:
+    url, body, headers, alias = build_request(channel)
+    request = urllib.request.Request(url, data=body, method="POST", headers=headers)
+    started = time.monotonic()
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            data = response.read(2 * 1024 * 1024)
+            code = response.status
+        if not 200 <= code < 300:
+            return False, f"model={alias} HTTP {code}"
+        if b"inlineData" not in data and b"b64_json" not in data and b"url" not in data:
+            return False, f"model={alias} HTTP {code} response_without_image"
+        return True, f"model={alias} HTTP {code} {time.monotonic() - started:.1f}s"
+    except urllib.error.HTTPError as exc:
+        detail = exc.read(512).decode("utf-8", errors="replace").replace("\n", " ")
+        return False, f"model={alias} HTTP {exc.code} {detail[:160]}"
+    except Exception as exc:
+        return False, f"model={alias} {type(exc).__name__}: {str(exc)[:160]}"
+
+
+def recover(group_name: str, channel_id: int, weight: int, details: list[str]) -> bool:
+    reason = f"脚本恢复：{group_name}连续{len(details)}次图片探测成功；" + "；".join(details)
+    group = sql_text(group_name)
+    recovered_at = int(time.time())
+    reason_json = json.dumps({
+        "status_reason": reason,
+        "status_time": recovered_at,
+        "channel_update_time": recovered_at,
+        "channel_update_source": "newapi-banana-channel-recovery",
+        "channel_update_action": "status_recovery",
+        "recovery_started_at": recovered_at,
+        "recovery_probe": ";".join(details),
+    }, ensure_ascii=False)
+    sql = f"""
+WITH updated AS (
+  UPDATE channels
+  SET status = 1,
+      weight = {int(weight)},
+      other = (coalesce(nullif(other, ''), '{{}}')::jsonb || {sql_text(reason_json)}::jsonb)::text,
+      other_info = (coalesce(nullif(other_info, ''), '{{}}')::jsonb || {sql_text(reason_json)}::jsonb)::text
+  WHERE id = {int(channel_id)}
+    AND status = 3
+    AND auto_ban = 1
+    AND btrim(coalesce("group", '')) = {group}
+    AND coalesce(nullif(other, ''), '{{}}')::jsonb ->> 'status_reason' LIKE {sql_text(MANAGED_REASON_PREFIX + '%')}
+  RETURNING id
+)
+UPDATE abilities
+SET enabled = true, weight = {int(weight)}
+FROM updated
+WHERE abilities.channel_id = updated.id;
+"""
+    run_psql(sql)
+    return True
+
+
+def save_state(path: Path, entries: dict) -> None:
+    path.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=".state.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump({"version": 1, "updated_at": int(time.time()), "channels": entries}, handle,
+                      ensure_ascii=False, separators=(",", ":"))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(name, 0o600)
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--group", default=GROUP)
+    parser.add_argument("--timeout", type=int, default=90)
+    parser.add_argument("--successes-required", type=int, default=2)
+    parser.add_argument("--recovery-weight", type=int, default=1)
+    parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
+    parser.add_argument("--lock", type=Path, default=DEFAULT_LOCK)
+    parser.add_argument("--log", type=Path, default=DEFAULT_LOG)
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+    if args.timeout < 1 or args.successes_required < 2 or args.recovery_weight < 1:
+        raise SystemExit("timeout >= 1, successes-required >= 2, recovery-weight >= 1 required")
+
+    args.lock.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+    with args.lock.open("w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 0
+        entries = {}
+        lines = []
+        for channel in load_channels(args.group):
+            channel_id = str(channel["id"])
+            details = []
+            ok = True
+            for index in range(args.successes_required):
+                result, detail = probe(channel, args.timeout)
+                details.append(f"probe{index + 1}={'ok' if result else 'failed'}:{detail}")
+                if not result:
+                    ok = False
+                    break
+            recovered = False
+            if ok and not args.dry_run:
+                recovered = recover(args.group, channel["id"], args.recovery_weight, details)
+            entries[channel_id] = {
+                "probes": len(details), "success": ok, "recovered": recovered,
+                "details": details, "time": int(time.time()),
+            }
+            lines.append(f"channel={channel_id} result={'recovered' if recovered else ('ok' if ok else 'failed')} "
+                         + " ".join(details))
+        save_state(args.state, entries)
+        args.log.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+        with args.log.open("a", encoding="utf-8") as handle:
+            handle.write(time.strftime("%Y-%m-%dT%H:%M:%S%z ") + " ".join(lines) + "\n")
+        print(" ".join(lines) if lines else "no-auto-disabled-banana-channels")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

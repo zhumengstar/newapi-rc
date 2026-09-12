@@ -32,7 +32,6 @@ import {
   sideDrawerHeaderClassName,
 } from '@/components/drawer-layout'
 import { Button } from '@/components/ui/button'
-import { Checkbox } from '@/components/ui/checkbox'
 import {
   Form,
   FormControl,
@@ -44,14 +43,8 @@ import {
 } from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
+import { MultiSelect } from '@/components/multi-select'
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import {
   Sheet,
   SheetClose,
@@ -353,41 +346,36 @@ export function UsersMutateDrawer({
                 <SideDrawerSection>
                   <h3 className='text-sm font-medium'>{t('Group & Quota')}</h3>
 
-                  <FormField
-                    control={form.control}
-                    name='group'
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>{t('Group')}</FormLabel>
-                        <Select
-                          items={[
-                            ...groups.map((group) => ({
-                              value: group,
-                              label: group,
-                            })),
-                          ]}
-                          onValueChange={field.onChange}
-                          value={field.value}
-                        >
-                          <FormControl>
-                            <SelectTrigger>
-                              <SelectValue placeholder={t('Select a group')} />
-                            </SelectTrigger>
-                          </FormControl>
-                          <SelectContent alignItemWithTrigger={false}>
-                            <SelectGroup>
-                              {groups.map((group) => (
-                                <SelectItem key={group} value={group}>
-                                  {group}
-                                </SelectItem>
-                              ))}
-                            </SelectGroup>
-                          </SelectContent>
-                        </Select>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
+                  <FormField control={form.control} name='group' render={({ field }) => {
+                    const selected = (field.value || '').split(',').filter(Boolean)
+                    return <FormItem>
+                      <FormLabel>{t('Groups')}</FormLabel>
+                      <MultiSelect
+                        options={groups.map((group) => ({ value: group, label: group }))}
+                        selected={selected}
+                        onChange={(next) => {
+                          const removed = selected.filter((group) => !next.includes(group))
+                          field.onChange(next.join(','))
+                          if (removed.length > 0) {
+                            const ratios = { ...(form.getValues('user_group_ratios') || {}) }
+                            removed.forEach((group) => delete ratios[group])
+                            form.setValue('user_group_ratios', ratios)
+                          }
+                        }}
+                        placeholder={t('Select groups')}
+                        maxVisibleChips={3}
+                      />
+                      <div className='grid gap-2'>
+                        {selected.map((group) => <div key={group} className='flex items-center gap-2'>
+                          <span className='flex-1 text-sm'>{group}</span>
+                          <FormField control={form.control} name={`user_group_ratios.${group}`} render={({ field: ratioField }) => (
+                            <Input className='w-28' type='number' min='0' step='0.01' placeholder={t('Ratio')} value={ratioField.value ?? ''} onChange={(e) => ratioField.onChange(e.target.value === '' ? undefined : Number(e.target.value))} />
+                          )} />
+                        </div>)}
+                      </div>
+                      <FormMessage />
+                    </FormItem>
+                  }} />
 
                   <FormField
                     control={form.control}

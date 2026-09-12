@@ -1,0 +1,20 @@
+[Unit]
+Description=Health-check and tiered cost latency controller for NewAPI gpt discount group
+After=docker.service
+Requires=docker.service
+ConditionPathExists=/var/run/docker.sock
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/newapi-gpt-discount-controller --window-seconds 300 --probe-timeout 20 --fixed-priority 120 --min-weight 1 --max-step 5 --probe-workers 6 --state /var/lib/newapi-gpt-discount-controller/state.json
+User=root
+Group=root
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+StateDirectory=newapi-gpt-discount-controller
+ReadWritePaths=/var/lib/newapi-gpt-discount-controller /run

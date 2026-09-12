@@ -1,0 +1,1869 @@
+#!/usr/bin/env python3
+"""Monitor NewAPI channels, adjust ordinary-group weights, and recover safely.
+
+The guard evaluates de-duplicated terminal requests from a bounded time window
+for each channel. Deterministic quota, permission, credential, and upstream
+access failures use a faster rule; transient failures require both a rolling
+error count and a trailing failure streak. Every automatically disabled channel is
+recovery-probed after its cooldown, one channel per run. Manual disables are
+never included. Ordinary single-group channels also receive a gradual weight
+adjustment once per minute from recent deduplicated success, failure, and
+latency data; priority and dedicated group schedulers are never changed.
+After recovery, only new requests are eligible to disable that channel again.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import fcntl
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+
+DEFAULT_STATE = Path("/var/lib/newapi-channel-error-guard/state.json")
+DEFAULT_LOCK = Path("/run/newapi-channel-error-guard.lock")
+POSTGRES_CONTAINER = os.environ.get(
+    "NEWAPI_GUARD_POSTGRES_CONTAINER", "newapi-standalone-postgres"
+)
+POSTGRES_USER = os.environ.get("NEWAPI_GUARD_POSTGRES_USER", "newapi")
+POSTGRES_DB = os.environ.get("NEWAPI_GUARD_POSTGRES_DB", "new-api")
+CONTROLLER_OWNED_GROUPS = ("GPT对接组", "GPTPro-对接池")
+RECOVERY_CONTROLLER_OWNED_GROUPS = (
+    "GPT对接组",
+    "GPTPro-对接池",
+    "小香蕉对接组",
+    "大香蕉对接组",
+)
+RECOVERY_SOURCE = "newapi-channel-error-guard"
+GPT_LINK_GROUP = "GPT对接组"
+GPT_LINK_TEST_MODEL = "gpt-5.6-sol"
+# Retained for compatibility with the legacy text-only helper below. The
+# active recovery path uses fetch_all_recovery_channels instead.
+RECOVERY_REASON_PREFIX = "脚本禁用："
+IMAGE_GROUP = "生成图片组"
+STATUS_RE = re.compile(r"(?:status(?:_code)?|http(?: status)?)\s*[=:]?\s*(\d{3})", re.I)
+VOLATILE_RE = re.compile(
+    r"(?:[0-9a-f]{8}-[0-9a-f-]{27,}|\b[0-9a-f]{24,}\b|\b\d{6,}\b)", re.I
+)
+IMAGE_MODEL_MARKERS = ("image", "imagen", "dall-e", "banana")
+WEIGHT_MANAGED_EXCLUDED_GROUPS = frozenset(
+    RECOVERY_CONTROLLER_OWNED_GROUPS + (IMAGE_GROUP,)
+)
+UPSTREAM_ERROR_CODE_RE = re.compile(r"(?:error\s*code|code)\s*[:=]\s*([A-Za-z0-9_.-]+)", re.I)
+REQUEST_ID_RE = re.compile(r"(?:request(?:[_ ]?id)|请求 ?ID)\s*[:=：]?\s*[A-Za-z0-9_.-]{8,}", re.I)
+BEARER_RE = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._-]{12,}")
+NON_CHANNEL_FAILURE_CATEGORIES = {
+    "payload_too_large",
+    "no_available_channel",
+    "model_not_found",
+    "group_permission",
+}
+HARD_FAILURE_CATEGORIES = ("quota", "permission", "invalid_token", "upstream_access")
+RECOVERY_BLOCKED_CATEGORIES = {
+    "payload_too_large",
+    "no_available_channel",
+    "model_not_found",
+    "group_permission",
+}
+
+
+def is_image_model(model: str) -> bool:
+    lowered = model.lower()
+    return any(marker in lowered for marker in IMAGE_MODEL_MARKERS)
+
+
+def group_predicate(groups: tuple[str, ...], column: str = '"group"') -> str:
+    return " OR ".join(
+        f"position(',' || {sql_text(group)} || ',' in ',' || "
+        f"replace(coalesce({column}, ''), ' ', '') || ',') > 0"
+        for group in groups
+    )
+
+
+def controller_owned_group_predicate(column: str = '"group"') -> str:
+    return group_predicate(CONTROLLER_OWNED_GROUPS, column)
+
+
+def recovery_controller_owned_group_predicate(column: str = '"group"') -> str:
+    return group_predicate(RECOVERY_CONTROLLER_OWNED_GROUPS, column)
+
+
+def controller_owned_channel_ids() -> set[int]:
+    rows = run_psql("SELECT id FROM channels WHERE " + controller_owned_group_predicate())
+    return {int(row) for row in rows.splitlines() if row.strip().isdigit()}
+
+
+def sanitize_error_text(text: str, limit: int = 260) -> str:
+    """Keep operator diagnostics useful without copying request credentials/IDs."""
+    text = REQUEST_ID_RE.sub("request_id=<redacted>", text)
+    text = BEARER_RE.sub(r"\1<redacted>", text)
+    text = re.sub(r"(?i)(api[-_ ]?key\s*[:=]\s*)[^\s,;]+", r"\1<redacted>", text)
+    return " ".join(text.split())[:limit]
+
+
+def upstream_error_detail(http_status: int, raw: bytes, model: str) -> str:
+    """Return an operator-readable upstream error without leaking request data."""
+    text = " ".join(raw.decode("utf-8", errors="replace").replace("\n", " ").split())
+    code = ""
+    message = ""
+    json_start = text.find("{")
+    if json_start >= 0:
+        try:
+            payload = json.loads(text[json_start:])
+            error = payload.get("error", payload) if isinstance(payload, dict) else {}
+            if isinstance(error, dict):
+                metadata = error.get("metadata", {})
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                code = str(error.get("code") or metadata.get("code") or metadata.get("error_kind") or "")
+                message = str(error.get("message") or payload.get("message") or "")
+        except json.JSONDecodeError:
+            pass
+    if not code:
+        match = UPSTREAM_ERROR_CODE_RE.search(text)
+        if match:
+            code = match.group(1)
+    fields = [f"HTTP {http_status}"]
+    if code:
+        fields.append(f"错误码 {code[:80]}")
+    if message:
+        fields.append(f"原因 {sanitize_error_text(message)}")
+    elif text:
+        fields.append(f"原因 {sanitize_error_text(text)}")
+    fields.append(f"model={model}")
+    return "；".join(fields)
+
+
+def run_psql(sql: str) -> str:
+    proc = subprocess.run(
+        [
+            "docker",
+            "exec",
+            POSTGRES_CONTAINER,
+            "psql",
+            "-X",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-U",
+            POSTGRES_USER,
+            "-d",
+            POSTGRES_DB,
+            "-Atq",
+            "-F",
+            "\t",
+            "-c",
+            sql,
+        ],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=45,
+    )
+    if proc.returncode != 0:
+        detail = " ".join(proc.stderr.split())
+        raise RuntimeError(
+            f"psql failed with exit code {proc.returncode}: {detail[:500]}"
+        )
+    return proc.stdout
+
+
+def sql_text(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def load_state(path: Path) -> dict:
+    if not path.exists():
+        return {"version": 5, "last_id": 0, "channels": {}, "channel_baselines": {}}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("version") not in (1, 2, 3, 4, 5):
+        raise RuntimeError("unsupported state version")
+    data.setdefault("last_id", 0)
+    data.setdefault("channels", {})
+    data.setdefault("channel_baselines", {})
+    return data
+
+
+def save_state(path: Path, state: dict) -> None:
+    path.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=".state.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, separators=(",", ":"), sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp_name, 0o600)
+        os.replace(tmp_name, path)
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+
+
+def max_log_id() -> int:
+    return int(run_psql("SELECT coalesce(max(id), 0) FROM logs;").strip() or "0")
+
+
+def load_disable_keywords() -> list[str]:
+    sql = """
+SELECT replace(encode(convert_to(coalesce(value, ''), 'UTF8'), 'base64'), E'\\n', '')
+FROM options WHERE key = 'AutomaticDisableKeywords';
+"""
+    encoded = run_psql(sql).strip()
+    if not encoded:
+        return []
+    text = base64.b64decode(encoded).decode("utf-8", errors="replace")
+    return [line.strip().lower() for line in text.splitlines() if line.strip()]
+
+
+def fetch_events(after_id: int, limit: int) -> list[tuple[int, int, int, int, int, str, str]]:
+    sql = f"""
+SELECT id, created_at, type, channel_id, quota,
+       replace(encode(convert_to(coalesce(content, ''), 'UTF8'), 'base64'), E'\\n', ''),
+       replace(encode(convert_to(coalesce(request_id, ''), 'UTF8'), 'base64'), E'\\n', '')
+FROM logs
+WHERE id > {int(after_id)}
+  AND channel_id IS NOT NULL
+  AND type IN (2, 5)
+ORDER BY id
+LIMIT {int(limit)};
+"""
+    events = []
+    for line in run_psql(sql).splitlines():
+        parts = line.split("\t", 6)
+        if len(parts) != 7:
+            continue
+        content = base64.b64decode(parts[5]).decode("utf-8", errors="replace") if parts[5] else ""
+        request_id = base64.b64decode(parts[6]).decode("utf-8", errors="replace") if parts[6] else ""
+        events.append((int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3]), int(parts[4]), content, request_id))
+    return events
+
+
+def fetch_recent_events(
+    limit_per_channel: int, error_window_seconds: int
+) -> list[tuple[int, int, int, int, int, str, str]]:
+    """Return the latest de-duplicated terminal requests per channel.
+
+    NewAPI may emit multiple terminal error rows for one retried request. The
+    request ID is therefore part of the de-duplication key; rows without a
+    request ID remain distinct by log ID.
+    """
+    # Limit the scan to a bounded recent slice for each managed channel. This
+    # keeps the 10-second timer independent of the total logs table size.
+    lookback_rows = max(int(limit_per_channel) * 10, 200)
+    sql = f"""
+WITH scoped_channels AS (
+  SELECT id FROM channels WHERE auto_ban = 1
+), recent_raw AS (
+  SELECT l.id, l.created_at, l.type, l.channel_id, l.quota, l.request_id
+  FROM scoped_channels c
+  CROSS JOIN LATERAL (
+    SELECT id, created_at, type, channel_id, quota, request_id
+    FROM logs
+    WHERE logs.channel_id = c.id
+      AND logs.type IN (2, 5)
+      AND logs.created_at >= extract(epoch FROM now())::bigint - {int(error_window_seconds)}
+    ORDER BY id DESC
+    LIMIT {lookback_rows}
+  ) l
+), deduplicated AS (
+  SELECT DISTINCT ON (channel_id, coalesce(nullif(request_id, ''), 'log:' || id::text))
+         id, created_at, type, channel_id, quota, request_id
+  FROM recent_raw
+  ORDER BY channel_id,
+           coalesce(nullif(request_id, ''), 'log:' || id::text),
+           id DESC
+), ranked AS (
+  SELECT id, created_at, type, channel_id, quota, request_id,
+         row_number() OVER (PARTITION BY channel_id ORDER BY id DESC) AS request_rank
+  FROM deduplicated
+)
+SELECT r.id, r.created_at, r.type, r.channel_id, r.quota,
+       replace(encode(convert_to(left(coalesce(l.content, ''), 8192), 'UTF8'), 'base64'), E'\\n', ''),
+       replace(encode(convert_to(coalesce(r.request_id, ''), 'UTF8'), 'base64'), E'\\n', '')
+FROM ranked r
+JOIN logs l ON l.id = r.id
+WHERE r.request_rank <= {int(limit_per_channel)}
+ORDER BY r.channel_id, r.id;
+"""
+    events = []
+    for line in run_psql(sql).splitlines():
+        parts = line.split("\t", 6)
+        if len(parts) != 7:
+            continue
+        content = base64.b64decode(parts[5]).decode("utf-8", errors="replace") if parts[5] else ""
+        request_id = base64.b64decode(parts[6]).decode("utf-8", errors="replace") if parts[6] else ""
+        events.append((int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3]), int(parts[4]), content, request_id))
+    return events
+
+
+def fetch_dynamic_weight_stats(window_seconds: int, limit_per_channel: int) -> list[dict]:
+    """Return bounded, request-id-deduplicated stats for ordinary channels.
+
+    Channel weight is global in NewAPI, so this intentionally limits itself to
+    channels assigned to exactly one ordinary group. Channels managed by a
+    dedicated scheduler are excluded to prevent competing controllers.
+    """
+    excluded = ", ".join(sql_text(group) for group in sorted(WEIGHT_MANAGED_EXCLUDED_GROUPS))
+    lookback_rows = max(int(limit_per_channel) * 10, 50)
+    sql = f"""
+WITH eligible_channels AS (
+  SELECT c.id, c.weight, btrim(c."group") AS group_name
+  FROM channels c
+  WHERE c.status = 1
+    AND c.auto_ban = 1
+    AND btrim(coalesce(c."group", '')) <> ''
+    AND position(',' in btrim(c."group")) = 0
+    AND btrim(c."group") NOT IN ({excluded})
+    AND EXISTS (SELECT 1 FROM abilities a WHERE a.channel_id = c.id AND a.enabled)
+), recent_raw AS (
+  SELECT ec.id AS channel_id, ec.weight, ec.group_name,
+         l.id, l.type, l.quota, l.use_time, l.request_id, l.content
+  FROM eligible_channels ec
+  CROSS JOIN LATERAL (
+    SELECT id, type, quota, use_time, request_id, content
+    FROM logs
+    WHERE logs.channel_id = ec.id
+      AND logs.created_at >= extract(epoch FROM now())::bigint - {int(window_seconds)}
+      AND logs.type IN (2, 5)
+    ORDER BY id DESC
+    LIMIT {lookback_rows}
+  ) l
+), terminal_logs AS (
+  SELECT DISTINCT ON (channel_id, coalesce(nullif(request_id, ''), 'log:' || id::text))
+         channel_id, weight, group_name, id, type, quota, use_time, content
+  FROM recent_raw
+  ORDER BY channel_id,
+           coalesce(nullif(request_id, ''), 'log:' || id::text),
+           id DESC
+)
+SELECT channel_id, weight,
+       replace(encode(convert_to(group_name, 'UTF8'), 'base64'), E'\\n', ''),
+       type, quota, coalesce(use_time, 0),
+       replace(encode(convert_to(left(coalesce(content, ''), 8192), 'UTF8'), 'base64'), E'\\n', '')
+FROM terminal_logs
+ORDER BY channel_id, id DESC;
+"""
+    stats: dict[int, dict] = {}
+    for line in run_psql(sql).splitlines():
+        parts = line.split("\t", 6)
+        if len(parts) != 7:
+            continue
+        try:
+            channel_id = int(parts[0])
+            weight = int(parts[1])
+            group_name = base64.b64decode(parts[2]).decode("utf-8", errors="replace") if parts[2] else ""
+            log_type = int(parts[3])
+            quota = int(parts[4])
+            use_time = float(parts[5] or 0)
+            content = base64.b64decode(parts[6]).decode("utf-8", errors="replace") if parts[6] else ""
+        except (TypeError, ValueError):
+            continue
+        item = stats.setdefault(channel_id, {
+            "channel_id": channel_id,
+            "group": group_name,
+            "weight": weight,
+            "attempts": 0,
+            "success": 0,
+            "failed": 0,
+            "durations": [],
+        })
+        signature = classify_error(log_type, quota, content, [])
+        if signature == "SUCCESS":
+            item["attempts"] += 1
+            item["success"] += 1
+            if use_time > 0:
+                item["durations"].append(use_time)
+        elif signature is not None:
+            item["attempts"] += 1
+            item["failed"] += 1
+    return list(stats.values())
+
+
+def calculate_dynamic_weight_targets(
+    stats: list[dict], min_samples: int, min_weight: int, max_weight: int
+) -> dict[int, int]:
+    """Allocate each ordinary group's existing weight budget by recent quality."""
+    grouped: dict[str, list[dict]] = {}
+    for item in stats:
+        group = str(item.get("group", "")).strip()
+        if not group or group in WEIGHT_MANAGED_EXCLUDED_GROUPS:
+            continue
+        grouped.setdefault(group, []).append(item)
+
+    targets: dict[int, int] = {}
+    for channels in grouped.values():
+        sampled = [item for item in channels if int(item.get("attempts", 0)) >= min_samples]
+        if not sampled:
+            continue
+        total_budget = max(
+            sum(max(int(item.get("weight", min_weight)), min_weight) for item in channels),
+            len(channels) * min_weight,
+        )
+        fixed_budget = sum(
+            max(int(item.get("weight", min_weight)), min_weight)
+            for item in channels if item not in sampled
+        )
+        available = max(len(sampled) * min_weight, total_budget - fixed_budget)
+        scores = []
+        for item in sampled:
+            attempts = max(int(item.get("attempts", 0)), 1)
+            success = int(item.get("success", 0))
+            failed = int(item.get("failed", 0))
+            success_rate = (success + 2) / (attempts + 4)
+            failure_rate = failed / attempts
+            durations = [float(value) for value in item.get("durations", []) if float(value) > 0]
+            avg_seconds = sum(durations) / len(durations) if durations else 0
+            latency_factor = 1 / (1 + max(avg_seconds - 3, 0) / 30) if avg_seconds else 1
+            score = max(0.02, (success_rate ** 4) * max(0.1, 1 - failure_rate) * latency_factor)
+            scores.append((item, score))
+        score_sum = sum(score for _, score in scores) or 1
+        raw = [(item, available * score / score_sum) for item, score in scores]
+        allocated = {item["channel_id"]: min_weight for item, _ in raw}
+        remaining = max(0, available - len(allocated) * min_weight)
+        fractions = []
+        for item, value in raw:
+            extra = max(0, value - min_weight)
+            whole = min(max_weight - min_weight, int(extra))
+            allocated[item["channel_id"]] += whole
+            fractions.append((extra - int(extra), item["channel_id"]))
+            remaining -= whole
+        for _, channel_id in sorted(fractions, reverse=True):
+            if remaining <= 0:
+                break
+            if allocated[channel_id] < max_weight:
+                allocated[channel_id] += 1
+                remaining -= 1
+        targets.update(allocated)
+    return targets
+
+
+def bounded_weight(current: int, target: int, max_step: int, min_weight: int, max_weight: int) -> int:
+    current = max(min_weight, min(max_weight, int(current)))
+    target = max(min_weight, min(max_weight, int(target)))
+    step = max(1, int(max_step))
+    return max(current - step, min(target, current + step))
+
+
+def update_dynamic_weight(channel: dict, target: int) -> bool:
+    """Update channel and enabled abilities atomically, without changing priority."""
+    channel_id = int(channel["channel_id"])
+    group = sql_text(str(channel["group"]))
+    current = int(channel["weight"])
+    sql = f"""
+BEGIN;
+WITH updated AS (
+  UPDATE channels
+  SET weight = {int(target)}
+  WHERE id = {channel_id}
+    AND status = 1
+    AND auto_ban = 1
+    AND weight = {current}
+    AND btrim(coalesce("group", '')) = {group}
+  RETURNING id
+), ability_update AS (
+  UPDATE abilities
+  SET weight = {int(target)}
+  FROM updated
+  WHERE abilities.channel_id = updated.id AND abilities.enabled
+  RETURNING abilities.channel_id
+)
+SELECT id FROM updated;
+COMMIT;
+"""
+    return bool(run_psql(sql).strip())
+
+
+def rebalance_dynamic_weights(
+    state: dict,
+    window_seconds: int,
+    limit_per_channel: int,
+    interval_seconds: int,
+    min_samples: int,
+    max_step: int,
+    min_weight: int,
+    max_weight: int,
+    dry_run: bool,
+) -> list[dict]:
+    now = int(time.time())
+    last_adjust = int(state.get("last_weight_adjust_at", 0) or 0)
+    if now - last_adjust < interval_seconds:
+        return []
+    stats = fetch_dynamic_weight_stats(window_seconds, limit_per_channel)
+    targets = calculate_dynamic_weight_targets(stats, min_samples, min_weight, max_weight)
+    actions = []
+    for item in stats:
+        channel_id = item["channel_id"]
+        if channel_id not in targets:
+            continue
+        current = int(item["weight"])
+        target = bounded_weight(current, targets[channel_id], max_step, min_weight, max_weight)
+        if target == current:
+            continue
+        action = {
+            "channel": channel_id,
+            "group": item["group"],
+            "from_weight": current,
+            "to_weight": target,
+            "attempts": item["attempts"],
+            "success": item["success"],
+            "failed": item["failed"],
+        }
+        if not dry_run and update_dynamic_weight(item, target):
+            actions.append(action)
+            print(
+                f"weight-adjust channel={channel_id} group={item['group']} "
+                f"{current}->{target} attempts={item['attempts']} "
+                f"success={item['success']} failed={item['failed']}"
+            )
+        elif dry_run:
+            actions.append(action)
+            print(
+                f"weight-candidate channel={channel_id} group={item['group']} "
+                f"{current}->{target} attempts={item['attempts']} "
+                f"success={item['success']} failed={item['failed']}"
+            )
+    state["last_weight_adjust_at"] = now
+    state["last_weight_window"] = int(window_seconds)
+    return actions
+
+
+def fetch_channel_statuses() -> dict[int, dict[str, int | str]]:
+    """Return automatic-ban channels and their most credible status timestamp."""
+    sql = """
+SELECT id, status,
+       replace(encode(convert_to(coalesce(other, ''), 'UTF8'), 'base64'), E'\\n', ''),
+       replace(encode(convert_to(coalesce(other_info, ''), 'UTF8'), 'base64'), E'\\n', '')
+FROM channels
+WHERE auto_ban = 1;
+"""
+    statuses: dict[int, dict[str, int]] = {}
+    for line in run_psql(sql).splitlines():
+        parts = line.split("\t", 3)
+        if len(parts) != 4:
+            continue
+        try:
+            channel_id = int(parts[0])
+            status = int(parts[1])
+            enable_events: list[tuple[int, str]] = []
+            # Only explicit manual/recovery markers are enable events. Generic
+            # health-test timestamps must not keep resetting the error window.
+            for encoded in (parts[3], parts[2]):
+                if not encoded:
+                    continue
+                try:
+                    payload = json.loads(base64.b64decode(encoded).decode("utf-8", errors="replace"))
+                    timestamp = int(payload.get("status_time", 0))
+                    reason = str(payload.get("status_reason", "")).lower()
+                    action = str(payload.get("channel_update_action", ""))
+                    is_script_recovery = action == "status_recover" or "脚本恢复" in reason
+                    is_enable = (
+                        "manual operation" in reason
+                        or "手动启用" in reason
+                        or is_script_recovery
+                        or "恢复启用" in reason
+                    )
+                    if timestamp > 0 and is_enable:
+                        enable_events.append((timestamp, RECOVERY_SOURCE if is_script_recovery else "manual"))
+                except (ValueError, json.JSONDecodeError):
+                    continue
+            status_time, enable_source = max(enable_events, default=(0, ""), key=lambda item: item[0])
+            statuses[channel_id] = {
+                "status": status,
+                "status_time": status_time,
+                "enable_source": enable_source,
+            }
+        except ValueError:
+            continue
+    return statuses
+
+
+def refresh_enable_baselines(
+    state: dict,
+    statuses: dict[int, dict[str, int | str]],
+    current_log_id: int,
+) -> tuple[dict[str, dict[str, int]], int]:
+    """Start each enabled channel at a fresh log boundary.
+
+    The guard deliberately does not infer a status-change time from historic
+    logs. On first observation of enabled state, and after a disabled to
+    enabled transition, the current log ID becomes the baseline. Therefore a
+    stale error window can never immediately disable a recovered channel.
+    """
+    raw = state.get("channel_baselines", {})
+    baselines: dict[str, dict[str, int]] = {}
+    initialized = 0
+    for channel_id, metadata in statuses.items():
+        key = str(channel_id)
+        status = metadata["status"]
+        status_time = metadata["status_time"]
+        previous = raw.get(key, {}) if isinstance(raw, dict) else {}
+        previous_status = previous.get("status") if isinstance(previous, dict) else None
+        previous_status_time = previous.get("status_time", 0) if isinstance(previous, dict) else 0
+        previous_baseline = previous.get("baseline_log_id", 0) if isinstance(previous, dict) else 0
+        if status == 1 and (previous_status != 1 or previous_status_time != status_time):
+            baselines[key] = {
+                "status": 1,
+                "status_time": status_time,
+                "recovered_by_script": metadata.get("enable_source") == RECOVERY_SOURCE,
+                "baseline_log_id": current_log_id,
+                "observed_at": int(time.time()),
+            }
+            initialized += 1
+        else:
+            try:
+                baseline = int(previous_baseline)
+            except (TypeError, ValueError):
+                baseline = current_log_id
+            baselines[key] = {
+                "status": status,
+                "status_time": status_time,
+                "recovered_by_script": bool(previous.get("recovered_by_script", False)) if isinstance(previous, dict) else False,
+                "baseline_log_id": baseline,
+                "observed_at": int(previous.get("observed_at", 0)) if isinstance(previous, dict) else 0,
+            }
+    return baselines, initialized
+
+
+def filter_events_after_enable(
+    events: list[tuple[int, int, int, int, int, str, str]],
+    baselines: dict[str, dict[str, int]],
+) -> list[tuple[int, int, int, int, int, str, str]]:
+    """Only count requests produced after the channel's current enablement."""
+    filtered = []
+    for event in events:
+        baseline = baselines.get(str(event[3]))
+        if not baseline or baseline.get("status") != 1:
+            continue
+        status_time = int(baseline.get("status_time", 0))
+        if event[0] > int(baseline.get("baseline_log_id", 0)) and (
+            status_time == 0 or event[1] >= status_time
+        ):
+            filtered.append(event)
+    return filtered
+
+
+def fetch_all_recovery_channels(
+    cooldown_seconds: int,
+    hard_error_cooldown_seconds: int,
+    image_cooldown_seconds: int,
+    limit: int,
+) -> list[dict]:
+    """Find the oldest unchecked automatically disabled channels.
+
+    Status 3 is NewAPI's automatic-disable state. Status 2 is a manual
+    disable, so it is deliberately excluded even when auto_ban is enabled.
+    """
+    hard_categories = ", ".join(sql_text(category) for category in HARD_FAILURE_CATEGORIES)
+    sql = f"""
+WITH channel_data AS (
+  SELECT id, type, status, auto_ban, base_url, key, models, model_mapping, "group",
+         coalesce(nullif(other, ''), '{{}}')::jsonb AS other_json,
+         coalesce(nullif(other_info, ''), '{{}}')::jsonb AS other_info_json
+  FROM channels
+  WHERE status = 3 AND auto_ban = 1
+), annotated AS (
+  SELECT *,
+         coalesce(other_json ->> 'channel_update_source', other_info_json ->> 'channel_update_source',
+                  other_json ->> 'initial_disable_source', other_info_json ->> 'initial_disable_source', '') AS update_source,
+         coalesce(other_json ->> 'status_reason', other_info_json ->> 'status_reason', '') AS status_reason,
+         coalesce(other_json ->> 'recovery_failure_category', other_info_json ->> 'recovery_failure_category',
+                  other_json ->> 'auto_disable_category', other_info_json ->> 'auto_disable_category',
+                  CASE WHEN coalesce(other_json ->> 'status_reason', other_info_json ->> 'status_reason',
+                                     other_json ->> 'initial_disable_reason', '') LIKE '%上游额度不足%' THEN 'quota' ELSE '' END) AS failure_category,
+         coalesce(nullif(other_json ->> 'recovery_check_time', ''),
+                  nullif(other_info_json ->> 'recovery_check_time', ''),
+                  nullif(other_json ->> 'status_time', ''),
+                  nullif(other_info_json ->> 'status_time', ''), '0') AS recovery_at
+  FROM channel_data
+)
+SELECT id, type, status, auto_ban,
+       replace(encode(convert_to(coalesce(base_url, ''), 'UTF8'), 'base64'), E'\\n', ''),
+       replace(encode(convert_to(coalesce(key, ''), 'UTF8'), 'base64'), E'\\n', ''),
+       replace(encode(convert_to(coalesce(models, ''), 'UTF8'), 'base64'), E'\\n', ''),
+       replace(encode(convert_to(coalesce(model_mapping, '{{}}'), 'UTF8'), 'base64'), E'\\n', ''),
+       replace(encode(convert_to(coalesce("group", ''), 'UTF8'), 'base64'), E'\\n', ''),
+       failure_category, recovery_at
+FROM annotated
+WHERE status = 3
+  AND auto_ban = 1
+  AND type IN (1, 14, 24)
+  AND (
+    update_source = {sql_text(RECOVERY_SOURCE)}
+    OR (update_source = '' AND status_reason LIKE {sql_text(RECOVERY_REASON_PREFIX + '%')})
+  )
+  AND failure_category NOT IN ({', '.join(sql_text(category) for category in RECOVERY_BLOCKED_CATEGORIES)})
+  AND recovery_at ~ '^[0-9]+$'
+  AND recovery_at::bigint <= extract(epoch FROM now())::bigint -
+      CASE
+        WHEN lower(coalesce(models, '')) ~ '(image|imagen|dall-e|banana)'
+          THEN {int(image_cooldown_seconds)}
+        WHEN failure_category IN ({hard_categories})
+          THEN {int(hard_error_cooldown_seconds)}
+        ELSE {int(cooldown_seconds)}
+      END
+ORDER BY recovery_at ASC, id ASC
+LIMIT {int(limit)};
+"""
+    rows = []
+    for line in run_psql(sql).splitlines():
+        parts = line.split("\t", 10)
+        if len(parts) != 11:
+            continue
+        decode_field = lambda value: base64.b64decode(value).decode("utf-8", errors="replace") if value else ""
+        try:
+            rows.append({
+                "id": int(parts[0]), "type": int(parts[1]), "status": int(parts[2]),
+                "auto_ban": parts[3].lower() in ("1", "t", "true"),
+                "base_url": decode_field(parts[4]).rstrip("/"),
+                "key": decode_field(parts[5]),
+                "models": [model.strip() for model in decode_field(parts[6]).split(",") if model.strip()],
+                "mapping": json.loads(decode_field(parts[7]) or "{}"),
+                "group": decode_field(parts[8]), "failure_category": parts[9],
+                "recovery_at": int(parts[10] or 0),
+            })
+            if not rows[-1]["models"]:
+                rows.pop()
+        except (ValueError, json.JSONDecodeError):
+            continue
+    return rows
+
+
+def probe_model_rank(model: str, channel_type: int) -> tuple[int, str]:
+    """Prefer the lowest-cost advertised model for a recovery probe."""
+    lowered = model.lower()
+    if channel_type == 14:
+        return (0 if "haiku" in lowered else 1 if "sonnet" in lowered else 2, lowered)
+    if is_image_model(model):
+        return (0 if any(token in lowered for token in ("flash", "low", "1k"))
+                else 1 if any(token in lowered for token in ("2k", "medium")) else 2, lowered)
+    return (0 if any(token in lowered for token in ("nano", "mini", "compact", "flash", "small")) else 1, lowered)
+
+
+def choose_probe_model(channel: dict) -> tuple[str, str]:
+    if not channel["models"]:
+        raise RuntimeError("channel has no model")
+    groups = {item.strip() for item in channel.get("group", "").split(",") if item.strip()}
+    if GPT_LINK_GROUP in groups:
+        if GPT_LINK_TEST_MODEL in channel["models"]:
+            return GPT_LINK_TEST_MODEL, str(channel["mapping"].get(GPT_LINK_TEST_MODEL, GPT_LINK_TEST_MODEL))
+        # Fall back to the existing lightweight model for newly added channels
+        # that have not advertised gpt-5.6-sol yet.
+        alias = min(channel["models"], key=lambda model: probe_model_rank(model, channel["type"]))
+        return alias, str(channel["mapping"].get(alias, alias))
+    alias = min(channel["models"], key=lambda model: probe_model_rank(model, channel["type"]))
+    return alias, str(channel["mapping"].get(alias, alias))
+
+
+def probe_channel(channel: dict, timeout: int) -> tuple[bool, str]:
+    """Run one minimal protocol-correct probe without exposing credentials."""
+    alias, model = choose_probe_model(channel)
+    prompt = "health check; reply ok"
+    headers = {"Content-Type": "application/json"}
+    if channel["type"] == 24:
+        url = f"{channel['base_url']}/v1beta/models/{model}:generateContent"
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {"maxOutputTokens": 1},
+        }
+        if is_image_model(alias):
+            payload["generationConfig"].update({
+                "responseModalities": ["IMAGE"],
+                "imageConfig": {"imageSize": "1K"},
+            })
+        headers["Authorization"] = f"Bearer {channel['key']}"
+    elif channel["type"] == 14:
+        url = f"{channel['base_url']}/v1/messages"
+        payload = {"model": model, "max_tokens": 1, "messages": [{"role": "user", "content": prompt}]}
+        headers["x-api-key"] = channel["key"]
+        headers["anthropic-version"] = "2023-06-01"
+    elif channel["type"] == 1 and is_image_model(alias):
+        url = f"{channel['base_url']}/v1/images/generations"
+        payload = {"model": model, "prompt": "health check image", "n": 1, "size": "1024x1024", "quality": "low"}
+        headers["Authorization"] = f"Bearer {channel['key']}"
+    elif channel["type"] == 1:
+        url = f"{channel['base_url']}/v1/chat/completions"
+        payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": 1, "stream": False}
+        headers["Authorization"] = f"Bearer {channel['key']}"
+    else:
+        raise RuntimeError(f"unsupported channel type {channel['type']}")
+
+    request = urllib.request.Request(
+        url, data=json.dumps(payload, ensure_ascii=False).encode(), method="POST", headers=headers
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read(1024 * 1024)
+            if not 200 <= response.status < 300:
+                return False, f"HTTP {response.status} model={alias}"
+            if is_image_model(alias) and not any(marker in body for marker in (b'"b64_json"', b'"inlineData"', b'"inline_data"', b'"url"')):
+                return False, f"HTTP {response.status} model={alias} missing image result"
+            return True, f"HTTP {response.status} model={alias}"
+    except urllib.error.HTTPError as exc:
+        return False, upstream_error_detail(exc.code, exc.read(1024), alias)
+    except Exception as exc:
+        return False, f"{type(exc).__name__} model={alias}"
+
+
+def probe_timeout_for_channel(channel: dict, text_timeout: int, image_timeout: int) -> int:
+    """Use a longer deadline for image generation, which is intentionally slower."""
+    return image_timeout if any(is_image_model(model) for model in channel.get("models", [])) else text_timeout
+
+
+def fetch_recovery_channels(cooldown_seconds: int) -> list[dict]:
+    """Find cooled-down text channels disabled by this guard."""
+    sql = f"""
+SELECT id,type,status,auto_ban,
+       replace(encode(convert_to(coalesce(base_url, ''), 'UTF8'), 'base64'), E'\\n', ''),
+       replace(encode(convert_to(coalesce(key, ''), 'UTF8'), 'base64'), E'\\n', ''),
+       replace(encode(convert_to(coalesce(models, ''), 'UTF8'), 'base64'), E'\\n', ''),
+       replace(encode(convert_to(coalesce(model_mapping, '{{}}'), 'UTF8'), 'base64'), E'\\n', ''),
+       replace(encode(convert_to(coalesce(\"group\", ''), 'UTF8'), 'base64'), E'\\n', '')
+FROM channels
+WHERE status = 3
+  AND auto_ban = 1
+  AND type IN (1, 24)
+  AND coalesce(nullif(other, ''), '{{}}')::jsonb ->> 'status_reason' LIKE {sql_text(RECOVERY_REASON_PREFIX + '%')}
+  AND btrim(coalesce(\"group\", '')) <> {sql_text(IMAGE_GROUP)}
+  AND position(',' || {sql_text(GPT_LINK_GROUP)} || ',' in ',' || replace(coalesce(\"group\", ''), ' ', '') || ',') = 0
+  AND (
+    CASE
+      WHEN coalesce(
+        nullif(coalesce(nullif(other, ''), '{{}}')::jsonb ->> 'recovery_check_time', ''),
+        nullif(coalesce(nullif(other, ''), '{{}}')::jsonb ->> 'status_time', ''),
+        '0'
+      ) ~ '^[0-9]+$'
+      THEN coalesce(
+        nullif(coalesce(nullif(other, ''), '{{}}')::jsonb ->> 'recovery_check_time', ''),
+        nullif(coalesce(nullif(other, ''), '{{}}')::jsonb ->> 'status_time', ''),
+        '0'
+      )::bigint
+      ELSE 0
+    END
+  ) <= extract(epoch FROM now())::bigint - {int(cooldown_seconds)}
+ORDER BY id;
+"""
+    rows = []
+    for line in run_psql(sql).splitlines():
+        parts = line.split("\t", 8)
+        if len(parts) != 9:
+            continue
+        decode_field = lambda value: base64.b64decode(value).decode("utf-8", errors="replace") if value else ""
+        try:
+            models = [x.strip() for x in decode_field(parts[6]).split(",") if x.strip()]
+            if not any(not is_image_model(model) for model in models):
+                continue
+            rows.append({
+                "id": int(parts[0]), "type": int(parts[1]), "status": int(parts[2]),
+                "auto_ban": parts[3] == "t", "base_url": decode_field(parts[4]).rstrip("/"),
+                "key": decode_field(parts[5]), "models": models,
+                "mapping": json.loads(decode_field(parts[7]) or "{}"), "group": decode_field(parts[8]),
+            })
+        except (ValueError, json.JSONDecodeError):
+            continue
+    return rows
+
+
+def choose_text_model(channel: dict) -> str:
+    text_models = [model for model in channel["models"] if not is_image_model(model)]
+    if not text_models:
+        raise RuntimeError("channel has no model")
+    alias = sorted(text_models, key=lambda value: ("flash" not in value.lower(), "mini" not in value.lower(), value))[0]
+    return str(channel["mapping"].get(alias, alias))
+
+
+def probe_text_channel(channel: dict, timeout: int) -> tuple[bool, str]:
+    model = choose_text_model(channel)
+    prompt = "health check; reply ok"
+    if channel["type"] == 24:
+        url = f"{channel['base_url']}/v1beta/models/{model}:generateContent"
+        payload = {"contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                   "generationConfig": {"maxOutputTokens": 1}}
+    elif channel["type"] == 1:
+        url = f"{channel['base_url']}/v1/chat/completions"
+        payload = {"model": model, "messages": [{"role": "user", "content": prompt}],
+                   "max_tokens": 1, "stream": False}
+    else:
+        raise RuntimeError(f"unsupported text channel type {channel['type']}")
+    request = urllib.request.Request(
+        url, data=json.dumps(payload, ensure_ascii=False).encode(), method="POST",
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {channel['key']}"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            response.read(8192)
+            if 200 <= response.status < 300:
+                return True, f"HTTP {response.status} model={model}"
+            return False, f"HTTP {response.status} model={model}"
+    except urllib.error.HTTPError as exc:
+        return False, f"HTTP {exc.code} model={model}"
+    except Exception as exc:
+        return False, f"{type(exc).__name__} model={model}"
+
+
+def recover_channel(channel: dict, detail: str) -> bool:
+    detail = sanitize_error_text(detail)
+    reason = f"脚本恢复：自动禁用渠道探测成功；{detail}"
+    recovered_at = int(time.time())
+    recovery_data = json.dumps({
+        "status_reason": reason,
+        "status_time": recovered_at,
+        "connection_test_time": recovered_at,
+        "connection_test_result": "ok",
+        "connection_test_source": RECOVERY_SOURCE,
+        "connection_test_message": detail,
+        "recovery_started_at": recovered_at,
+        "recovery_probe": detail,
+        "channel_update_time": recovered_at,
+        "channel_update_source": RECOVERY_SOURCE,
+        "channel_update_action": "status_recover",
+    }, ensure_ascii=False)
+    encoded_data = base64.b64encode(recovery_data.encode("utf-8")).decode("ascii")
+    sql = f"""
+WITH updated AS (
+  UPDATE channels AS c
+  SET status = 1,
+      weight = 1,
+      other = (CASE WHEN coalesce(other, '') = '' THEN '{{}}'::jsonb ELSE other::jsonb END
+        || convert_from(decode('{encoded_data}', 'base64'), 'UTF8')::jsonb)::text,
+      other_info = (CASE WHEN coalesce(other_info, '') = '' THEN '{{}}'::jsonb ELSE other_info::jsonb END
+        || convert_from(decode('{encoded_data}', 'base64'), 'UTF8')::jsonb)::text
+  WHERE c.id = {int(channel['id'])}
+    AND c.status = 3
+    AND c.auto_ban = 1
+    AND (
+      coalesce(nullif(c.other, ''), '{{}}')::jsonb ->> 'channel_update_source' = {sql_text(RECOVERY_SOURCE)}
+      OR (
+        coalesce(nullif(c.other, ''), '{{}}')::jsonb ->> 'channel_update_source' = ''
+        AND coalesce(nullif(c.other, ''), '{{}}')::jsonb ->> 'status_reason' LIKE {sql_text(RECOVERY_REASON_PREFIX + '%')}
+      )
+    )
+  RETURNING c.id
+), ability_update AS (
+  UPDATE abilities
+  SET enabled = true, weight = 1
+  FROM updated
+  WHERE abilities.channel_id = updated.id
+)
+SELECT id FROM updated;
+"""
+    return bool(run_psql(sql).strip())
+
+
+def mark_recovery_attempt(channel: dict, detail: str) -> None:
+    """Record every failed probe in both audit and frontend display fields."""
+    checked_at = int(time.time())
+    detail = sanitize_error_text(detail)
+    reason = f"脚本自动检测：仍不可用；{detail}"
+    failure_signature = classify_error(5, 0, detail, [])
+    failure_category = ""
+    if failure_signature and ":" in failure_signature:
+        failure_category = failure_signature.split(":", 1)[1]
+    probe_data = json.dumps({
+        "status_reason": reason,
+        "status_time": checked_at,
+        "connection_test_time": checked_at,
+        "connection_test_result": "failed",
+        "connection_test_source": RECOVERY_SOURCE,
+        "connection_test_message": detail,
+        "recovery_check_time": checked_at,
+        "recovery_last_error": detail,
+        "recovery_failure_category": failure_category,
+        "channel_update_time": checked_at,
+        "channel_update_source": RECOVERY_SOURCE,
+        "channel_update_action": "recovery_probe",
+    }, ensure_ascii=False)
+    encoded_data = base64.b64encode(probe_data.encode("utf-8")).decode("ascii")
+    sql = f"""
+UPDATE channels AS c
+SET other = (
+      CASE WHEN coalesce(c.other, '') = '' THEN '{{}}'::jsonb ELSE c.other::jsonb END
+      || jsonb_build_object(
+           'initial_disable_reason',
+           coalesce(
+             nullif((CASE WHEN coalesce(c.other, '') = '' THEN '{{}}'::jsonb ELSE c.other::jsonb END)
+               ->> 'initial_disable_reason', ''),
+             (CASE WHEN coalesce(c.other, '') = '' THEN '{{}}'::jsonb ELSE c.other::jsonb END)
+               ->> 'status_reason',
+             ''
+           )
+         )
+      || convert_from(decode('{encoded_data}', 'base64'), 'UTF8')::jsonb
+      || jsonb_build_object(
+           'status_reason',
+           {sql_text(reason)} ||
+           CASE WHEN coalesce((CASE WHEN coalesce(c.other, '') = '' THEN '{{}}'::jsonb ELSE c.other::jsonb END)
+             ->> 'connection_test_time', '') = '' THEN '' ELSE
+             '；最近系统测试：' ||
+             CASE WHEN (CASE WHEN coalesce(c.other, '') = '' THEN '{{}}'::jsonb ELSE c.other::jsonb END)
+               ->> 'connection_test_result' = 'ok' THEN '可用' ELSE '不可用' END ||
+             '；上游 HTTP ' || coalesce((CASE WHEN coalesce(c.other, '') = '' THEN '{{}}'::jsonb ELSE c.other::jsonb END)
+               ->> 'connection_test_http_status', '无响应') ||
+             CASE WHEN coalesce((CASE WHEN coalesce(c.other, '') = '' THEN '{{}}'::jsonb ELSE c.other::jsonb END)
+               ->> 'connection_test_error_code', '') = '' THEN '' ELSE
+               '；错误码 ' || ((CASE WHEN coalesce(c.other, '') = '' THEN '{{}}'::jsonb ELSE c.other::jsonb END)
+                 ->> 'connection_test_error_code') END ||
+             CASE WHEN coalesce((CASE WHEN coalesce(c.other, '') = '' THEN '{{}}'::jsonb ELSE c.other::jsonb END)
+               ->> 'connection_test_message', '') = '' THEN '' ELSE
+               '；原因 ' || left((CASE WHEN coalesce(c.other, '') = '' THEN '{{}}'::jsonb ELSE c.other::jsonb END)
+                 ->> 'connection_test_message', 180) END
+           END
+         )
+    )::text,
+    other_info = (
+      CASE WHEN coalesce(c.other_info, '') = '' THEN '{{}}'::jsonb ELSE c.other_info::jsonb END
+      || jsonb_build_object(
+           'initial_disable_reason',
+           coalesce(
+             nullif((CASE WHEN coalesce(c.other_info, '') = '' THEN '{{}}'::jsonb ELSE c.other_info::jsonb END)
+               ->> 'initial_disable_reason', ''),
+             (CASE WHEN coalesce(c.other_info, '') = '' THEN '{{}}'::jsonb ELSE c.other_info::jsonb END)
+               ->> 'status_reason',
+             ''
+           )
+         )
+      || convert_from(decode('{encoded_data}', 'base64'), 'UTF8')::jsonb
+      || jsonb_build_object(
+           'status_reason',
+           {sql_text(reason)} ||
+           CASE WHEN coalesce((CASE WHEN coalesce(c.other_info, '') = '' THEN '{{}}'::jsonb ELSE c.other_info::jsonb END)
+             ->> 'connection_test_time', '') = '' THEN '' ELSE
+             '；最近系统测试：' ||
+             CASE WHEN (CASE WHEN coalesce(c.other_info, '') = '' THEN '{{}}'::jsonb ELSE c.other_info::jsonb END)
+               ->> 'connection_test_result' = 'ok' THEN '可用' ELSE '不可用' END ||
+             '；上游 HTTP ' || coalesce((CASE WHEN coalesce(c.other_info, '') = '' THEN '{{}}'::jsonb ELSE c.other_info::jsonb END)
+               ->> 'connection_test_http_status', '无响应') ||
+             CASE WHEN coalesce((CASE WHEN coalesce(c.other_info, '') = '' THEN '{{}}'::jsonb ELSE c.other_info::jsonb END)
+               ->> 'connection_test_error_code', '') = '' THEN '' ELSE
+               '；错误码 ' || ((CASE WHEN coalesce(c.other_info, '') = '' THEN '{{}}'::jsonb ELSE c.other_info::jsonb END)
+                 ->> 'connection_test_error_code') END ||
+             CASE WHEN coalesce((CASE WHEN coalesce(c.other_info, '') = '' THEN '{{}}'::jsonb ELSE c.other_info::jsonb END)
+               ->> 'connection_test_message', '') = '' THEN '' ELSE
+               '；原因 ' || left((CASE WHEN coalesce(c.other_info, '') = '' THEN '{{}}'::jsonb ELSE c.other_info::jsonb END)
+                 ->> 'connection_test_message', 180) END
+           END
+         )
+    )::text
+WHERE c.id = {int(channel['id'])}
+  AND c.status = 3
+  AND c.auto_ban = 1
+  AND NOT ({recovery_controller_owned_group_predicate('"group"')})
+  AND (
+    coalesce(nullif(c.other, ''), '{{}}')::jsonb ->> 'channel_update_source' = {sql_text(RECOVERY_SOURCE)}
+    OR (
+      coalesce(nullif(c.other, ''), '{{}}')::jsonb ->> 'channel_update_source' = ''
+      AND coalesce(nullif(c.other, ''), '{{}}')::jsonb ->> 'status_reason' LIKE {sql_text(RECOVERY_REASON_PREFIX + '%')}
+    )
+  );
+"""
+    run_psql(sql)
+
+
+def advance_error_sequence(
+    current: dict,
+    signature: str,
+    dedupe_key: str,
+    created_at: int,
+    window_seconds: int,
+) -> tuple[dict, bool]:
+    if current.get("signature") != signature:
+        return {"signature": signature, "events": [[created_at, dedupe_key]]}, True
+
+    cutoff = created_at - window_seconds
+    raw_events = current.get("events")
+    events: list[list[object]] = []
+    if isinstance(raw_events, list):
+        for item in raw_events:
+            if not isinstance(item, list) or len(item) != 2:
+                continue
+            try:
+                timestamp = int(item[0])
+            except (TypeError, ValueError):
+                continue
+            if timestamp >= cutoff:
+                events.append([timestamp, str(item[1])])
+    if any(item[1] == dedupe_key for item in events):
+        current["events"] = events
+        return current, False
+
+    events.append([created_at, dedupe_key])
+    current["events"] = events
+    return current, True
+
+
+def prune_sequences(sequences: dict[str, dict], cutoff: int) -> dict[str, dict]:
+    pruned: dict[str, dict] = {}
+    for channel_id, current in sequences.items():
+        signature = current.get("signature")
+        if not signature:
+            continue
+        events = []
+        for item in current.get("events", []):
+            if not isinstance(item, list) or len(item) != 2:
+                continue
+            try:
+                timestamp = int(item[0])
+            except (TypeError, ValueError):
+                continue
+            if timestamp >= cutoff:
+                events.append([timestamp, str(item[1])])
+        if events:
+            pruned[channel_id] = {"signature": signature, "events": events}
+    return pruned
+
+
+def classify_error(log_type: int, quota: int, content: str, keywords: list[str]) -> str | None:
+    lower = content.lower()
+    if log_type == 2:
+        if quota > 0:
+            return "SUCCESS"
+        if "上游没有返回计费信息" in content or "cannot consume quota" in lower:
+            return "missing_usage"
+        if "scanner_error" in lower:
+            return "scanner_error"
+        return None
+
+    status_match = STATUS_RE.search(lower)
+    status = int(status_match.group(1)) if status_match else 0
+
+    categories = (
+        ("payload_too_large", ("payload too large", "request entity too large")),
+        ("timeout", ("timeout", "timed out", "deadline exceeded", "response time")),
+        ("scanner_error", ("scanner_error",)),
+        ("http2_internal", ("http/2", "internal_error")),
+        ("unexpected_eof", ("unexpected eof",)),
+        ("rate_limit", ("rate limit", "too many requests")),
+        ("no_available_channel", ("no available channel for model",)),
+        ("model_not_found", ("model_not_found", "model not found", "模型不存在")),
+        ("group_permission", (
+            "image generation is not enabled for this group",
+            "该分组不支持图片生成", "分组无权访问",
+        )),
+        ("upstream_access", (
+            "error code: 1010", "code 1010", "access denied by upstream",
+        )),
+        ("quota", (
+            "insufficient quota", "exceeded your current quota", "usage limit",
+            "insufficient balance", "insufficient account balance",
+            "insufficient_balance", "insufficient_user_quota",
+            "account balance", "insufficient funds", "余额不足", "余额不够", "额度不足",
+        )),
+        ("permission", ("permission denied", "not authorized", "operation not allowed")),
+        ("invalid_token", ("security token", "invalid api key", "invalid token")),
+    )
+    category = ""
+    for name, needles in categories:
+        if any(needle in lower for needle in needles):
+            category = name
+            break
+
+    if not category:
+        for keyword in keywords:
+            if keyword in lower:
+                digest = hashlib.sha256(keyword.encode()).hexdigest()[:12]
+                category = f"configured_keyword_{digest}"
+                break
+
+    # A large request and a distributor routing miss do not prove this
+    # channel is unhealthy. Do not disable a healthy channel for either case.
+    if category in NON_CHANNEL_FAILURE_CATEGORIES:
+        return None
+
+    eligible_status = status in {401, 403, 408, 429} or 500 <= status <= 599
+    if not eligible_status and not category:
+        return None
+
+    if not category:
+        normalized = VOLATILE_RE.sub("#", lower[:500])
+        digest = hashlib.sha256(normalized.encode()).hexdigest()[:12]
+        category = f"message_{digest}"
+    return f"http_{status or 'unknown'}:{category}"
+
+
+def signature_category(signature: str) -> str:
+    return signature.split(":", 1)[1] if ":" in signature else signature
+
+
+def find_disable_candidates(
+    events: list[tuple[int, int, int, int, int, str, str]],
+    keywords: list[str],
+    threshold: int,
+    recent_requests: int = 20,
+    hard_threshold: int = 3,
+    hard_recent_requests: int = 5,
+    quota_error_window_seconds: int = 120,
+    hard_error_window_seconds: int = 300,
+    transient_threshold: int = 5,
+    transient_error_window_seconds: int = 600,
+    transient_streak: int = 3,
+    hard_streak: int = 2,
+    recovery_fast_channels: set[int] | None = None,
+    recovery_fast_threshold: int = 2,
+    recovery_fast_recent_requests: int = 5,
+    recovery_fast_streak: int = 2,
+) -> list[tuple[int, str, int, int, int, int, str]]:
+    """Find persistent channel failures using separate hard/transient rules.
+
+    The returned tuple is channel, signature, count, threshold, sample size,
+    and required trailing streak. Non-channel errors and successes break a
+    trailing streak, so an alternating error pattern cannot trip the guard.
+    """
+    recovery_fast_channels = recovery_fast_channels or set()
+    grouped: dict[int, list[tuple[int, int, str | None]]] = {}
+    for event_id, created_at, log_type, channel_id, quota, content, _request_id in events:
+        signature = classify_error(log_type, quota, content, keywords)
+        grouped.setdefault(channel_id, []).append((event_id, created_at, signature))
+
+    candidates: list[tuple[int, str, int, int, int, int, str]] = []
+    for channel_id, channel_events in grouped.items():
+        ordered = sorted(channel_events, key=lambda item: item[0])
+        eligible = [(event_id, signature) for event_id, _created_at, signature in ordered if signature not in (None, "SUCCESS")]
+        if not eligible:
+            continue
+
+        latest_created_at = max((event[1] for event in channel_events), default=0)
+        found: list[tuple[int, str, int, int, int, int, str]] = []
+        for signature in {item[1] for item in eligible}:
+            category = signature_category(signature)
+            is_fast_recovery = (
+                channel_id in recovery_fast_channels
+                and len(ordered) <= recovery_fast_recent_requests
+            )
+            is_hard = category in HARD_FAILURE_CATEGORIES
+            sample_size = (
+                recovery_fast_recent_requests
+                if is_fast_recovery
+                else hard_recent_requests if is_hard else recent_requests
+            )
+            required = (
+                recovery_fast_threshold
+                if is_fast_recovery
+                else hard_threshold if is_hard else threshold
+            )
+            required_streak = (
+                recovery_fast_streak
+                if is_fast_recovery
+                else hard_streak if is_hard else transient_streak
+            )
+            if is_hard:
+                window_seconds = (
+                    quota_error_window_seconds
+                    if category == "quota"
+                    else hard_error_window_seconds
+                )
+            else:
+                window_seconds = transient_error_window_seconds
+            if is_hard or is_fast_recovery:
+                effective_required = required
+            else:
+                effective_required = transient_threshold
+            windowed = [
+                item for item in ordered
+                if latest_created_at <= 0
+                or (item[1] <= latest_created_at
+                    and item[1] >= latest_created_at - window_seconds)
+            ]
+            recent = windowed[-sample_size:]
+            count = sum(1 for _event_id, _created_at, item_signature in recent if item_signature == signature)
+            streak = 0
+            for _event_id, _created_at, item_signature in reversed(ordered):
+                if item_signature != signature:
+                    break
+                streak += 1
+            if is_hard:
+                triggered = count >= effective_required and streak >= required_streak
+                trigger = "hard"
+            elif is_fast_recovery:
+                triggered = count >= effective_required and streak >= required_streak
+                trigger = "recovery"
+            else:
+                # Transient failures can be dangerous even at low traffic. A
+                # short consecutive streak trips immediately; a broader window
+                # catches intermittent failures without reacting to one blip.
+                triggered = streak >= required_streak or count >= effective_required
+                trigger = "streak" if streak >= required_streak else "window"
+            if triggered:
+                found.append((channel_id, signature, count, effective_required, sample_size, required_streak, trigger))
+        if found:
+            candidates.append(max(found, key=lambda item: (item[2], item[1])))
+    return candidates
+
+
+def display_reason(
+    signature: str,
+    threshold: int,
+    recent_requests: int = 20,
+    required_streak: int = 0,
+    trigger: str = "",
+) -> str:
+    status = ""
+    category = signature
+    if signature.startswith("http_") and ":" in signature:
+        status, category = signature.split(":", 1)
+        status = status.removeprefix("http_")
+    labels = {
+        "missing_usage": "上游未返回计费信息",
+        "payload_too_large": "上游拒绝大请求",
+        "timeout": "上游请求超时",
+        "scanner_error": "流响应解析错误",
+        "http2_internal": "HTTP/2 上游连接异常",
+        "unexpected_eof": "上游流意外中断",
+        "rate_limit": "上游限流",
+        "no_available_channel": "上游分组无可用渠道",
+        "model_not_found": "模型不存在",
+        "user_quota": "用户额度不足",
+        "group_permission": "分组权限不足",
+        "quota": "上游额度不足",
+        "permission": "上游权限错误",
+        "invalid_token": "上游凭据无效",
+    }
+    if category.startswith("configured_keyword_"):
+        label = "命中自动禁用关键词"
+    elif category.startswith("message_"):
+        label = "上游服务错误"
+    else:
+        label = labels.get(category, "渠道请求错误")
+    details = f"HTTP {status}，{label}" if status and status != "unknown" else label
+    if trigger == "streak":
+        rule_detail = f"连续{required_streak}个不同请求失败"
+    elif trigger == "hard":
+        rule_detail = f"{recent_requests}次窗口内达到{threshold}次且末尾连续{required_streak}次"
+    elif trigger == "recovery":
+        rule_detail = f"恢复观察期内达到{threshold}次且末尾连续{required_streak}次"
+    elif trigger == "window":
+        rule_detail = f"近{recent_requests}次窗口内达到{threshold}次相同错误"
+    else:
+        streak_detail = f"，末尾连续{required_streak}次" if required_streak else ""
+        rule_detail = f"近{recent_requests}次内达到 {threshold} 次相同错误{streak_detail}"
+    return f"脚本禁用：{rule_detail}；{details}"
+
+
+def disable_channel(
+    channel_id: int,
+    signature: str,
+    threshold: int,
+    recent_requests: int,
+    required_streak: int = 0,
+    trigger: str = "",
+) -> tuple[bool, str]:
+    reason = display_reason(signature, threshold, recent_requests, required_streak, trigger)
+    category = signature.split(":", 1)[-1]
+    http_status = signature.split(":", 1)[0].removeprefix("http_") if signature.startswith("http_") else ""
+    updated_at = int(time.time())
+    encoded_reason = base64.b64encode(reason.encode("utf-8")).decode("ascii")
+    sql = f"""
+WITH updated AS (
+  UPDATE channels AS c
+  SET status = 3,
+      other = (jsonb_set(
+        jsonb_set(
+          CASE WHEN coalesce(other, '') = '' THEN '{{}}'::jsonb ELSE other::jsonb END,
+          '{{status_reason}}',
+          to_jsonb(convert_from(decode('{encoded_reason}', 'base64'), 'UTF8')),
+          true
+        ),
+        '{{status_time}}',
+        to_jsonb({updated_at}),
+        true
+      ) || jsonb_build_object(
+        'connection_test_time', {updated_at},
+        'connection_test_result', 'failed',
+        'connection_test_source', {sql_text(RECOVERY_SOURCE)},
+        'connection_test_message', {sql_text(reason)},
+        'channel_update_time', {updated_at},
+        'channel_update_source', {sql_text(RECOVERY_SOURCE)},
+        'channel_update_action', 'status_disable',
+        'auto_disable_category', {sql_text(category)},
+        'auto_disable_signature', {sql_text(signature)},
+        'auto_disable_http_status', {sql_text(http_status)}
+      ))::text,
+      other_info = (jsonb_set(
+        jsonb_set(
+          CASE WHEN coalesce(other_info, '') = '' THEN '{{}}'::jsonb ELSE other_info::jsonb END,
+          '{{status_reason}}',
+          to_jsonb(convert_from(decode('{encoded_reason}', 'base64'), 'UTF8')),
+          true
+        ),
+        '{{status_time}}',
+        to_jsonb({updated_at}),
+        true
+      ) || jsonb_build_object(
+        'connection_test_time', {updated_at},
+        'connection_test_result', 'failed',
+        'connection_test_source', {sql_text(RECOVERY_SOURCE)},
+        'connection_test_message', {sql_text(reason)},
+        'channel_update_time', {updated_at},
+        'channel_update_source', {sql_text(RECOVERY_SOURCE)},
+        'channel_update_action', 'status_disable',
+        'auto_disable_category', {sql_text(category)},
+        'auto_disable_signature', {sql_text(signature)},
+        'auto_disable_http_status', {sql_text(http_status)}
+      ))::text
+  WHERE c.id = {int(channel_id)}
+    AND c.status = 1
+    AND c.auto_ban = 1
+  RETURNING c.id
+), ability_update AS (
+  UPDATE abilities
+  SET enabled = false
+  FROM updated
+  WHERE abilities.channel_id = updated.id
+  RETURNING abilities.channel_id
+)
+SELECT id FROM updated;
+"""
+    return bool(run_psql(sql).strip()), reason
+
+
+def self_test() -> None:
+    keywords = ["insufficient quota"]
+    quota_detail = upstream_error_detail(
+        403,
+        b'{"error":{"message":"The account does not have sufficient permission or quota.","code":"insufficient_user_quota"}}',
+        "gpt-test",
+    )
+    assert "错误码 insufficient_user_quota" in quota_detail
+    assert "permission or quota" in quota_detail
+    assert classify_error(5, 0, "status_code=503 upstream failed", keywords).startswith("http_503:")
+    assert classify_error(5, 0, "status_code=413 Payload Too Large", keywords) is None
+    assert classify_error(5, 0, "status_code=503 No available channel for model gpt-test", keywords) is None
+    assert classify_error(5, 0, "status_code=403 insufficient_user_quota", keywords) == "http_403:quota"
+    assert classify_error(5, 0, "status_code=403 Image generation is not enabled for this group", keywords) is None
+    assert classify_error(5, 0, "status_code=402 上游额度不足", keywords) == "http_402:quota"
+    assert classify_error(5, 0, "status_code=400 invalid request", keywords) is None
+    assert classify_error(5, 0, "status_code=400 insufficient quota", keywords) == "http_400:quota"
+    assert classify_error(5, 0, "status_code=403, Insufficient account balance", keywords) == "http_403:quota"
+    assert classify_error(5, 0, "status_code=403 insufficient_balance", keywords) == "http_403:quota"
+    assert classify_error(5, 0, "status_code=403 余额不足", keywords) == "http_403:quota"
+    assert classify_error(5, 0, "status_code=403 error code: 1010", keywords) == "http_403:upstream_access"
+    assert classify_error(2, 10, "", keywords) == "SUCCESS"
+    assert classify_error(2, 0, "上游没有返回计费信息", keywords) == "missing_usage"
+    assert is_image_model("gemini-3.1-flash-image-4k")
+    assert not is_image_model("gemini-3.1-flash-preview")
+    assert display_reason("http_503:message_deadbeef", 10, 20, 3) == "脚本禁用：近20次内达到 10 次相同错误，末尾连续3次；HTTP 503，上游服务错误"
+    assert display_reason("missing_usage", 10) == "脚本禁用：近20次内达到 10 次相同错误；上游未返回计费信息"
+    assert display_reason("http_402:quota", 10, 20) == "脚本禁用：近20次内达到 10 次相同错误；HTTP 402，上游额度不足"
+    sanitized = sanitize_error_text(
+        "request_id=202608291234567890 bearer sk-secret-token-value"
+    )
+    assert "202608291234567890" not in sanitized
+    assert "sk-secret-token-value" not in sanitized
+    recent_events = [
+        (index, 100 + index, 5, 42, 0, "status_code=502 rate limit", f"request-{index}")
+        for index in range(1, 5)
+    ] + [
+        (index, 100 + index, 5, 42, 0, "status_code=400 invalid request", f"other-{index}")
+        for index in range(5, 21)
+    ]
+    assert find_disable_candidates(recent_events, keywords, 10) == []
+    recent_events[-3:] = [
+        (index, 100 + index, 5, 42, 0, "status_code=502 rate limit", f"request-{index}")
+        for index in range(18, 21)
+    ]
+    assert find_disable_candidates(recent_events, keywords, 10) == [
+        (42, "http_502:rate_limit", 7, 5, 20, 3, "streak")
+    ]
+    hard_events = [
+        (index, 200 + index, 5, 43, 0, "status_code=402 上游额度不足", f"hard-{index}")
+        for index in range(1, 4)
+    ] + [
+        (index, 200 + index, 2, 43, 1, "", f"ok-{index}")
+        for index in range(4, 6)
+    ]
+    assert find_disable_candidates(hard_events, keywords, 10) == []
+    hard_events[-2:] = [
+        (index, 200 + index, 5, 43, 0, "status_code=402 上游额度不足", f"hard-{index}")
+        for index in range(4, 6)
+    ]
+    assert find_disable_candidates(hard_events, keywords, 10) == [
+        (43, "http_402:quota", 5, 3, 5, 2, "hard")
+    ]
+    recovery_events = [
+        (1, 300, 5, 44, 0, "status_code=503 timeout", "recovery-1"),
+        (2, 301, 5, 44, 0, "status_code=503 timeout", "recovery-2"),
+    ]
+    assert find_disable_candidates(
+        recovery_events, keywords, 10, recovery_fast_channels={44}
+    ) == [(44, "http_503:timeout", 2, 2, 5, 2, "recovery")]
+    assert probe_timeout_for_channel(
+        {"models": ["gemini-3.1-flash-image-4k"]}, 8, 90
+    ) == 90
+    assert probe_timeout_for_channel({"models": ["gpt-5.6-sol"]}, 8, 90) == 8
+    assert find_disable_candidates(recovery_events, keywords, 10) == []
+    weight_stats = [
+        {"channel_id": 1, "group": "普通组", "weight": 10, "attempts": 5, "success": 5, "failed": 0, "durations": [1, 1, 2, 1, 1]},
+        {"channel_id": 2, "group": "普通组", "weight": 10, "attempts": 5, "success": 1, "failed": 4, "durations": [20]},
+        {"channel_id": 3, "group": "GPT对接组", "weight": 10, "attempts": 5, "success": 0, "failed": 5, "durations": []},
+    ]
+    weight_targets = calculate_dynamic_weight_targets(weight_stats, 3, 1, 20)
+    assert weight_targets[1] > weight_targets[2]
+    assert 3 not in weight_targets
+    assert bounded_weight(10, 1, 1, 1, 20) == 9
+    assert bounded_weight(10, 20, 1, 1, 20) == 11
+    baselines, initialized = refresh_enable_baselines(
+        {"channel_baselines": {"42": {"status": 3, "status_time": 90, "baseline_log_id": 9}}},
+        {42: {"status": 1, "status_time": 110}},
+        20,
+    )
+    assert initialized == 1 and baselines["42"]["baseline_log_id"] == 20
+    assert filter_events_after_enable(recent_events, baselines) == []
+    assert [event[0] for event in filter_events_after_enable(
+        recent_events, {"42": {"status": 1, "status_time": 110, "baseline_log_id": 10}}
+    )] == list(range(11, 21))
+    sequence = {"signature": "", "events": []}
+    for _ in range(25):
+        sequence, _ = advance_error_sequence(
+            sequence, "http_503:message_deadbeef", "request-a", 100, 30
+        )
+    assert len(sequence["events"]) == 1
+    for index in range(1, 6):
+        sequence, counted = advance_error_sequence(
+            sequence, "http_503:message_deadbeef", f"request-{index}", 100 + index, 30
+        )
+        assert counted
+    assert len(sequence["events"]) == 6
+    sequence, counted = advance_error_sequence(
+        sequence, "http_503:message_deadbeef", "request-5", 106, 30
+    )
+    assert not counted and len(sequence["events"]) == 6
+    sequence, counted = advance_error_sequence(
+        sequence, "http_502:message_other", "request-5", 106, 30
+    )
+    assert counted and len(sequence["events"]) == 1
+    sequence, counted = advance_error_sequence(
+        sequence, "http_502:message_other", "request-6", 140, 30
+    )
+    assert counted and len(sequence["events"]) == 1
+    assert prune_sequences({"1": sequence}, 141) == {}
+    print("self-test: ok")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--threshold", type=int, default=10)
+    parser.add_argument("--recent-requests", type=int, default=20)
+    parser.add_argument(
+        "--error-window-seconds",
+        type=int,
+        default=300,
+        help="maximum age of requests considered for automatic disablement",
+    )
+    parser.add_argument("--hard-threshold", type=int, default=2)
+    parser.add_argument("--hard-recent-requests", type=int, default=5)
+    parser.add_argument(
+        "--quota-error-window-seconds",
+        type=int,
+        default=120,
+        help="window for upstream quota failures",
+    )
+    parser.add_argument(
+        "--hard-error-window-seconds",
+        type=int,
+        default=300,
+        help="window for credential, permission, and upstream-access failures",
+    )
+    parser.add_argument(
+        "--transient-threshold",
+        type=int,
+        default=5,
+        help="intermittent transient failures in the transient window",
+    )
+    parser.add_argument(
+        "--transient-error-window-seconds",
+        type=int,
+        default=600,
+        help="window for intermittent timeout, rate-limit, and 5xx failures",
+    )
+    parser.add_argument(
+        "--transient-streak",
+        type=int,
+        default=10,
+        help="连续不同请求失败达到该次数后才自动禁用瞬态错误渠道",
+    )
+    parser.add_argument("--hard-streak", type=int, default=2)
+    parser.add_argument("--recovery-fast-threshold", type=int, default=2)
+    parser.add_argument("--recovery-fast-recent-requests", type=int, default=5)
+    parser.add_argument("--recovery-fast-streak", type=int, default=2)
+    parser.add_argument("--recovery-cooldown-seconds", type=int, default=180)
+    parser.add_argument(
+        "--hard-error-cooldown-seconds",
+        type=int,
+        default=1800,
+        help="cooldown for quota, permission, credential, and upstream-access failures",
+    )
+    parser.add_argument("--probe-timeout", type=int, default=8)
+    parser.add_argument(
+        "--image-probe-timeout",
+        type=int,
+        default=90,
+        help="timeout for image-generation recovery probes",
+    )
+    parser.add_argument(
+        "--image-recovery-cooldown-seconds",
+        type=int,
+        default=600,
+        help="minimum interval between recovery probes for image channels",
+    )
+    parser.add_argument(
+        "--recovery-max-probes",
+        type=int,
+        default=1,
+        help="maximum automatic-disable recovery probes per run",
+    )
+    parser.add_argument(
+        "--no-recovery-probe",
+        action="store_true",
+        help="do not send upstream requests to recover automatically disabled channels",
+    )
+    parser.add_argument(
+        "--disable-only",
+        action="store_true",
+        help="only inspect recent errors and disable unhealthy channels",
+    )
+    parser.add_argument(
+        "--recovery-only",
+        action="store_true",
+        help="only probe automatically disabled channels for recovery",
+    )
+    parser.add_argument(
+        "--weight-window-seconds",
+        type=int,
+        default=300,
+        help="window used by dynamic weight adjustment",
+    )
+    parser.add_argument(
+        "--weight-adjust-interval-seconds",
+        type=int,
+        default=60,
+        help="minimum interval between dynamic weight adjustments",
+    )
+    parser.add_argument(
+        "--weight-min-samples",
+        type=int,
+        default=3,
+        help="minimum deduplicated requests before a channel can be reweighted",
+    )
+    parser.add_argument("--weight-max-step", type=int, default=1)
+    parser.add_argument("--weight-min", type=int, default=1)
+    parser.add_argument("--weight-max", type=int, default=20)
+    parser.add_argument(
+        "--no-weight-adjust",
+        action="store_true",
+        help="disable dynamic weight adjustment while keeping error monitoring",
+    )
+    parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
+    parser.add_argument("--lock", type=Path, default=DEFAULT_LOCK)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--self-test", action="store_true")
+    args = parser.parse_args()
+    if args.self_test:
+        self_test()
+        return 0
+    if args.disable_only and args.recovery_only:
+        raise SystemExit("--disable-only and --recovery-only are mutually exclusive")
+    if args.disable_only and args.state == DEFAULT_STATE:
+        args.state = DEFAULT_STATE.with_name("disable-state.json")
+    elif args.recovery_only and args.state == DEFAULT_STATE:
+        args.state = DEFAULT_STATE.with_name("recovery-state.json")
+    if args.disable_only and args.lock == DEFAULT_LOCK:
+        args.lock = DEFAULT_LOCK.with_name("newapi-channel-error-guard-disable.lock")
+    elif args.recovery_only and args.lock == DEFAULT_LOCK:
+        args.lock = DEFAULT_LOCK.with_name("newapi-channel-error-guard-recovery.lock")
+    if (
+        args.threshold < 2
+        or args.recent_requests < args.threshold
+        or args.error_window_seconds < 1
+        or args.hard_threshold < 2
+        or args.hard_recent_requests < args.hard_threshold
+        or args.quota_error_window_seconds < 1
+        or args.hard_error_window_seconds < 1
+        or args.transient_threshold < 2
+        or args.transient_error_window_seconds < 1
+        or args.transient_streak < 2
+        or args.hard_streak < 2
+        or args.recovery_fast_threshold < 2
+        or args.recovery_fast_recent_requests < args.recovery_fast_threshold
+        or args.recovery_fast_streak < 2
+        or args.probe_timeout < 1
+        or args.image_probe_timeout < args.probe_timeout
+        or args.image_recovery_cooldown_seconds < args.recovery_cooldown_seconds
+        or args.recovery_cooldown_seconds < 0
+        or args.hard_error_cooldown_seconds < args.recovery_cooldown_seconds
+        or args.recovery_max_probes < 1
+        or args.weight_window_seconds < 1
+        or args.weight_adjust_interval_seconds < 1
+        or args.weight_min_samples < 1
+        or args.weight_max_step < 1
+        or args.weight_min < 1
+        or args.weight_max < args.weight_min
+    ):
+        raise SystemExit("recent-requests must be >= threshold and probe-timeout must be positive")
+
+    args.lock.parent.mkdir(parents=True, exist_ok=True)
+    with args.lock.open("w") as lock_handle:
+        fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        state = load_state(args.state)
+        if args.recovery_only:
+            keywords = []
+            statuses = {}
+            baselines = {}
+            baseline_initialized = 0
+            events = []
+            candidates = []
+        else:
+            keywords = load_disable_keywords()
+            statuses = fetch_channel_statuses()
+            baselines, baseline_initialized = refresh_enable_baselines(
+                state, statuses, max_log_id()
+            )
+            events = filter_events_after_enable(
+                fetch_recent_events(args.recent_requests, args.error_window_seconds), baselines
+            )
+            candidates = find_disable_candidates(
+                events,
+                keywords,
+                args.threshold,
+                args.recent_requests,
+                args.hard_threshold,
+                args.hard_recent_requests,
+                args.quota_error_window_seconds,
+                args.hard_error_window_seconds,
+                args.transient_threshold,
+                args.transient_error_window_seconds,
+                args.transient_streak,
+                args.hard_streak,
+                {
+                    int(channel_id)
+                    for channel_id, baseline in baselines.items()
+                    if isinstance(baseline, dict) and baseline.get("recovered_by_script")
+                },
+                args.recovery_fast_threshold,
+                args.recovery_fast_recent_requests,
+                args.recovery_fast_streak,
+            )
+        processed = len(events)
+        candidate_errors = sum(
+            1
+            for event_id, created_at, log_type, channel_id, quota, content, request_id in events
+            if (signature := classify_error(log_type, quota, content, keywords)) not in (None, "SUCCESS")
+        )
+        disabled = recovered = 0
+
+        if not args.recovery_only:
+            for channel_id, signature, count, threshold, sample_size, required_streak, trigger in candidates:
+                reason = display_reason(signature, threshold, sample_size, required_streak, trigger)
+                if args.dry_run:
+                    print(f"candidate channel={channel_id} count={count} reason={reason}")
+                    continue
+                changed, reason = disable_channel(
+                    channel_id, signature, threshold, sample_size, required_streak, trigger
+                )
+                if changed:
+                    disabled += 1
+                    print(f"disabled channel={channel_id} count={count} reason={reason}")
+
+        weight_adjusted = []
+        if not args.disable_only and not args.recovery_only and not args.no_weight_adjust:
+            weight_adjusted = rebalance_dynamic_weights(
+                state,
+                args.weight_window_seconds,
+                args.recent_requests,
+                args.weight_adjust_interval_seconds,
+                args.weight_min_samples,
+                args.weight_max_step,
+                args.weight_min,
+                args.weight_max,
+                args.dry_run,
+            )
+
+        recovery_candidates = [] if args.disable_only or args.no_recovery_probe else fetch_all_recovery_channels(
+            args.recovery_cooldown_seconds,
+            args.hard_error_cooldown_seconds,
+            args.image_recovery_cooldown_seconds,
+            args.recovery_max_probes,
+        )
+        if args.dry_run:
+            for channel in recovery_candidates:
+                print(
+                    f"recovery-candidate channel={channel['id']} type={channel['type']} "
+                    f"group={channel['group'] or '-'} last_check={channel['recovery_at']}"
+                )
+        elif not args.disable_only and not args.no_recovery_probe:
+            for channel in recovery_candidates:
+                try:
+                    ok, detail = probe_channel(
+                        channel,
+                        probe_timeout_for_channel(
+                            channel, args.probe_timeout, args.image_probe_timeout
+                        ),
+                    )
+                except Exception as exc:
+                    ok, detail = False, f"{type(exc).__name__}"
+                detail = sanitize_error_text(detail)
+                if ok and recover_channel(channel, detail):
+                    recovered += 1
+                    print(f"recovered channel={channel['id']} detail={detail} weight=1")
+                else:
+                    if not ok:
+                        mark_recovery_attempt(channel, detail)
+                    print(f"recovery-check channel={channel['id']} result={'ok' if ok else 'failed'} detail={detail}")
+
+        state.update({
+            "version": 5,
+            "last_window": int(time.time()),
+            "last_id": max((event[0] for event in events), default=int(state.get("last_id", 0))),
+            "recent_requests": args.recent_requests,
+            "threshold": args.threshold,
+            "error_window_seconds": args.error_window_seconds,
+            "hard_threshold": args.hard_threshold,
+            "hard_recent_requests": args.hard_recent_requests,
+            "transient_streak": args.transient_streak,
+            "hard_streak": args.hard_streak,
+            "last_weight_adjust_at": state.get("last_weight_adjust_at", 0),
+            "last_weight_window": state.get("last_weight_window", args.weight_window_seconds),
+            "channels": {},
+            "channel_baselines": baselines,
+        })
+        save_state(args.state, state)
+        print(
+            f"mode={'recovery' if args.recovery_only else 'disable' if args.disable_only else 'all'} "
+            f"processed={processed} candidate_errors={candidate_errors} "
+            f"deduplication=request_id disabled={disabled} recovered={recovered} "
+            f"enable_baselines={len(baselines)} initialized={baseline_initialized} "
+            f"recent_requests={args.recent_requests} recovery_cooldown={args.recovery_cooldown_seconds}s "
+            f"error_window={args.error_window_seconds}s hard_rule={args.hard_threshold}/{args.hard_recent_requests} "
+            f"quota_window={args.quota_error_window_seconds}s hard_window={args.hard_error_window_seconds}s "
+            f"transient_rule={args.transient_threshold}/{args.transient_error_window_seconds}s "
+            f"hard_streak={args.hard_streak} transient_streak={args.transient_streak} "
+            f"recovery_fast_rule={args.recovery_fast_threshold}/{args.recovery_fast_recent_requests} "
+            f"recovery_fast_streak={args.recovery_fast_streak} "
+            f"hard_error_cooldown={args.hard_error_cooldown_seconds}s "
+            f"probe_timeout={args.probe_timeout}s image_probe_timeout={args.image_probe_timeout}s "
+            f"image_recovery_cooldown={args.image_recovery_cooldown_seconds}s "
+            f"weight_adjusted={len(weight_adjusted)} weight_window={args.weight_window_seconds}s "
+            f"weight_adjustment={int(not args.no_weight_adjust and not args.disable_only and not args.recovery_only)} "
+            f"recovery_candidates={len(recovery_candidates)} recovery_probe={int(not args.no_recovery_probe and not args.disable_only)} "
+            f"dry_run={int(args.dry_run)}"
+        )
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except BlockingIOError:
+        print("another instance is running")
+        raise SystemExit(0)
+    except Exception as exc:
+        print(f"guard failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        raise SystemExit(1)

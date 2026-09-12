@@ -1,0 +1,14 @@
+[Unit]
+Description=Keep NewAPI standalone container serving after accidental stops
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/newapi-standalone-guard
+User=root
+Group=root
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/var/log /run

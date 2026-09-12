@@ -21,7 +21,15 @@ For commercial licensing, please contact support@quantumnous.com
 // All label/name values are i18n keys; use t(value) when displaying.
 // ============================================================================
 
+export const CHANNEL_TYPE_SUB2_API = 59
 export const CHANNEL_TYPE_NEW_API = 60
+
+export const CHANNEL_SITE_TYPE_OPTIONS = [
+  { value: '', label: 'Auto detect (default)' },
+  { value: 'newapi', label: 'NewAPI' },
+  { value: 'sub2api', label: 'Sub2API' },
+  { value: 'unknown', label: 'Unknown' },
+] as const
 
 export const CHANNEL_TYPE_TASK_PLUGIN = 61
 
@@ -278,6 +286,7 @@ export const SUCCESS_MESSAGES = {
   DELETED: 'Channel deleted successfully',
   ENABLED: 'Channel enabled successfully',
   DISABLED: 'Channel disabled successfully',
+  AUTO_DISABLED: 'Channel auto-disabled successfully',
   TESTED: 'Channel test completed',
   BALANCE_QUERIED: 'Balance queried successfully',
   MODELS_FETCHED: 'Models fetched successfully',
@@ -321,6 +330,7 @@ export const SORT_OPTIONS = [
   { value: 'id', label: 'ID' },
   { value: 'name', label: 'Name' },
   { value: 'balance', label: 'Balance' },
+  { value: 'channel_ratio', label: 'Channel Ratio' },
   { value: 'response_time', label: 'Response Time' },
 ] as const
 
@@ -386,6 +396,23 @@ export const FIELD_DESCRIPTIONS = {
   WEIGHT: 'Used for load balancing. Higher weight = more requests',
   TEST_MODEL: 'Model to use when testing channel connectivity',
   AUTO_BAN: 'Automatically disable channel on repeated failures',
+  RPM_LIMIT: 'Maximum requests per minute routed through this channel; 0 means unlimited',
+  ADAPTIVE_ENABLED:
+    'Adjust enabled ability weights from recent channel quality without changing status or priority',
+  ADAPTIVE_WINDOW:
+    'Recent log window in seconds used for channel scoring',
+  ADAPTIVE_MIN_SAMPLES:
+    'Minimum deduplicated requests per channel before weights change',
+  ADAPTIVE_SLOW_THRESHOLD:
+    'Average first-token threshold in milliseconds; slower channels receive the minimum score',
+  ADAPTIVE_MIN_WEIGHT:
+    'Minimum ability weight in the same group, model, and priority bucket',
+  ADAPTIVE_MAX_WEIGHT:
+    'Maximum ability weight in the same group, model, and priority bucket',
+  ADAPTIVE_RECOVERY_WEIGHT:
+    'Temporary maximum weight after a channel is newly enabled or recovered',
+  ADAPTIVE_COOLDOWN:
+    'Seconds to wait after an adaptive update before changing the same bucket again',
   STATUS_CODE_MAPPING: 'Map response status codes (JSON format)',
   TAG: 'Group channels by tag for batch operations',
   REMARK: 'Internal notes (not shown to users)',

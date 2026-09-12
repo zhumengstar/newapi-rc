@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+"""Validate and safely repair the NewAPI peer-only Nginx allowlist."""
+
+from __future__ import annotations
+
+import argparse
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timezone
+
+
+PEER_MARKER = "server_name newapi-peer.internal;"
+ALLOW_RE = re.compile(r"^(\s*)allow\s+([^;]+);\s*$")
+DENY_ALL_RE = re.compile(r"^(\s*)deny\s+all;\s*$")
+SERVER_START_RE = re.compile(r"\bserver\s*\{")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Validate or repair the newapi-peer.internal Nginx allowlist"
+    )
+    parser.add_argument("--config-dir", default="/opt/entry-nginx/conf.d")
+    parser.add_argument("--container", default="entry-nginx")
+    parser.add_argument("--nodes-file", default="/etc/newapi-peer-mesh.nodes")
+    parser.add_argument("--expected-node", action="append", default=[])
+    parser.add_argument("--repair", action="store_true")
+    parser.add_argument("--reload", action="store_true")
+    return parser.parse_args()
+
+
+def load_expected_nodes(args: argparse.Namespace) -> list[str]:
+    values = list(args.expected_node)
+    nodes_file = Path(args.nodes_file)
+    if nodes_file.exists():
+        for raw_line in nodes_file.read_text(encoding="utf-8").splitlines():
+            line = raw_line.split("#", 1)[0].strip()
+            if line:
+                values.append(line)
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = str(ipaddress.ip_address(value.strip()))
+        if normalized not in seen:
+            seen.add(normalized)
+            result.append(normalized)
+    if not result:
+        raise ValueError("no expected nodes configured")
+    return result
+
+
+def matching_configs(config_dir: Path) -> list[Path]:
+    matches: list[Path] = []
+    for path in sorted(config_dir.glob("*.conf")):
+        if path.is_file() and PEER_MARKER in path.read_text(encoding="utf-8"):
+            matches.append(path)
+    return matches
+
+
+def server_block_offsets(text: str, marker_offset: int) -> tuple[int, int]:
+    candidates = [match.start() for match in SERVER_START_RE.finditer(text, 0, marker_offset)]
+    for start in reversed(candidates):
+        open_brace = text.find("{", start)
+        if open_brace < 0:
+            continue
+        depth = 0
+        for offset in range(open_brace, len(text)):
+            char = text[offset]
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    if start <= marker_offset < offset:
+                        return start, offset + 1
+                    break
+    raise ValueError("could not isolate newapi-peer.internal server block")
+
+
+def inspect_allowlist(text: str) -> tuple[list[str], tuple[int, int], str]:
+    marker_offset = text.index(PEER_MARKER)
+    block_start, block_end = server_block_offsets(text, marker_offset)
+    block = text[block_start:block_end]
+    lines = block.splitlines(keepends=True)
+    allows: list[tuple[int, str, str]] = []
+    deny_indexes: list[int] = []
+    location_index = len(lines)
+    for index, line in enumerate(lines):
+        if re.match(r"^\s*location\b", line):
+            location_index = min(location_index, index)
+        allow_match = ALLOW_RE.match(line.rstrip("\r\n"))
+        if allow_match and index < location_index:
+            allows.append((index, allow_match.group(2).strip(), allow_match.group(1)))
+        if DENY_ALL_RE.match(line.rstrip("\r\n")) and index < location_index:
+            deny_indexes.append(index)
+    if not allows or len(deny_indexes) != 1:
+        raise ValueError("peer block must contain allow directives followed by one deny all")
+    deny_index = deny_indexes[0]
+    if any(index > deny_index for index, _, _ in allows):
+        raise ValueError("allow directive found after deny all")
+    first_allow = min(index for index, _, _ in allows)
+    indent = allows[0][2]
+    absolute_start = block_start + sum(len(line) for line in lines[:first_allow])
+    absolute_end = block_start + sum(len(line) for line in lines[: deny_index + 1])
+    newline = "\r\n" if "\r\n" in text else "\n"
+    return [value for _, value, _ in allows], (absolute_start, absolute_end), indent + newline
+
+
+def replacement_text(expected: list[str], indent_newline: str) -> str:
+    newline = "\r\n" if indent_newline.endswith("\r\n") else "\n"
+    indent = indent_newline[: -len(newline)]
+    lines = [f"{indent}allow {node};{newline}" for node in expected]
+    lines.append(f"{indent}deny all;{newline}")
+    return "".join(lines)
+
+
+def run_nginx(container: str, *arguments: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["docker", "exec", container, "nginx", *arguments],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+
+
+def emit(status: str, **fields: object) -> None:
+    print(json.dumps({"status": status, **fields}, sort_keys=True))
+
+
+def main() -> int:
+    args = parse_args()
+    if args.reload and not args.repair:
+        raise ValueError("--reload requires --repair")
+    expected = load_expected_nodes(args)
+    config_dir = Path(args.config_dir)
+    matches = matching_configs(config_dir)
+    if len(matches) != 1:
+        emit("error", reason="peer_config_count", count=len(matches))
+        return 2
+    path = matches[0]
+    text = path.read_text(encoding="utf-8")
+    actual, offsets, indent_newline = inspect_allowlist(text)
+    valid = actual == expected and len(actual) == len(set(actual))
+    if valid:
+        emit("ok", config=str(path), nodes=len(actual), changed=False)
+        return 0
+    if not args.repair:
+        emit(
+            "mismatch",
+            config=str(path),
+            expected_nodes=len(expected),
+            actual_nodes=len(actual),
+        )
+        return 1
+
+    start, end = offsets
+    updated = text[:start] + replacement_text(expected, indent_newline) + text[end:]
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    backup = path.with_name(f"{path.name}.bak-mesh-guard-{timestamp}")
+    shutil.copy2(path, backup)
+    mode = path.stat().st_mode
+    temporary_name = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary.write(updated)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+            temporary_name = temporary.name
+        os.chmod(temporary_name, mode)
+        os.replace(temporary_name, path)
+        check = run_nginx(args.container, "-t")
+        if check.returncode != 0:
+            shutil.copy2(backup, path)
+            run_nginx(args.container, "-t")
+            emit("rolled_back", config=str(path), reason="nginx_test_failed")
+            return 3
+        if args.reload:
+            reload_result = run_nginx(args.container, "-s", "reload")
+            if reload_result.returncode != 0:
+                shutil.copy2(backup, path)
+                rollback_check = run_nginx(args.container, "-t")
+                if rollback_check.returncode == 0:
+                    run_nginx(args.container, "-s", "reload")
+                emit("rolled_back", config=str(path), reason="nginx_reload_failed")
+                return 4
+    finally:
+        if temporary_name and os.path.exists(temporary_name):
+            os.unlink(temporary_name)
+    emit("repaired", config=str(path), nodes=len(expected), changed=True)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (OSError, ValueError) as error:
+        emit("error", reason=type(error).__name__, message=str(error))
+        raise SystemExit(2)

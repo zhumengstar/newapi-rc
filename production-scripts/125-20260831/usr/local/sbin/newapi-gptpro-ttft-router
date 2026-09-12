@@ -1,0 +1,602 @@
+#!/usr/bin/env python3
+"""Route GPTPro channels with TTFT cooldown and independent-provider failover."""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import datetime as dt
+import fcntl
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+
+POSTGRES_CONTAINER = "newapi-standalone-postgres"
+POSTGRES_USER = "newapi"
+POSTGRES_DB = "new-api"
+LOCK_PATH = "/run/newapi-gptpro-ttft-router.lock"
+DEFAULT_STATE = Path("/var/lib/newapi-gptpro-ttft-router/state.json")
+DEFAULT_LOG_DIR = Path("/var/log/newapi-gptpro-ttft-router")
+DEFAULT_EVENT_LOG = DEFAULT_LOG_DIR / "events.jsonl"
+DEFAULT_SUMMARY_LOG = DEFAULT_LOG_DIR / "hourly-summary.jsonl"
+GROUP = "GPTPro-企业级"
+PRIMARY_CHANNELS = (232, 234)
+PREFERRED_CHANNEL = 234
+STANDBY_CHANNEL = 235
+EMERGENCY_CHANNEL = 236
+MANAGED_CHANNELS = (*PRIMARY_CHANNELS, STANDBY_CHANNEL, EMERGENCY_CHANNEL)
+CHANNEL_PRIORITIES = {232: 30, 234: 30, STANDBY_CHANNEL: 20, EMERGENCY_CHANNEL: 10}
+
+
+def run_psql(sql: str) -> str:
+    proc = subprocess.run(
+        [
+            "docker", "exec", POSTGRES_CONTAINER, "psql", "-X",
+            "-v", "ON_ERROR_STOP=1", "-U", POSTGRES_USER, "-d", POSTGRES_DB,
+            "-Atq", "-F", "\t", "-c", sql,
+        ],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=30,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"psql failed with exit code {proc.returncode}")
+    return proc.stdout
+
+
+def sql_text(value: str) -> str:
+    encoded = base64.b64encode(value.encode("utf-8")).decode("ascii")
+    return f"convert_from(decode('{encoded}', 'base64'), 'UTF8')"
+
+
+def load_state(path: Path) -> dict:
+    if not path.exists():
+        return {"version": 1, "channels": {}}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("version") != 1:
+        raise RuntimeError("unsupported state version")
+    data.setdefault("channels", {})
+    return data
+
+
+def save_state(path: Path, state: dict) -> None:
+    path.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=".state.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp_name, 0o600)
+        os.replace(tmp_name, path)
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+
+
+def fetch_channels() -> dict[int, dict]:
+    ids = ",".join(str(channel_id) for channel_id in MANAGED_CHANNELS)
+    sql = f"""
+SELECT id, status, priority, weight, auto_ban, coalesce("group", '')
+FROM channels WHERE id IN ({ids}) ORDER BY id;
+"""
+    channels = {}
+    for line in run_psql(sql).splitlines():
+        fields = line.split("\t", 5)
+        if len(fields) == 6:
+            channels[int(fields[0])] = {
+                "status": int(fields[1]), "priority": int(fields[2]),
+                "weight": int(fields[3]), "auto_ban": fields[4] == "1",
+                "group": fields[5],
+            }
+    return channels
+
+
+def fetch_metrics(window_seconds: int) -> dict[int, dict]:
+    ids = ",".join(str(channel_id) for channel_id in MANAGED_CHANNELS)
+    sql = f"""
+SELECT channel_id,
+       count(*) FILTER (WHERE type = 2 AND quota > 0) AS success,
+       count(*) FILTER (WHERE type = 5 OR (type = 2 AND quota <= 0)) AS bad,
+       count(*) FILTER (
+         WHERE type = 2 AND quota > 0 AND coalesce(other, '') <> ''
+           AND (other::jsonb->>'frt') ~ '^[0-9]+([.][0-9]+)?$'
+       ) AS ttft_samples,
+       coalesce(avg((other::jsonb->>'frt')::numeric) FILTER (
+         WHERE type = 2 AND quota > 0 AND coalesce(other, '') <> ''
+           AND (other::jsonb->>'frt') ~ '^[0-9]+([.][0-9]+)?$'
+       ), 0) AS avg_ttft_ms
+FROM logs
+WHERE channel_id IN ({ids})
+  AND created_at >= extract(epoch FROM now())::bigint - {int(window_seconds)}
+  AND type IN (2, 5)
+GROUP BY channel_id;
+"""
+    metrics = {
+        channel_id: {
+            "success": 0, "bad": 0, "ttft_samples": 0,
+            "avg_ttft_ms": 0.0, "consecutive_bad": 0,
+        }
+        for channel_id in MANAGED_CHANNELS
+    }
+    for line in run_psql(sql).splitlines():
+        fields = line.split("\t")
+        if len(fields) == 5:
+            metrics[int(fields[0])] = {
+                "success": int(fields[1]), "bad": int(fields[2]),
+                "ttft_samples": int(fields[3]), "avg_ttft_ms": float(fields[4]),
+                "consecutive_bad": 0,
+            }
+
+    streak_sql = f"""
+SELECT channel_id, type, quota
+FROM (
+  SELECT channel_id, type, quota,
+         row_number() OVER (PARTITION BY channel_id ORDER BY id DESC) AS rn
+  FROM logs
+  WHERE channel_id IN ({ids}) AND type IN (2, 5)
+) recent
+WHERE rn <= 50
+ORDER BY channel_id, rn;
+"""
+    completed = set()
+    for line in run_psql(streak_sql).splitlines():
+        fields = line.split("\t")
+        if len(fields) != 3:
+            continue
+        channel_id, log_type, quota = map(int, fields)
+        if channel_id in completed:
+            continue
+        if log_type == 2 and quota > 0:
+            completed.add(channel_id)
+            continue
+        metrics[channel_id]["consecutive_bad"] += 1
+    return metrics
+
+
+def apply_plan(plan: dict[int, dict]) -> None:
+    statements = ["BEGIN;"]
+    for channel_id, desired in sorted(plan.items()):
+        reason = sql_text(desired["reason"])
+        updated_at = int(time.time())
+        statements.append(f"""
+UPDATE channels
+SET status = {int(desired['status'])}, priority = {int(desired['priority'])},
+    weight = {int(desired['weight'])},
+    auto_ban = {1 if desired['auto_ban'] else 0},
+    other = (coalesce(nullif(other, ''), '{{}}')::jsonb || jsonb_build_object(
+      'status_reason', {reason},
+      'status_time', {updated_at},
+      'channel_update_time', {updated_at},
+      'channel_update_source', 'newapi-gptpro-ttft-router',
+      'channel_update_action', 'status_priority_weight',
+      'weight_update_time', {updated_at}
+    ))::text,
+    other_info = (coalesce(nullif(other_info, ''), '{{}}')::jsonb || jsonb_build_object(
+      'status_reason', {reason},
+      'status_time', {updated_at},
+      'channel_update_time', {updated_at},
+      'channel_update_source', 'newapi-gptpro-ttft-router',
+      'channel_update_action', 'status_priority_weight',
+      'weight_update_time', {updated_at}
+    ))::text
+WHERE id = {int(channel_id)} AND btrim(coalesce("group", '')) = {sql_text(GROUP)};
+UPDATE abilities SET priority = {int(desired['priority'])},
+    weight = {int(desired['weight'])}, enabled = {str(bool(desired['enabled'])).lower()}
+WHERE channel_id = {int(channel_id)};
+""")
+    statements.append("COMMIT;")
+    run_psql("\n".join(statements))
+
+
+def append_json_line(path: Path, payload: dict) -> None:
+    path.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(path, 0o640)
+
+
+def summarize_hour(events_path: Path, summary_path: Path, window_seconds: int = 3600) -> dict:
+    now = int(dt.datetime.now(dt.timezone.utc).timestamp())
+    start = now - window_seconds
+    events = []
+    if events_path.exists():
+        for line in events_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if start <= int(event.get("timestamp", 0)) < now and not event.get("dry_run", False):
+                events.append(event)
+
+    total_samples = sum(int(event.get("samples", 0)) for event in events)
+    weighted_ttft = (
+        sum(float(event.get("avg_ttft_ms", 0)) * int(event.get("samples", 0)) for event in events)
+        / total_samples if total_samples else 0.0
+    )
+    ttft_values = [float(event.get("avg_ttft_ms", 0)) for event in events if int(event.get("samples", 0)) > 0]
+    actions: dict[str, int] = {}
+    for event in events:
+        action = str(event.get("action", "unknown"))
+        actions[action] = actions.get(action, 0) + 1
+    summary = {
+        "timestamp": now,
+        "time_utc": dt.datetime.fromtimestamp(now, dt.timezone.utc).isoformat(),
+        "window_start": start,
+        "window_seconds": window_seconds,
+        "group": GROUP,
+        "runs": len(events),
+        "total_samples": total_samples,
+        "weighted_avg_ttft_ms": round(weighted_ttft, 1),
+        "weighted_avg_ttft_seconds": round(weighted_ttft / 1000.0, 3),
+        "min_window_avg_ttft_ms": round(min(ttft_values), 1) if ttft_values else 0.0,
+        "max_window_avg_ttft_ms": round(max(ttft_values), 1) if ttft_values else 0.0,
+        "actions": actions,
+    }
+    append_json_line(summary_path, summary)
+    return summary
+
+
+def self_test() -> None:
+    assert set(MANAGED_CHANNELS) == {232, 234, 235, 236}
+    assert CHANNEL_PRIORITIES == {232: 30, 234: 30, 235: 20, 236: 10}
+    assert PREFERRED_CHANNEL in PRIMARY_CHANNELS
+    assert sql_text("测试").startswith("convert_from(decode('")
+    assert preferred_channel_ready(
+        {"ttft_samples": 1, "avg_ttft_ms": 2999.9, "consecutive_bad": 0},
+        restore_min_samples=1,
+        threshold_ms=3000.0,
+        error_threshold=10,
+    )
+    assert not preferred_channel_ready(
+        {"ttft_samples": 1, "avg_ttft_ms": 3000.0, "consecutive_bad": 0},
+        restore_min_samples=1,
+        threshold_ms=3000.0,
+        error_threshold=10,
+    )
+    print("self-test: ok")
+
+
+def preferred_channel_ready(
+    metric: dict, restore_min_samples: int, threshold_ms: float, error_threshold: int,
+) -> bool:
+    return (
+        metric["ttft_samples"] >= restore_min_samples
+        and metric["avg_ttft_ms"] < threshold_ms
+        and metric["consecutive_bad"] < error_threshold
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--window-seconds", type=int, default=60)
+    parser.add_argument("--threshold-ms", type=float, default=3000.0)
+    parser.add_argument("--min-samples", type=int, default=3)
+    parser.add_argument("--restore-min-samples", type=int, default=1)
+    parser.add_argument("--error-threshold", type=int, default=10)
+    parser.add_argument("--cooldown-seconds", type=int, default=600)
+    parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
+    parser.add_argument("--log-file", type=Path, default=DEFAULT_EVENT_LOG)
+    parser.add_argument("--summary-file", type=Path, default=DEFAULT_SUMMARY_LOG)
+    parser.add_argument("--summarize-hourly", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--self-test", action="store_true")
+    args = parser.parse_args()
+    if args.self_test:
+        self_test()
+        return 0
+    if args.summarize_hourly:
+        print(json.dumps(summarize_hour(args.log_file, args.summary_file), ensure_ascii=False, separators=(",", ":")))
+        return 0
+    if (
+        args.window_seconds < 10 or args.threshold_ms <= 0 or args.min_samples < 1
+        or args.restore_min_samples < 1
+        or args.error_threshold < 2 or args.cooldown_seconds < 60
+    ):
+        raise SystemExit("invalid controller arguments")
+
+    with open(LOCK_PATH, "w", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        now = int(dt.datetime.now(dt.timezone.utc).timestamp())
+        channels = fetch_channels()
+        if set(channels) != set(MANAGED_CHANNELS) or any(item["group"].strip() != GROUP for item in channels.values()):
+            raise RuntimeError("managed channel set or group does not match")
+        metrics = fetch_metrics(args.window_seconds)
+        state = load_state(args.state)
+        channel_state = state["channels"]
+        state.pop("routing", None)
+        events: list[dict] = []
+
+        plan = {
+            channel_id: {
+                "status": channel["status"], "priority": CHANNEL_PRIORITIES[channel_id],
+                "weight": channel["weight"],
+                "auto_ban": channel["auto_ban"], "enabled": channel["status"] == 1,
+                "reason": "脚本调控：保持当前状态",
+            }
+            for channel_id, channel in channels.items()
+        }
+
+        for key in list(channel_state):
+            channel_id = int(key)
+            entry = channel_state[key]
+            if channel_id not in channels:
+                channel_state.pop(key, None)
+                continue
+            if channels[channel_id]["status"] == 2 and channel_id != EMERGENCY_CHANNEL:
+                channel_state.pop(key, None)
+                events.append({"event": "manual_disable_preserved", "channel": channel_id})
+                continue
+            if entry.get("mode") == "cooldown":
+                if now < int(entry.get("until", now)):
+                    if entry.get("cause") == "errors":
+                        cooldown_reason = (
+                            f"脚本冷却：连续 {int(entry.get('consecutive_bad', args.error_threshold))} "
+                            f"次请求错误，恢复时间 {int(entry['until'])}"
+                        )
+                    else:
+                        cooldown_reason = f"脚本冷却：首字超过3秒，恢复时间 {int(entry['until'])}"
+                    plan[channel_id].update({
+                        "status": 3, "weight": 1, "auto_ban": False, "enabled": False,
+                        "reason": cooldown_reason,
+                    })
+                else:
+                    plan[channel_id].update({
+                        "status": 1, "weight": 1,
+                        "auto_ban": bool(entry.get("original_auto_ban", True)), "enabled": True,
+                        "reason": "脚本恢复观察：冷却10分钟结束，权重1",
+                    })
+                    entry.clear()
+                    entry.update({"mode": "probation", "restored_at": now})
+                    events.append({"event": "restore_probation", "channel": channel_id})
+
+        healthy_primaries: list[int] = []
+        for channel_id in PRIMARY_CHANNELS:
+            entry = channel_state.get(str(channel_id), {})
+            if plan[channel_id]["status"] != 1:
+                continue
+            metric = metrics[channel_id]
+            enough = metric["ttft_samples"] >= args.min_samples
+            too_slow = enough and metric["avg_ttft_ms"] > args.threshold_ms
+            persistent_errors = metric["consecutive_bad"] >= args.error_threshold
+            if persistent_errors or too_slow:
+                channel_state[str(channel_id)] = {
+                    "mode": "cooldown", "until": now + args.cooldown_seconds,
+                    "original_auto_ban": channels[channel_id]["auto_ban"],
+                    "cause": "errors" if persistent_errors else "ttft",
+                    "consecutive_bad": metric["consecutive_bad"] if persistent_errors else 0,
+                }
+                if persistent_errors:
+                    reason = (
+                        f"脚本冷却：连续 {metric['consecutive_bad']} 次请求错误，"
+                        f"冷却{args.cooldown_seconds // 60}分钟"
+                    )
+                    event = {
+                        "event": "error_cooldown", "channel": channel_id,
+                        "consecutive_bad": metric["consecutive_bad"],
+                        "until": now + args.cooldown_seconds,
+                    }
+                else:
+                    reason = (
+                        f"脚本冷却：最近{args.window_seconds}秒平均首字 "
+                        f"{metric['avg_ttft_ms']:.1f}ms，冷却{args.cooldown_seconds // 60}分钟"
+                    )
+                    event = {
+                        "event": "cooldown", "channel": channel_id,
+                        "avg_ttft_ms": round(metric["avg_ttft_ms"], 1),
+                        "until": now + args.cooldown_seconds,
+                    }
+                plan[channel_id].update({
+                    "status": 3, "weight": 1, "auto_ban": False, "enabled": False,
+                    "reason": reason,
+                })
+                events.append(event)
+            elif entry.get("mode") == "probation":
+                if enough:
+                    channel_state.pop(str(channel_id), None)
+                    healthy_primaries.append(channel_id)
+                    events.append({"event": "probation_passed", "channel": channel_id})
+                else:
+                    plan[channel_id].update({"weight": 1, "reason": "脚本恢复观察：等待首字样本"})
+            else:
+                healthy_primaries.append(channel_id)
+
+        standby_entry = channel_state.get(str(STANDBY_CHANNEL), {})
+        standby_metric = metrics[STANDBY_CHANNEL]
+        if (
+            plan[STANDBY_CHANNEL]["status"] == 1
+            and standby_metric["consecutive_bad"] >= args.error_threshold
+        ):
+            channel_state[str(STANDBY_CHANNEL)] = {
+                "mode": "cooldown", "until": now + args.cooldown_seconds,
+                "original_auto_ban": channels[STANDBY_CHANNEL]["auto_ban"],
+                "cause": "errors", "consecutive_bad": standby_metric["consecutive_bad"],
+            }
+            plan[STANDBY_CHANNEL].update({
+                "status": 3, "weight": 1, "auto_ban": False, "enabled": False,
+                "reason": (
+                    f"脚本冷却：连续 {standby_metric['consecutive_bad']} 次请求错误，"
+                    f"冷却{args.cooldown_seconds // 60}分钟"
+                ),
+            })
+            events.append({
+                "event": "error_cooldown", "channel": STANDBY_CHANNEL,
+                "consecutive_bad": standby_metric["consecutive_bad"],
+                "until": now + args.cooldown_seconds,
+            })
+        elif standby_entry.get("mode") == "probation" and standby_metric["success"] > 0:
+            channel_state.pop(str(STANDBY_CHANNEL), None)
+            events.append({"event": "probation_passed", "channel": STANDBY_CHANNEL})
+
+        standby_available = plan[STANDBY_CHANNEL]["status"] == 1
+
+        preferred_metric = metrics[PREFERRED_CHANNEL]
+        preferred_ready = (
+            PREFERRED_CHANNEL in healthy_primaries
+            and preferred_channel_ready(
+                preferred_metric,
+                restore_min_samples=args.restore_min_samples,
+                threshold_ms=args.threshold_ms,
+                error_threshold=args.error_threshold,
+            )
+        )
+
+        if healthy_primaries:
+            if standby_available:
+                plan[STANDBY_CHANNEL].update({
+                    "status": 1, "weight": 1, "auto_ban": True, "enabled": True,
+                    "reason": "脚本独立兜底：主渠道错误时按较低优先级重试",
+                })
+            plan[EMERGENCY_CHANNEL].update({
+                "status": 2, "weight": 1, "auto_ban": channels[EMERGENCY_CHANNEL]["auto_ban"],
+                "enabled": False, "reason": "脚本兜底停用：主渠道可用",
+            })
+            current_primary = [
+                channel_id for channel_id in healthy_primaries
+                if channels[channel_id]["status"] == 1 and channels[channel_id]["weight"] == 30
+            ]
+            current = current_primary[0] if current_primary else None
+            if preferred_ready:
+                selected = PREFERRED_CHANNEL
+                if current != PREFERRED_CHANNEL:
+                    events.append({
+                        "event": "preferred_channel_restored",
+                        "channel": PREFERRED_CHANNEL,
+                        "window_seconds": args.window_seconds,
+                        "restore_min_samples": args.restore_min_samples,
+                        "samples": preferred_metric["ttft_samples"],
+                        "avg_ttft_ms": round(preferred_metric["avg_ttft_ms"], 1),
+                    })
+            elif current:
+                selected = current
+            else:
+                selected = min(
+                    healthy_primaries,
+                    key=lambda channel_id: (
+                        metrics[channel_id]["avg_ttft_ms"] if metrics[channel_id]["ttft_samples"] else float("inf"),
+                        channel_id,
+                    ),
+                )
+            for channel_id in healthy_primaries:
+                plan[channel_id].update({
+                    "status": 1, "weight": 30 if channel_id == selected else 1,
+                    "enabled": True,
+                    "reason": "脚本主路由：健康渠道权重30" if channel_id == selected else "脚本备用路由：健康渠道权重1",
+                })
+            action = f"primary_{selected}"
+        else:
+            if standby_available:
+                plan[STANDBY_CHANNEL].update({
+                    "status": 1, "weight": 30, "auto_ban": True, "enabled": True,
+                    "reason": "脚本独立兜底启用：232和234均不可用，唯一权重30",
+                })
+                plan[EMERGENCY_CHANNEL].update({
+                    "status": 2, "weight": 1, "auto_ban": channels[EMERGENCY_CHANNEL]["auto_ban"],
+                    "enabled": False, "reason": "脚本应急渠道停用：独立兜底可用",
+                })
+                action = f"fallback_{STANDBY_CHANNEL}"
+            else:
+                # Never promote a manually disabled, unverified emergency channel.
+                # Keep one recently faster primary serving in degraded mode instead.
+                selected = min(
+                    PRIMARY_CHANNELS,
+                    key=lambda channel_id: (
+                        metrics[channel_id]["consecutive_bad"],
+                        metrics[channel_id]["avg_ttft_ms"]
+                        if metrics[channel_id]["ttft_samples"] else float("inf"),
+                        channel_id,
+                    ),
+                )
+                plan[selected].update({
+                    "status": 1, "weight": 30, "auto_ban": False, "enabled": True,
+                    "reason": "脚本降级兜底：无已验证独立渠道，保留近期错误较少且速度较好的主渠道",
+                })
+                plan[EMERGENCY_CHANNEL].update({
+                    "status": 2, "weight": 1,
+                    "auto_ban": channels[EMERGENCY_CHANNEL]["auto_ban"],
+                    "enabled": False, "reason": "脚本应急渠道未通过验证，不自动启用",
+                })
+                events.append({
+                    "event": "degraded_primary_fallback", "channel": selected,
+                    "consecutive_bad": metrics[selected]["consecutive_bad"],
+                    "avg_ttft_ms": round(metrics[selected]["avg_ttft_ms"], 1),
+                })
+                action = f"degraded_{selected}"
+
+        enabled_plan = [item for item in plan.values() if item["status"] == 1 and item["enabled"]]
+        if not enabled_plan or sum(1 for item in enabled_plan if item["weight"] == 30) != 1:
+            raise RuntimeError("route invariant failed: expected exactly one enabled weight-30 channel")
+
+        changed = {
+            channel_id: desired for channel_id, desired in plan.items()
+            if (
+                channels[channel_id]["status"] != desired["status"]
+                or channels[channel_id]["priority"] != desired["priority"]
+                or channels[channel_id]["weight"] != desired["weight"]
+                or channels[channel_id]["auto_ban"] != desired["auto_ban"]
+            )
+        }
+        if not args.dry_run:
+            save_state(args.state, state)
+            if changed:
+                apply_plan(changed)
+
+        selected_id = int(action.rsplit("_", 1)[-1])
+        selected_metric = metrics[selected_id]
+        response = {
+            "timestamp": now,
+            "time_utc": dt.datetime.fromtimestamp(now, dt.timezone.utc).isoformat(),
+            "group": GROUP,
+            "window_seconds": args.window_seconds,
+            "threshold_ms": args.threshold_ms,
+            "error_threshold": args.error_threshold,
+            "cooldown_seconds": args.cooldown_seconds,
+            "action": action,
+            "samples": selected_metric["ttft_samples"],
+            "avg_ttft_ms": round(selected_metric["avg_ttft_ms"], 1),
+            "avg_ttft_seconds": round(selected_metric["avg_ttft_ms"] / 1000.0, 3),
+            "events": events,
+            "changed_channels": sorted(changed),
+            "plan": {
+                str(channel_id): {
+                    "status": desired["status"], "weight": desired["weight"],
+                    "priority": desired["priority"], "enabled": desired["enabled"],
+                }
+                for channel_id, desired in sorted(plan.items())
+            },
+            "metrics": {
+                str(channel_id): {
+                    **metric,
+                    "avg_ttft_ms": round(metric["avg_ttft_ms"], 1),
+                    "avg_ttft_seconds": round(metric["avg_ttft_ms"] / 1000.0, 3),
+                }
+                for channel_id, metric in sorted(metrics.items())
+            },
+            "state": state,
+            "dry_run": args.dry_run,
+        }
+        if not args.dry_run:
+            append_json_line(args.log_file, response)
+        print(json.dumps(response, ensure_ascii=False, separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except BlockingIOError:
+        print("another instance is running")
+        raise SystemExit(0)
+    except Exception as exc:
+        print(f"router failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        raise SystemExit(1)

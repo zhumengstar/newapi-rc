@@ -1,0 +1,20 @@
+[Unit]
+Description=NewAPI gpt discount group HA and cost controller
+After=docker.service
+Requires=docker.service
+ConditionPathExists=/var/run/docker.sock
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/newapi-gpt-discount-ha-controller
+User=root
+Group=root
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/newapi-gpt-discount-ha-controller /run
+

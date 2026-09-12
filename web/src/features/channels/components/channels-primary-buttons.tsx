@@ -65,6 +65,7 @@ import {
   handleUpdateAllBalances,
 } from '../lib'
 import { useChannels } from './channels-provider'
+import { ChannelControlPoliciesDialog } from './dialogs/channel-control-policies-dialog'
 
 export function ChannelsPrimaryButtons() {
   const { t } = useTranslation()
@@ -75,6 +76,10 @@ export function ChannelsPrimaryButtons() {
     setEnableTagMode,
     idSort,
     setIdSort,
+    groupSort,
+    setGroupSort,
+    groupOrderSort,
+    setGroupOrderSort,
     batchMode,
     setBatchMode,
     upstream,
@@ -82,6 +87,8 @@ export function ChannelsPrimaryButtons() {
   const queryClient = useQueryClient()
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
   const [showConsistencyDialog, setShowConsistencyDialog] = useState(false)
+  const [showControlPoliciesDialog, setShowControlPoliciesDialog] =
+    useState(false)
   const [isRepairingConsistency, setIsRepairingConsistency] = useState(false)
   const currentUser = useAuthStore((s) => s.auth.user)
   const canEditSensitive = hasPermission(
@@ -98,6 +105,34 @@ export function ChannelsPrimaryButtons() {
   const handleIdSortToggle = (checked: boolean) => {
     localStorage.setItem('channels-id-sort', String(checked))
     setIdSort(checked)
+    if (checked) {
+      setGroupSort(false)
+      setGroupOrderSort(false)
+      localStorage.setItem('channels-group-sort', 'false')
+      localStorage.setItem('channels-group-order-sort', 'false')
+    }
+  }
+
+  const handleGroupSortToggle = (checked: boolean) => {
+    localStorage.setItem('channels-group-sort', String(checked))
+    setGroupSort(checked)
+    if (checked) {
+      setIdSort(false)
+      setGroupOrderSort(false)
+      localStorage.setItem('channels-id-sort', 'false')
+      localStorage.setItem('channels-group-order-sort', 'false')
+    }
+  }
+
+  const handleGroupOrderSortToggle = (checked: boolean) => {
+    localStorage.setItem('channels-group-order-sort', String(checked))
+    setGroupOrderSort(checked)
+    if (checked) {
+      setGroupSort(false)
+      setIdSort(false)
+      localStorage.setItem('channels-group-sort', 'false')
+      localStorage.setItem('channels-id-sort', 'false')
+    }
   }
 
   const handleBatchModeToggle = (checked: boolean) => {
@@ -124,14 +159,26 @@ export function ChannelsPrimaryButtons() {
         </div>
 
         <div className='hidden items-center gap-2 rounded-md border px-3 py-1.5 sm:flex'>
-          <Tags className='text-muted-foreground h-4 w-4' />
-          <Label htmlFor='tag-mode' className='cursor-pointer text-sm'>
-            {t('Tag Mode')}
+          <SortAsc className='text-muted-foreground h-4 w-4' />
+          <Label htmlFor='group-order-sort' className='cursor-pointer text-sm'>
+            {t('Group order')}
           </Label>
           <Switch
-            id='tag-mode'
-            checked={enableTagMode}
-            onCheckedChange={handleTagModeToggle}
+            id='group-order-sort'
+            checked={groupOrderSort}
+            onCheckedChange={handleGroupOrderSortToggle}
+          />
+        </div>
+
+        <div className='hidden items-center gap-2 rounded-md border px-3 py-1.5 sm:flex'>
+          <SortAsc className='text-muted-foreground h-4 w-4' />
+          <Label htmlFor='group-sort' className='cursor-pointer text-sm'>
+            {t('Priority')}
+          </Label>
+          <Switch
+            id='group-sort'
+            checked={groupSort}
+            onCheckedChange={handleGroupSortToggle}
           />
         </div>
 
@@ -144,6 +191,18 @@ export function ChannelsPrimaryButtons() {
             id='id-sort'
             checked={idSort}
             onCheckedChange={handleIdSortToggle}
+          />
+        </div>
+
+        <div className='hidden items-center gap-2 rounded-md border px-3 py-1.5 sm:flex'>
+          <Tags className='text-muted-foreground h-4 w-4' />
+          <Label htmlFor='tag-mode' className='cursor-pointer text-sm'>
+            {t('Tag Mode')}
+          </Label>
+          <Switch
+            id='tag-mode'
+            checked={enableTagMode}
+            onCheckedChange={handleTagModeToggle}
           />
         </div>
 
@@ -189,11 +248,20 @@ export function ChannelsPrimaryButtons() {
 
             <DropdownMenuCheckboxItem
               className='sm:hidden'
-              checked={enableTagMode}
-              onCheckedChange={handleTagModeToggle}
+              checked={groupSort}
+              onCheckedChange={handleGroupSortToggle}
             >
-              <Tags className='mr-2 h-4 w-4' />
-              {t('Tag Mode')}
+              <SortAsc className='mr-2 h-4 w-4' />
+              {t('Priority')}
+            </DropdownMenuCheckboxItem>
+
+            <DropdownMenuCheckboxItem
+              className='sm:hidden'
+              checked={groupOrderSort}
+              onCheckedChange={handleGroupOrderSortToggle}
+            >
+              <SortAsc className='mr-2 h-4 w-4' />
+              {t('Group order')}
             </DropdownMenuCheckboxItem>
 
             <DropdownMenuCheckboxItem
@@ -203,6 +271,15 @@ export function ChannelsPrimaryButtons() {
             >
               <SortAsc className='mr-2 h-4 w-4' />
               {t('Sort by ID')}
+            </DropdownMenuCheckboxItem>
+
+            <DropdownMenuCheckboxItem
+              className='sm:hidden'
+              checked={enableTagMode}
+              onCheckedChange={handleTagModeToggle}
+            >
+              <Tags className='mr-2 h-4 w-4' />
+              {t('Tag Mode')}
             </DropdownMenuCheckboxItem>
 
             <DropdownMenuSeparator className='sm:hidden' />
@@ -230,6 +307,20 @@ export function ChannelsPrimaryButtons() {
             </DropdownMenuItem>
 
             <DropdownMenuSeparator />
+
+            <DropdownMenuItem
+              onSelect={(event) => {
+                event.preventDefault()
+                if (!canEditSensitive) return
+                setShowControlPoliciesDialog(true)
+              }}
+              disabled={!canEditSensitive}
+            >
+              {t('Group Control Policies')}
+              <DropdownMenuShortcut>
+                <Settings2 className='h-4 w-4' />
+              </DropdownMenuShortcut>
+            </DropdownMenuItem>
 
             <DropdownMenuItem
               onClick={() => upstream.detectAllUpdates()}
@@ -324,6 +415,11 @@ export function ChannelsPrimaryButtons() {
             setIsRepairingConsistency(false)
           }
         }}
+      />
+
+      <ChannelControlPoliciesDialog
+        open={showControlPoliciesDialog}
+        onOpenChange={setShowControlPoliciesDialog}
       />
     </>
   )

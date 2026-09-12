@@ -201,6 +201,7 @@ export const channelFormSchema = z
   .object({
     name: z.string().min(1, ERROR_MESSAGES.REQUIRED_NAME),
     type: z.number().min(0, ERROR_MESSAGES.REQUIRED_TYPE),
+    site_type: z.enum(['', 'newapi', 'sub2api', 'unknown']).optional(),
     base_url: z.string().optional(),
     task_plugin_key: z.string().optional(),
     key: z.string(),
@@ -218,6 +219,20 @@ export const channelFormSchema = z
     weight: z.number().optional(),
     test_model: z.string().optional(),
     auto_ban: z.number().optional(),
+    rpm_limit: z.number().int().min(0).max(1000000).optional(),
+    adaptive_enabled: z.boolean().optional(),
+    adaptive_window_seconds: z.number().int().min(60).max(3600).optional(),
+    adaptive_min_samples: z.number().int().min(1).max(10000).optional(),
+    adaptive_slow_threshold_ms: z
+      .number()
+      .int()
+      .min(100)
+      .max(3600000)
+      .optional(),
+    adaptive_min_weight: z.number().int().min(1).max(1000).optional(),
+    adaptive_max_weight: z.number().int().min(1).max(1000).optional(),
+    adaptive_recovery_weight: z.number().int().min(1).max(1000).optional(),
+    adaptive_cooldown_seconds: z.number().int().min(0).max(86400).optional(),
     status: z.number(),
     status_code_mapping: z
       .string()
@@ -303,6 +318,19 @@ export const channelFormSchema = z
       !data.task_plugin_key?.trim()
     ) {
       addRequiredIssue(ctx, 'task_plugin_key', 'Task plugin is required')
+    }
+
+    if (
+      data.adaptive_enabled === true &&
+      data.adaptive_min_weight !== undefined &&
+      data.adaptive_max_weight !== undefined &&
+      data.adaptive_min_weight > data.adaptive_max_weight
+    ) {
+      addRequiredIssue(
+        ctx,
+        'adaptive_max_weight',
+        'Maximum weight must be greater than or equal to minimum weight'
+      )
     }
 
     if (data.type === CHANNEL_TYPE_ADVANCED_CUSTOM) {
@@ -414,6 +442,7 @@ export type ChannelFormValues = z.infer<typeof channelFormSchema>
 export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   name: '',
   type: 1,
+  site_type: '',
   base_url: '',
   task_plugin_key: '',
   key: '',
@@ -425,6 +454,15 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   weight: 0,
   test_model: '',
   auto_ban: 1,
+  rpm_limit: 0,
+  adaptive_enabled: false,
+  adaptive_window_seconds: 300,
+  adaptive_min_samples: 5,
+  adaptive_slow_threshold_ms: 4000,
+  adaptive_min_weight: 1,
+  adaptive_max_weight: 1000,
+  adaptive_recovery_weight: 5,
+  adaptive_cooldown_seconds: 180,
   status: CHANNEL_STATUS.ENABLED,
   status_code_mapping: '',
   tag: '',
@@ -568,6 +606,7 @@ export function transformChannelToFormDefaults(
   return {
     name: channel.name || '',
     type: channel.type,
+    site_type: channel.site_type || '',
     base_url: channel.base_url || '',
     key: '', // Never populate key from backend for security
     openai_organization: channel.openai_organization || '',
@@ -578,6 +617,15 @@ export function transformChannelToFormDefaults(
     weight: channel.weight || 0,
     test_model: channel.test_model || '',
     auto_ban: channel.auto_ban ?? 1,
+    rpm_limit: channel.rpm_limit ?? 0,
+    adaptive_enabled: channel.adaptive_enabled ?? false,
+    adaptive_window_seconds: channel.adaptive_window_seconds || 300,
+    adaptive_min_samples: channel.adaptive_min_samples || 5,
+    adaptive_slow_threshold_ms: channel.adaptive_slow_threshold_ms || 4000,
+    adaptive_min_weight: channel.adaptive_min_weight || 1,
+    adaptive_max_weight: channel.adaptive_max_weight || 1000,
+    adaptive_recovery_weight: channel.adaptive_recovery_weight || 5,
+    adaptive_cooldown_seconds: channel.adaptive_cooldown_seconds ?? 180,
     status: channel.status,
     status_code_mapping: channel.status_code_mapping || '',
     tag: channel.tag || '',
@@ -803,6 +851,7 @@ export function transformFormDataToCreatePayload(formData: ChannelFormValues): {
   const channel: Partial<Channel> = {
     name: formData.name,
     type: formData.type,
+    site_type: formData.site_type || null,
     base_url: normalizeBaseUrl(formData.base_url) || null,
     key: formData.key,
     openai_organization: formData.openai_organization || null,
@@ -813,6 +862,15 @@ export function transformFormDataToCreatePayload(formData: ChannelFormValues): {
     weight: formData.weight || null,
     test_model: formData.test_model || null,
     auto_ban: formData.auto_ban ?? 1,
+    rpm_limit: formData.rpm_limit ?? 0,
+    adaptive_enabled: formData.adaptive_enabled ?? false,
+    adaptive_window_seconds: formData.adaptive_window_seconds ?? 300,
+    adaptive_min_samples: formData.adaptive_min_samples ?? 5,
+    adaptive_slow_threshold_ms: formData.adaptive_slow_threshold_ms ?? 4000,
+    adaptive_min_weight: formData.adaptive_min_weight ?? 1,
+    adaptive_max_weight: formData.adaptive_max_weight ?? 1000,
+    adaptive_recovery_weight: formData.adaptive_recovery_weight ?? 5,
+    adaptive_cooldown_seconds: formData.adaptive_cooldown_seconds ?? 180,
     status: formData.status,
     status_code_mapping: formData.status_code_mapping || null,
     tag: formData.tag || null,
@@ -852,6 +910,7 @@ export function transformFormDataToUpdatePayload(
     id: channelId,
     name: formData.name,
     type: formData.type,
+    site_type: formData.site_type || null,
     base_url: normalizeBaseUrl(formData.base_url) || null,
     openai_organization: formData.openai_organization || null,
     models: formData.models,
@@ -861,6 +920,15 @@ export function transformFormDataToUpdatePayload(
     weight: formData.weight ?? 0,
     test_model: formData.test_model || null,
     auto_ban: formData.auto_ban ?? 1,
+    rpm_limit: formData.rpm_limit ?? 0,
+    adaptive_enabled: formData.adaptive_enabled ?? false,
+    adaptive_window_seconds: formData.adaptive_window_seconds ?? 300,
+    adaptive_min_samples: formData.adaptive_min_samples ?? 5,
+    adaptive_slow_threshold_ms: formData.adaptive_slow_threshold_ms ?? 4000,
+    adaptive_min_weight: formData.adaptive_min_weight ?? 1,
+    adaptive_max_weight: formData.adaptive_max_weight ?? 1000,
+    adaptive_recovery_weight: formData.adaptive_recovery_weight ?? 5,
+    adaptive_cooldown_seconds: formData.adaptive_cooldown_seconds ?? 180,
     status_code_mapping: formData.status_code_mapping || null,
     tag: formData.tag || null,
     remark: formData.remark || '',

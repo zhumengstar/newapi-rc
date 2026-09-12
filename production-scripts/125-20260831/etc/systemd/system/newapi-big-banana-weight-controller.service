@@ -1,0 +1,20 @@
+[Unit]
+Description=Rebalance NewAPI big banana group weights from five-minute real-request metrics
+After=docker.service
+Requires=docker.service
+ConditionPathExists=/var/run/docker.sock
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/newapi-gpt-weight-controller --group 大香蕉对接组 --window-seconds 300 --min-attempts 2 --max-step 5 --state /var/lib/newapi-big-banana-weight-controller/state.json
+User=root
+Group=root
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+StateDirectory=newapi-big-banana-weight-controller
+ReadWritePaths=/var/lib/newapi-big-banana-weight-controller /run

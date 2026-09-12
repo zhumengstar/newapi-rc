@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# One owner for the ordinary dynamic-weight groups. Each child controller
+# only changes weights; priority, status, and upstream probing stay elsewhere.
+BIN=/usr/local/sbin/newapi-gpt-weight-controller
+STATE_DIR=/var/lib/newapi-channel-weight-controller
+LOG_DIR=/var/log/newapi-channel-weight-controller
+
+mkdir -p "$STATE_DIR" "$LOG_DIR"
+
+exec 9>/run/newapi-channel-weight-controller.lock
+flock -n 9 || exit 0
+
+run_group() {
+    group=$1
+    state_name=$2
+    if ! "$BIN" \
+        --group "$group" \
+        --window-seconds 300 \
+        --min-attempts 3 \
+        --min-weight 1 \
+        --max-step 5 \
+        --state "$STATE_DIR/$state_name.json" \
+        --lock "/run/newapi-channel-weight-controller-$state_name.lock" \
+        >>"$LOG_DIR/$state_name.jsonl"; then
+        printf '%s group=%s controller_failed=1\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$group" \
+            >>"$LOG_DIR/controller-errors.log"
+    fi
+}
+
+# Keep this list explicit so a newly introduced group cannot accidentally
+# inherit a policy. New channels inside these groups are discovered by the
+# controller automatically after they have enough real requests.
+run_group "gpt特惠组" gpt-discount
+run_group "GPTPro-低价池" gptpro-low-price
+run_group "小香蕉对接组" small-banana
+run_group "大香蕉对接组" big-banana
+run_group "生成图片组" image

@@ -1,0 +1,11 @@
+[Unit]
+Description=Watch the node 159 NewAPI entry Nginx configuration for topology drift
+
+[Path]
+PathChanged=/opt/entry-nginx-private/conf.d
+PathModified=/opt/entry-nginx-private/conf.d/default.conf
+PathChanged=/etc/newapi-peer-mesh.nodes
+Unit=newapi-peer-mesh-guard.service
+
+[Install]
+WantedBy=multi-user.target

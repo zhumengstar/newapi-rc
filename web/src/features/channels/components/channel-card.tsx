@@ -24,7 +24,7 @@ import { GroupBadge } from '@/components/group-badge'
 import { cn } from '@/lib/utils'
 
 import { CHANNEL_STATUS } from '../constants'
-import { isTagAggregateRow, parseGroupsList } from '../lib'
+import { isTagAggregateRow, parseGroupsList, sortGroupsByRatio } from '../lib'
 import type { Channel } from '../types'
 import { ChannelRowActionsLayoutContext } from './channel-row-actions-context'
 import { useChannels } from './channels-provider'
@@ -42,9 +42,11 @@ const SENSITIVE_MASK = '••••'
 function ChannelCardComponent({
   row,
   isSelected,
+  groupRatio,
 }: {
   row: Row<Channel>
   isSelected: boolean
+  groupRatio: Record<string, number>
 }) {
   const { t } = useTranslation()
   const { sensitiveVisible } = useChannels()
@@ -60,12 +62,17 @@ function ChannelCardComponent({
   }
 
   const fieldLabels: Record<string, string> = {
-    balance: t('Used / Remaining'),
+    used_quota: t('Used Quota'),
+    channel_ratio: t('Channel Ratio'),
+    balance: t('Site Balance'),
     response_time: t('Response'),
     test_time: t('Last Tested'),
   }
 
-  const groups = parseGroupsList(row.original.group ?? '')
+  const groups = sortGroupsByRatio(
+    parseGroupsList(row.original.group ?? ''),
+    groupRatio
+  )
 
   const selectCell = renderCell('select')
   const typeCell = renderCell('type')
@@ -74,6 +81,8 @@ function ChannelCardComponent({
   const actionsCell = renderCell('actions')
   const priorityCell = renderCell('priority')
   const weightCell = renderCell('weight')
+  const usedQuotaCell = renderCell('used_quota')
+  const channelRatioCell = renderCell('channel_ratio')
   const balanceCell = renderCell('balance')
   const responseCell = renderCell('response_time')
   const testCell = renderCell('test_time')
@@ -108,7 +117,7 @@ function ChannelCardComponent({
           </div>
         </div>
 
-        {/* Body: left column (id/name + balance) paired with a right-aligned
+        {/* Body: left column (id/name + quota, ratio, balance) paired with a right-aligned
           column (priority/weight + response/test time). */}
         <div className='flex items-start justify-between gap-3'>
           {/* Left column */}
@@ -120,6 +129,26 @@ function ChannelCardComponent({
                 </div>
               )}
               {nameCell}
+            </div>
+            <div className='min-w-0'>
+              <div className={cn('mb-1', labelClass)}>
+                {fieldLabels.used_quota}
+              </div>
+              <div className='min-w-0 overflow-hidden text-sm'>
+                {usedQuotaCell ?? (
+                  <span className='text-muted-foreground'>-</span>
+                )}
+              </div>
+            </div>
+            <div className='min-w-0'>
+              <div className={cn('mb-1', labelClass)}>
+                {fieldLabels.channel_ratio}
+              </div>
+              <div className='min-w-0 overflow-hidden text-sm'>
+                {channelRatioCell ?? (
+                  <span className='text-muted-foreground'>-</span>
+                )}
+              </div>
             </div>
             <div className='min-w-0'>
               <div className={cn('mb-1', labelClass)}>
@@ -165,6 +194,7 @@ function ChannelCardComponent({
                   key={g}
                   group={g}
                   label={sensitiveVisible ? undefined : SENSITIVE_MASK}
+                  ratio={groupRatio[g]}
                   size='sm'
                 />
               ))}

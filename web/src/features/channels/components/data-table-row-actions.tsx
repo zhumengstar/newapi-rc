@@ -59,12 +59,13 @@ import {
 } from '@/lib/admin-permissions'
 import { useAuthStore } from '@/stores/auth-store'
 
-import { MODEL_FETCHABLE_TYPES } from '../constants'
+import { CHANNEL_STATUS, MODEL_FETCHABLE_TYPES } from '../constants'
 import {
   channelsQueryKeys,
   handleDeleteChannel,
   handleTestChannel,
   handleToggleChannelStatus,
+  handleAutoDisableChannel,
   isChannelEnabled,
   isMultiKeyChannel,
 } from '../lib'
@@ -85,6 +86,7 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
   const queryClient = useQueryClient()
   const currentUser = useAuthStore((s) => s.auth.user)
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
+  const [autoDisableConfirmOpen, setAutoDisableConfirmOpen] = useState(false)
   const [isTesting, setIsTesting] = useState(false)
   const [isTogglingStatus, setIsTogglingStatus] = useState(false)
 
@@ -364,6 +366,24 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
 
           <DropdownMenuSeparator />
 
+          <DropdownMenuItem
+            disabled={channel.status === CHANNEL_STATUS.AUTO_DISABLED || !canEditSensitive}
+            onSelect={(e) => {
+              e.preventDefault()
+              if (
+                channel.status !== CHANNEL_STATUS.AUTO_DISABLED &&
+                canEditSensitive
+              ) {
+                setAutoDisableConfirmOpen(true)
+              }
+            }}
+          >
+            {t('Auto Disabled')}
+            <DropdownMenuShortcut>
+              <PowerOff size={16} />
+            </DropdownMenuShortcut>
+          </DropdownMenuItem>
+
           {/* Delete */}
           <DropdownMenuItem
             disabled={!canEditSensitive}
@@ -381,6 +401,22 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
+
+      <ConfirmDialog
+        open={autoDisableConfirmOpen}
+        onOpenChange={setAutoDisableConfirmOpen}
+        title={t('Auto Disable Channel')}
+        desc={t(
+          'Are you sure you want to mark channel "{{name}}" as auto-disabled? It will be handled by the automatic recovery process.',
+          { name: channel.name }
+        )}
+        confirmText={t('Auto Disabled')}
+        handleConfirm={() => {
+          if (!canEditSensitive) return
+          handleAutoDisableChannel(channel.id, queryClient)
+          setAutoDisableConfirmOpen(false)
+        }}
+      />
 
       <ConfirmDialog
         open={deleteConfirmOpen}

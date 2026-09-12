@@ -1,0 +1,24 @@
+[Unit]
+Description=Rebalance NewAPI ordinary groups by reliability, latency, and cost
+After=docker.service
+Requires=docker.service
+ConditionPathExists=/var/run/docker.sock
+
+[Service]
+Type=oneshot
+TimeoutStartSec=120s
+ExecStart=/usr/local/sbin/newapi-channel-weight-controller
+User=root
+Group=root
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+StateDirectory=newapi-channel-weight-controller
+LogsDirectory=newapi-channel-weight-controller
+ReadWritePaths=/var/lib/newapi-channel-weight-controller /var/log/newapi-channel-weight-controller /run
+StandardOutput=journal
+StandardError=journal

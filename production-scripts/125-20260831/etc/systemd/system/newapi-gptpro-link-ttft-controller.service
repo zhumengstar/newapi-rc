@@ -1,0 +1,20 @@
+[Unit]
+Description=Monitor and rebalance NewAPI GPTPro-对接池 by recent TTFT
+After=docker.service
+Requires=docker.service
+ConditionPathExists=/var/run/docker.sock
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/newapi-gpt-link-ttft-controller --group GPTPro-对接池 --window-seconds 30 --threshold-ms 4000 --min-samples 2 --min-window-requests 2 --recent-limit 30 --error-threshold 3 --unavailable-error-threshold 10 --unavailable-min-attempts 10 --unavailable-max-success-rate 0.1 --min-weight 1 --total-weight 1000 --max-step 0 --state /var/lib/newapi-gptpro-link-ttft-controller/state.json --lock /run/newapi-gptpro-link-ttft-controller.lock --event-log /var/log/newapi-gptpro-link-ttft-controller/events.jsonl
+User=root
+Group=root
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+StateDirectory=newapi-gptpro-link-ttft-controller
+ReadWritePaths=/var/lib/newapi-gptpro-link-ttft-controller /var/log/newapi-gptpro-link-ttft-controller /run

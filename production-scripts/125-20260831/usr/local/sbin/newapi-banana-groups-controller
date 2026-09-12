@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BIN=/usr/local/sbin/newapi-gpt-weight-controller
+RECOVERY=/usr/local/sbin/newapi-banana-channel-recovery
+STATE_DIR=/var/lib/newapi-banana-groups-controller
+LAST_RECOVERY=$STATE_DIR/last-recovery-at
+
+"$BIN" --group 小香蕉对接组 --window-seconds 300 --min-attempts 2 --max-step 5 \
+  --state /var/lib/newapi-banana-weight-controller/state.json
+"$BIN" --group 大香蕉对接组 --window-seconds 300 --min-attempts 2 --max-step 5 \
+  --state /var/lib/newapi-big-banana-weight-controller/state.json
+
+now=$(date +%s)
+last=0
+if [[ -s "$LAST_RECOVERY" ]]; then
+  last=$(tr -cd '0-9' < "$LAST_RECOVERY" || true)
+  last=${last:-0}
+fi
+
+# Weight control runs every minute; real image recovery is limited to 30 min.
+if (( now - last >= 1800 )); then
+  "$RECOVERY" --group 小香蕉对接组 --timeout 90 --successes-required 2 --recovery-weight 1 \
+    --state /var/lib/newapi-banana-channel-recovery/state.json \
+    --log /var/log/newapi-banana-channel-recovery.log
+  "$RECOVERY" --group 大香蕉对接组 --timeout 90 --successes-required 2 --recovery-weight 1 \
+    --state /var/lib/newapi-big-banana-channel-recovery/state.json \
+    --log /var/log/newapi-big-banana-channel-recovery.log
+  printf '%s\n' "$now" > "$LAST_RECOVERY.tmp"
+  mv -f "$LAST_RECOVERY.tmp" "$LAST_RECOVERY"
+fi

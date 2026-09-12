@@ -1,0 +1,497 @@
+#!/usr/bin/env python3
+"""Run a low-cost health probe against every NewAPI channel.
+
+The probe contacts upstreams directly so it does not create NewAPI billing or
+request logs. It always writes the last test result to the channel status
+tooltip metadata. With --sync-status, failed automatic channels are disabled
+and successful automatic-disabled channels recover at weight 1. Manual-disabled
+channels are never re-enabled.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import concurrent.futures
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+
+POSTGRES_CONTAINER = "newapi-standalone-postgres"
+POSTGRES_USER = "newapi"
+POSTGRES_DB = "new-api"
+DEFAULT_LOG = Path("/var/log/newapi-full-channel-probe.log")
+DEFAULT_RESULT = Path("/var/lib/newapi-full-channel-probe/latest.json")
+IMAGE_MARKERS = ("image", "imagen", "dall-e", "banana")
+GPT_LINK_GROUP = "GPT对接组"
+GPT_LINK_TEST_MODEL = "gpt-5.6-sol"
+ERROR_CODE_RE = re.compile(
+    r'(?:error\s*code|code)\s*[:=]\s*["'']?([A-Za-z0-9_.-]+)',
+    re.I,
+)
+
+
+def run_psql(sql: str) -> str:
+    result = subprocess.run(
+        [
+            "docker", "exec", POSTGRES_CONTAINER, "psql", "-X",
+            "-v", "ON_ERROR_STOP=1", "-U", POSTGRES_USER, "-d", POSTGRES_DB,
+            "-Atq", "-F", "\t", "-c", sql,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=45,
+    )
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or "psql failed")
+    return result.stdout
+
+
+def sql_text(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def decode(value: str) -> str:
+    return base64.b64decode(value).decode("utf-8", errors="replace") if value else ""
+
+
+def read_channels() -> list[dict]:
+    sql = """
+SELECT id, type, status, auto_ban, weight,
+       replace(encode(convert_to(coalesce(base_url, ''), 'UTF8'), 'base64'), E'\\n', ''),
+       replace(encode(convert_to(coalesce(key, ''), 'UTF8'), 'base64'), E'\\n', ''),
+       replace(encode(convert_to(coalesce(models, ''), 'UTF8'), 'base64'), E'\\n', ''),
+       replace(encode(convert_to(coalesce(model_mapping, '{}'), 'UTF8'), 'base64'), E'\\n', ''),
+       replace(encode(convert_to(coalesce("group", ''), 'UTF8'), 'base64'), E'\\n', '')
+FROM channels
+ORDER BY id;
+"""
+    channels = []
+    for line in run_psql(sql).splitlines():
+        fields = line.split("\t")
+        if len(fields) != 10:
+            continue
+        try:
+            mapping = json.loads(decode(fields[8]) or "{}")
+            channels.append({
+                "id": int(fields[0]),
+                "type": int(fields[1]),
+                "status": int(fields[2]),
+                "auto_ban": fields[3] == "t",
+                "weight": int(fields[4]),
+                "base_url": decode(fields[5]).rstrip("/"),
+                "key": decode(fields[6]),
+                "models": [item.strip() for item in decode(fields[7]).split(",") if item.strip()],
+                "mapping": mapping if isinstance(mapping, dict) else {},
+                "group": decode(fields[9]),
+            })
+        except (ValueError, json.JSONDecodeError):
+            continue
+    return channels
+
+
+def is_image_model(model: str) -> bool:
+    lowered = model.lower()
+    return any(marker in lowered for marker in IMAGE_MARKERS)
+
+
+def model_rank(model: str, channel_type: int) -> tuple[int, str]:
+    name = model.lower()
+    if channel_type == 14:
+        if "haiku" in name:
+            return 0, name
+        if "sonnet" in name:
+            return 1, name
+        if "opus" in name:
+            return 2, name
+    if is_image_model(name):
+        if "flash" in name or "low" in name or "1k" in name:
+            return 0, name
+        if "2k" in name or "medium" in name:
+            return 1, name
+        return 2, name
+    if any(marker in name for marker in ("nano", "mini", "compact", "flash", "haiku", "small")):
+        return 0, name
+    return 1, name
+
+
+def choose_model(channel: dict) -> tuple[str, str]:
+    if not channel["models"]:
+        raise RuntimeError("no configured models")
+    groups = {item.strip() for item in channel.get("group", "").split(",") if item.strip()}
+    if GPT_LINK_GROUP in groups:
+        if GPT_LINK_TEST_MODEL in channel["models"]:
+            return GPT_LINK_TEST_MODEL, str(channel["mapping"].get(GPT_LINK_TEST_MODEL, GPT_LINK_TEST_MODEL))
+        # New channels may not advertise sol yet; use their normal cheapest
+        # probe model instead of failing the entire health check.
+        alias = sorted(channel["models"], key=lambda item: model_rank(item, channel["type"]))[0]
+        return alias, str(channel["mapping"].get(alias, alias))
+    alias = sorted(channel["models"], key=lambda item: model_rank(item, channel["type"]))[0]
+    return alias, str(channel["mapping"].get(alias, alias))
+
+
+def error_summary(raw: str) -> tuple[str, str]:
+    """Extract a safe, useful upstream error code and reason from a response."""
+    text = " ".join(raw.replace("\n", " ").split())
+    code = ""
+    message = ""
+    json_start = text.find("{")
+    if json_start >= 0:
+        try:
+            payload = json.loads(text[json_start:])
+            error = payload.get("error", payload) if isinstance(payload, dict) else {}
+            if isinstance(error, dict):
+                metadata = error.get("metadata", {})
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                code = str(error.get("code") or metadata.get("code") or metadata.get("error_kind") or "")
+                message = str(error.get("message") or payload.get("message") or "")
+        except json.JSONDecodeError:
+            pass
+    if not code:
+        match = ERROR_CODE_RE.search(text)
+        if match:
+            code = match.group(1)
+    if not message:
+        message = text
+    return code[:80], message[:260]
+
+
+def probe_kind(channel: dict, alias: str, model: str) -> str:
+    return "图片生成" if is_image_model(f"{alias} {model}") else "问答"
+
+
+def display_detail(result: dict) -> str:
+    """Build the text used by NewAPI's channel-status tooltip."""
+    model = result.get("model", "-")
+    kind = result.get("probe_kind", "问答")
+    elapsed = float(result.get("seconds", 0))
+    if result["ok"]:
+        return (
+            f"脚本测试连接：可用；测试类型 {kind}；模型 {model}；"
+            f"HTTP {result.get('http_status', 200)}；耗时 {elapsed:.2f} 秒"
+        )
+    code, message = error_summary(str(result.get("detail", "")))
+    fields = [
+        "脚本测试连接：不可用",
+        f"测试类型 {kind}",
+        f"模型 {model}",
+        f"HTTP {result.get('http_status', '无响应')}",
+    ]
+    if code:
+        fields.append(f"错误码 {code}")
+    if message:
+        fields.append(f"原因 {message}")
+    fields.append(f"耗时 {elapsed:.2f} 秒")
+    return "；".join(fields)
+
+
+def write_status_tooltip(results: list[dict], checked_at: int) -> None:
+    """Persist last test metadata without changing operational channel state."""
+    for result in results:
+        reason = display_detail(result)
+        payload = json.dumps({
+            "status_reason": reason,
+            "status_time": checked_at,
+            "connection_test_time": checked_at,
+            "connection_test_result": "ok" if result["ok"] else "failed",
+            "connection_test_http_status": result.get("http_status"),
+            "connection_test_model": result.get("model", ""),
+            "connection_test_kind": result.get("probe_kind", ""),
+            "connection_test_error_code": result.get("error_code", ""),
+            "connection_test_message": result.get("error_message", ""),
+        }, ensure_ascii=False)
+        encoded = base64.b64encode(payload.encode("utf-8")).decode("ascii")
+        sql = f"""
+UPDATE channels AS c
+SET other = (
+      CASE WHEN coalesce(c.other, '') = '' THEN '{{}}'::jsonb ELSE c.other::jsonb END
+      || jsonb_build_object(
+           'previous_status_reason',
+           coalesce(
+             nullif((CASE WHEN coalesce(c.other, '') = '' THEN '{{}}'::jsonb ELSE c.other::jsonb END)
+               ->> 'previous_status_reason', ''),
+             (CASE WHEN coalesce(c.other, '') = '' THEN '{{}}'::jsonb ELSE c.other::jsonb END)
+               ->> 'status_reason',
+             ''
+           )
+         )
+      || convert_from(decode('{encoded}', 'base64'), 'UTF8')::jsonb
+    )::text,
+    other_info = (
+      CASE WHEN coalesce(c.other_info, '') = '' THEN '{{}}'::jsonb ELSE c.other_info::jsonb END
+      || jsonb_build_object(
+           'previous_status_reason',
+           coalesce(
+             nullif((CASE WHEN coalesce(c.other_info, '') = '' THEN '{{}}'::jsonb ELSE c.other_info::jsonb END)
+               ->> 'previous_status_reason', ''),
+             (CASE WHEN coalesce(c.other_info, '') = '' THEN '{{}}'::jsonb ELSE c.other_info::jsonb END)
+               ->> 'status_reason',
+             ''
+           )
+         )
+      || convert_from(decode('{encoded}', 'base64'), 'UTF8')::jsonb
+    )::text
+WHERE c.id = {int(result['id'])};
+"""
+        run_psql(sql)
+
+
+def sync_channel_status(result: dict, checked_at: int) -> str:
+    """Synchronize only automatic channels, retaining a clear audit reason."""
+    if result["status_before"] == 2 or not result["auto_ban"]:
+        return "unchanged"
+
+    target_status = 1 if result["ok"] else 3
+    if result["status_before"] == target_status:
+        return "unchanged"
+
+    if result["ok"]:
+        reason = (
+            f"系统测试恢复：{result.get('probe_kind', '问答')}测试成功；"
+            f"模型 {result.get('model', '-')}；HTTP {result.get('http_status', 200)}；"
+            "恢复低权重 1"
+        )
+    else:
+        code, message = error_summary(str(result.get("detail", "")))
+        fields = [
+            f"系统测试禁用：{result.get('probe_kind', '问答')}测试失败",
+            f"模型 {result.get('model', '-')}",
+            f"上游 HTTP {result.get('http_status', '无响应')}",
+        ]
+        if code:
+            fields.append(f"错误码 {code}")
+        if message:
+            fields.append(f"原因 {message}")
+        reason = "；".join(fields)
+
+    payload = json.dumps({
+        "status_reason": reason,
+        "status_time": checked_at,
+        "status_source": "newapi_full_channel_probe",
+        "connection_test_time": checked_at,
+        "connection_test_result": "ok" if result["ok"] else "failed",
+    }, ensure_ascii=False)
+    encoded = base64.b64encode(payload.encode("utf-8")).decode("ascii")
+    if result["ok"]:
+        sql = f"""
+WITH updated AS (
+  UPDATE channels AS c
+  SET status = 1, weight = 1,
+      other = ((CASE WHEN coalesce(c.other, '') = '' THEN '{{}}'::jsonb ELSE c.other::jsonb END)
+        || convert_from(decode('{encoded}', 'base64'), 'UTF8')::jsonb)::text,
+      other_info = ((CASE WHEN coalesce(c.other_info, '') = '' THEN '{{}}'::jsonb ELSE c.other_info::jsonb END)
+        || convert_from(decode('{encoded}', 'base64'), 'UTF8')::jsonb)::text
+  WHERE c.id = {int(result['id'])} AND c.status = 3 AND c.auto_ban = 1
+  RETURNING c.id
+), ability_update AS (
+  UPDATE abilities SET enabled = true, weight = 1
+  FROM updated WHERE abilities.channel_id = updated.id
+)
+SELECT id FROM updated;
+"""
+    else:
+        sql = f"""
+WITH updated AS (
+  UPDATE channels AS c
+  SET status = 3,
+      other = ((CASE WHEN coalesce(c.other, '') = '' THEN '{{}}'::jsonb ELSE c.other::jsonb END)
+        || convert_from(decode('{encoded}', 'base64'), 'UTF8')::jsonb)::text,
+      other_info = ((CASE WHEN coalesce(c.other_info, '') = '' THEN '{{}}'::jsonb ELSE c.other_info::jsonb END)
+        || convert_from(decode('{encoded}', 'base64'), 'UTF8')::jsonb)::text
+  WHERE c.id = {int(result['id'])} AND c.status = 1 AND c.auto_ban = 1
+  RETURNING c.id
+), ability_update AS (
+  UPDATE abilities SET enabled = false
+  FROM updated WHERE abilities.channel_id = updated.id
+)
+SELECT id FROM updated;
+"""
+    changed = bool(run_psql(sql).strip())
+    if not changed:
+        return "unchanged"
+    return "recovered" if result["ok"] else "disabled"
+
+
+def request_for(channel: dict) -> tuple[str, bytes, dict[str, str], str]:
+    alias, model = choose_model(channel)
+    base_url = channel["base_url"]
+    if not base_url or not channel["key"]:
+        raise RuntimeError("missing base URL or key")
+    if channel["type"] == 24:
+        body = {
+            "contents": [{"role": "user", "parts": [{"text": "Health check. Reply with OK."}]}],
+            "generationConfig": {"maxOutputTokens": 8},
+        }
+        if is_image_model(f"{alias} {model}"):
+            body["contents"][0]["parts"][0]["text"] = (
+                "Generate a simple product illustration: one small blue cube on a plain white background."
+            )
+            body["generationConfig"] = {
+                "responseModalities": ["TEXT", "IMAGE"],
+                "imageConfig": {"imageSize": "1K"},
+            }
+        return (
+            f"{base_url}/v1beta/models/{model}:generateContent",
+            json.dumps(body, ensure_ascii=False).encode(),
+            {"Content-Type": "application/json", "Authorization": f"Bearer {channel['key']}"},
+            alias,
+        )
+    if channel["type"] == 14:
+        body = {
+            "model": model,
+            "max_tokens": 8,
+            "messages": [{"role": "user", "content": "Health check. Reply OK."}],
+        }
+        return (
+            f"{base_url}/v1/messages",
+            json.dumps(body).encode(),
+            {
+                "Content-Type": "application/json",
+                "x-api-key": channel["key"],
+                "anthropic-version": "2023-06-01",
+            },
+            alias,
+        )
+    if channel["type"] == 1:
+        if is_image_model(f"{alias} {model}"):
+            body = {
+                "model": model,
+                "prompt": "A simple product illustration: one small blue cube on a plain white background.",
+                "n": 1,
+                "size": "1024x1024",
+            }
+            endpoint = "/v1/images/generations"
+        else:
+            body = {
+                "model": model,
+                "messages": [{"role": "user", "content": "Health check. Reply OK."}],
+                "max_tokens": 8,
+                "stream": False,
+            }
+            endpoint = "/v1/chat/completions"
+        return (
+            f"{base_url}{endpoint}",
+            json.dumps(body).encode(),
+            {"Content-Type": "application/json", "Authorization": f"Bearer {channel['key']}"},
+            alias,
+        )
+    raise RuntimeError(f"unsupported channel type {channel['type']}")
+
+
+def probe(channel: dict, timeout: int) -> dict:
+    result = {
+        "id": channel["id"],
+        "type": channel["type"],
+        "status_before": channel["status"],
+        "manual_disabled": channel["status"] == 2,
+        "group": channel["group"],
+        "ok": False,
+    }
+    started = time.monotonic()
+    try:
+        url, body, headers, alias = request_for(channel)
+        result["model"] = alias
+        result["probe_kind"] = probe_kind(channel, alias, channel["mapping"].get(alias, alias))
+        request = urllib.request.Request(url, data=body, method="POST", headers=headers)
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = response.read(1024 * 1024)
+            code = response.status
+        image_request = is_image_model(f"{alias} {channel['mapping'].get(alias, alias)}")
+        if image_request:
+            # A successful image endpoint must actually carry image data or a
+            # result URL.  Some upstreams return 200 with only a text notice.
+            result["ok"] = 200 <= code < 300 and any(
+                marker in payload
+                for marker in (b'"inlineData"', b'"inline_data"', b'"b64_json"', b'"url"')
+            )
+        else:
+            result["ok"] = 200 <= code < 300 and bool(payload)
+        result["http_status"] = code
+        result["detail"] = "ok" if result["ok"] else (
+            "response_without_image" if image_request else "empty response"
+        )
+    except urllib.error.HTTPError as error:
+        result["http_status"] = error.code
+        result["detail"] = error.read(512).decode("utf-8", errors="replace").replace("\n", " ")[:220]
+        result["error_code"], result["error_message"] = error_summary(result["detail"])
+    except Exception as error:
+        result["detail"] = f"{type(error).__name__}: {str(error)[:220]}"
+        result["error_code"], result["error_message"] = error_summary(result["detail"])
+    result["seconds"] = round(time.monotonic() - started, 2)
+    return result
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--timeout", type=int, default=60)
+    parser.add_argument("--workers", type=int, default=2)
+    parser.add_argument(
+        "--channel-ids",
+        help="comma-separated channel IDs; omit to inspect every channel",
+    )
+    parser.add_argument("--log", type=Path, default=DEFAULT_LOG)
+    parser.add_argument("--result", type=Path, default=DEFAULT_RESULT)
+    parser.add_argument(
+        "--no-status-tooltip",
+        action="store_true",
+        help="do not write the latest test result to channel status tooltip metadata",
+    )
+    parser.add_argument(
+        "--sync-status",
+        action="store_true",
+        help="disable failed automatic channels and recover passing automatic-disabled channels at weight 1",
+    )
+    args = parser.parse_args()
+    if args.timeout < 1 or not 1 <= args.workers <= 4:
+        raise SystemExit("timeout must be positive and workers must be between 1 and 4")
+
+    channels = read_channels()
+    if args.channel_ids:
+        requested = {int(item) for item in args.channel_ids.split(",") if item.strip()}
+        channels = [item for item in channels if item["id"] in requested]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
+        results = list(executor.map(lambda item: probe(item, args.timeout), channels))
+    results.sort(key=lambda item: item["id"])
+    checked_at = int(time.time())
+    if not args.no_status_tooltip:
+        write_status_tooltip(results, checked_at)
+    if args.sync_status:
+        for item in results:
+            item["status_action"] = sync_channel_status(item, checked_at)
+    report = {"checked_at": checked_at, "count": len(results), "results": results}
+    args.result.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+    args.result.write_text(json.dumps(report, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
+    os.chmod(args.result, 0o600)
+    args.log.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+    with args.log.open("a", encoding="utf-8") as handle:
+        for item in results:
+            handle.write(
+                f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} channel={item['id']} "
+                f"status={item['status_before']} manual={int(item['manual_disabled'])} "
+                f"type={item['type']} model={item.get('model', '-')} ok={int(item['ok'])} "
+                f"kind={item.get('probe_kind', '-')} "
+                f"http={item.get('http_status', '-')} error_code={item.get('error_code', '-')} "
+                f"seconds={item['seconds']} detail={item.get('detail', '')}\n"
+            )
+    for item in results:
+        print(
+            f"channel={item['id']} status={item['status_before']} manual={int(item['manual_disabled'])} "
+            f"type={item['type']} model={item.get('model', '-')} ok={int(item['ok'])} "
+            f"kind={item.get('probe_kind', '-')} "
+            f"http={item.get('http_status', '-')} error_code={item.get('error_code', '-')} "
+            f"seconds={item['seconds']} detail={item.get('detail', '')}"
+        )
+    return 0 if all(item["ok"] for item in results) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

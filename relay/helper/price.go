@@ -9,7 +9,9 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
@@ -56,8 +58,13 @@ func HandleGroupRatio(ctx *gin.Context, relayInfo *relaycommon.RelayInfo) hostty
 	}
 
 	// check user group special ratio
-	userGroupRatio, ok := ratio_setting.GetGroupGroupRatio(relayInfo.UserGroup, relayInfo.UsingGroup)
-	if ok {
+	userSetting := dto.UserSetting{}
+	if relayInfo.UserId > 0 {
+		userSetting, _ = model.GetUserSetting(relayInfo.UserId, false)
+	}
+	userGroupRatio := service.GetUserGroupRatioWithSetting(userSetting, relayInfo.UserGroup, relayInfo.UsingGroup)
+	_, hasUserOverride := userSetting.UserGroupRatios[relayInfo.UsingGroup]
+	if hasUserOverride || userGroupRatio != ratio_setting.GetGroupRatio(relayInfo.UsingGroup) {
 		// user group special ratio
 		groupRatioInfo.GroupSpecialRatio = userGroupRatio
 		groupRatioInfo.GroupRatio = userGroupRatio

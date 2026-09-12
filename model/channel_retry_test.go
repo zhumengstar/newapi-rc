@@ -89,3 +89,34 @@ func TestFilterChannelsByExcludedChannelIdsDoesNotMutateInput(t *testing.T) {
 	require.Equal(t, []int{1, 3}, filtered)
 	require.Equal(t, []int{1, 2, 3}, original)
 }
+
+func TestGetRandomSatisfiedChannelUsesCostTierBeforeLegacyPriority(t *testing.T) {
+	previousMemoryCache := common.MemoryCacheEnabled
+	channelSyncLock.Lock()
+	previousGroups := group2model2channels
+	previousChannels := channelsIDM
+	legacyPriority := int64(999)
+	weight := uint(1)
+	group2model2channels = map[string]map[string][]int{
+		"default": {"gpt-test": {1, 2}},
+	}
+	channelsIDM = map[int]*Channel{
+		// Cost tier is the actual routing layer even if legacy priority differs.
+		1: {Id: 1, Priority: &legacyPriority, CostTier: 10, Weight: &weight},
+		2: {Id: 2, Priority: &legacyPriority, CostTier: 20, Weight: &weight},
+	}
+	channelSyncLock.Unlock()
+	common.MemoryCacheEnabled = true
+	t.Cleanup(func() {
+		common.MemoryCacheEnabled = previousMemoryCache
+		channelSyncLock.Lock()
+		group2model2channels = previousGroups
+		channelsIDM = previousChannels
+		channelSyncLock.Unlock()
+	})
+
+	selected, err := GetRandomSatisfiedChannelExcluding("default", "gpt-test", 0, nil, nil)
+	require.NoError(t, err)
+	require.NotNil(t, selected)
+	require.Equal(t, 2, selected.Id)
+}

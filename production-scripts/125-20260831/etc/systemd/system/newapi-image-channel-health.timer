@@ -1,0 +1,13 @@
+[Unit]
+Description=Run NewAPI image channel health probe every 10 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+AccuracySec=15s
+RandomizedDelaySec=15s
+Persistent=true
+Unit=newapi-image-channel-health.service
+
+[Install]
+WantedBy=timers.target

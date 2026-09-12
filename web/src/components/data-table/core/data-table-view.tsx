@@ -101,7 +101,13 @@ function UnifiedTableView<TData>({
 
   return (
     <div className={props.tableContainerClassName}>
-      <Table className={props.tableClassName} style={tableSizing.style}>
+      <Table
+        className={cn(
+          props.tableClassName,
+          props.table.options.enableColumnResizing === true && 'table-fixed'
+        )}
+        style={tableSizing.style}
+      >
         {tableSizing.colgroup}
         <DataTableHeader
           table={props.table}
@@ -149,6 +155,7 @@ function SplitHeaderTableView<TData>({
           data-slot='table'
           className={cn(
             'w-full caption-bottom text-sm tabular-nums [&_td]:text-sm [&_td_*]:text-sm [&_th]:text-sm [&_th_*]:text-sm',
+            props.table.options.enableColumnResizing === true && 'table-fixed',
             props.tableClassName
           )}
           style={tableSizing.style}

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -903,18 +904,37 @@ func TestChannel(c *gin.Context) {
 // channelTestSummary records the outcome of one channel test cycle so the
 // system task can persist a per-run result for history.
 type channelTestSummary struct {
-	Tested    int `json:"tested"`
-	Succeeded int `json:"succeeded"`
-	Failed    int `json:"failed"`
-	Disabled  int `json:"disabled"`
-	Enabled   int `json:"enabled"`
+	Tested          int `json:"tested"`
+	Succeeded       int `json:"succeeded"`
+	Failed          int `json:"failed"`
+	Disabled        int `json:"disabled"`
+	Enabled         int `json:"enabled"`
+	PendingRecovery int `json:"pending_recovery"`
 }
 
-func testChannelForHealthCheck(ctx context.Context, channel *model.Channel, testUserID int, allowDisable bool, disableThreshold int64) channelTestSummary {
+func resolveChannelProbe(policy *model.ChannelControlPolicy, channel *model.Channel) (string, string, bool) {
+	if policy == nil || !policy.ProbeEnabled {
+		return "", "", shouldUseStreamForAutomaticChannelTest(channel)
+	}
+	modelName := policy.ProbeModel
+	switch policy.ProbeMode {
+	case model.ChannelProbeModeChat:
+		return modelName, string(constant.EndpointTypeOpenAI), false
+	case model.ChannelProbeModeResponses:
+		return modelName, string(constant.EndpointTypeOpenAIResponse), false
+	case model.ChannelProbeModeImage:
+		return modelName, string(constant.EndpointTypeImageGeneration), false
+	default:
+		return modelName, "", shouldUseStreamForAutomaticChannelTest(channel)
+	}
+}
+
+func testChannelForHealthCheck(ctx context.Context, channel *model.Channel, testUserID int, allowDisable bool, disableThreshold int64, policy *model.ChannelControlPolicy) channelTestSummary {
 	summary := channelTestSummary{}
 	isChannelEnabled := channel.Status == common.ChannelStatusEnabled
 	tik := time.Now()
-	result := testChannel(ctx, channel, testUserID, "", "", shouldUseStreamForAutomaticChannelTest(channel))
+	testModel, endpointType, isStream := resolveChannelProbe(policy, channel)
+	result := testChannel(ctx, channel, testUserID, testModel, endpointType, isStream)
 	milliseconds := time.Since(tik).Milliseconds()
 	if ctx.Err() != nil {
 		return summary
@@ -941,15 +961,36 @@ func testChannelForHealthCheck(ctx context.Context, channel *model.Channel, test
 	} else {
 		summary.Failed++
 	}
+	metricGroup := channel.Group
+	if policy != nil && policy.Group != "" {
+		metricGroup = policy.Group
+	}
+	probeCost := channel.InputPrice*32 + channel.OutputPrice*16
+	if math.IsNaN(probeCost) || math.IsInf(probeCost, 0) || probeCost < 0 {
+		probeCost = 0
+	}
+	service.RecordChannelControlProbeMetric(ctx, metricGroup, newAPIError == nil && result.localErr == nil, probeCost, channel.Status == common.ChannelStatusAutoDisabled)
 
 	if allowDisable && isChannelEnabled && shouldBanChannel && channel.GetAutoBan() {
 		processChannelError(result.context, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(result.context, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError)
 		summary.Disabled++
 	}
 
-	if result.localErr == nil && !isChannelEnabled && service.ShouldEnableChannel(newAPIError, channel.Status) {
-		service.EnableChannel(channel.Id, common.GetContextKeyString(result.context, constant.ContextKeyChannelKey), channel.Name)
-		summary.Enabled++
+	if !isChannelEnabled && channel.Status == common.ChannelStatusAutoDisabled {
+		if policy != nil && policy.ProbeEnabled && policy.RecoveryEnabled {
+			state, err := model.RecordChannelRecoveryProbe(ctx, channel.Id, result.localErr == nil && newAPIError == nil)
+			if err != nil {
+				common.SysError(fmt.Sprintf("record channel recovery probe: channel=%d error=%v", channel.Id, err))
+			} else if result.localErr == nil && service.ShouldEnableChannel(newAPIError, channel.Status) && state.SuccessStreak >= policy.RecoverySuccessesRequired {
+				service.EnableChannel(channel.Id, common.GetContextKeyString(result.context, constant.ContextKeyChannelKey), channel.Name)
+				if err := model.ClearChannelRecoveryState(ctx, channel.Id); err != nil {
+					common.SysError(fmt.Sprintf("clear channel recovery state: channel=%d error=%v", channel.Id, err))
+				}
+				summary.Enabled++
+			} else if result.localErr == nil && newAPIError == nil {
+				summary.PendingRecovery++
+			}
+		}
 	}
 
 	channel.UpdateResponseTime(milliseconds)
@@ -1041,6 +1082,7 @@ func runChannelTestWorkers(
 		summary.Failed += result.Failed
 		summary.Disabled += result.Disabled
 		summary.Enabled += result.Enabled
+		summary.PendingRecovery += result.PendingRecovery
 		processed++
 		if report != nil && ctx.Err() == nil {
 			report(processed, total)
@@ -1052,7 +1094,7 @@ func runChannelTestWorkers(
 // performChannelTests runs channel health checks with the configured bounded
 // concurrency and honors cancellation when a system-task runner loses its
 // lease.
-func performChannelTests(ctx context.Context, channels []*model.Channel, testUserID int, allowDisable bool, concurrency int, report func(processed, total int)) channelTestSummary {
+func performChannelTests(ctx context.Context, channels []*model.Channel, testUserID int, allowDisable bool, concurrency int, policies map[string]model.ChannelControlPolicy, report func(processed, total int)) channelTestSummary {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1065,7 +1107,11 @@ func performChannelTests(ctx context.Context, channels []*model.Channel, testUse
 		channels,
 		concurrency,
 		func(ctx context.Context, channel *model.Channel) channelTestSummary {
-			return testChannelForHealthCheck(ctx, channel, testUserID, allowDisable, disableThreshold)
+			policy, ok := model.ResolveChannelControlPolicy(channel, policies)
+			if ok {
+				return testChannelForHealthCheck(ctx, channel, testUserID, allowDisable, disableThreshold, &policy)
+			}
+			return testChannelForHealthCheck(ctx, channel, testUserID, allowDisable, disableThreshold, nil)
 		},
 		report,
 	)
@@ -1091,14 +1137,49 @@ func runChannelTestTask(ctx context.Context, mode string, notify bool, report fu
 	if strings.TrimSpace(mode) == "" {
 		mode = operation_setting.GetMonitorSetting().ChannelTestMode
 	}
-	selected := selectChannelsForAutomaticTest(channels, mode)
+	policies, err := model.GetEnabledChannelControlPolicies(ctx)
+	if err != nil {
+		return channelTestSummary{}, fmt.Errorf("load channel control policies: %w", err)
+	}
+	// Scheduled control tests are policy-scoped by default. Channels without a
+	// group policy are included only when the explicit global probe switch is on.
+	selected := selectChannelsForControlTest(channels, mode, policies, !notify && !service.ChannelControlProbeAllEnabled())
 	allowDisable := mode != operation_setting.ChannelTestModePassiveRecovery
 	concurrency := operation_setting.GetMonitorSetting().ChannelTestConcurrency
-	summary := performChannelTests(ctx, selected, testUserID, allowDisable, concurrency, report)
+	summary := performChannelTests(ctx, selected, testUserID, allowDisable, concurrency, policies, report)
 	if notify && (ctx == nil || ctx.Err() == nil) {
 		service.NotifyRootUser(dto.NotifyTypeChannelTest, "通道测试完成", "所有通道测试已完成")
 	}
 	return summary, nil
+}
+
+func selectChannelsForControlTest(channels []*model.Channel, mode string, policies map[string]model.ChannelControlPolicy, policyOnlyArg ...bool) []*model.Channel {
+	selected := selectChannelsForAutomaticTest(channels, mode)
+	policyOnly := false
+	if len(policyOnlyArg) > 0 {
+		policyOnly = policyOnlyArg[0]
+	}
+	if len(policies) == 0 && !policyOnly {
+		return selected
+	}
+	filtered := make([]*model.Channel, 0, len(selected))
+	for _, channel := range selected {
+		policy, ok := model.ResolveChannelControlPolicy(channel, policies)
+		if !ok {
+			if !policyOnly {
+				filtered = append(filtered, channel)
+			}
+			continue
+		}
+		if !policy.ProbeEnabled {
+			continue
+		}
+		if mode == operation_setting.ChannelTestModePassiveRecovery && (!policy.ProbeEnabled || !policy.RecoveryEnabled) {
+			continue
+		}
+		filtered = append(filtered, channel)
+	}
+	return filtered
 }
 
 func selectChannelsForAutomaticTest(channels []*model.Channel, mode string) []*model.Channel {

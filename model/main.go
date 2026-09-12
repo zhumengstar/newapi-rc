@@ -1,6 +1,7 @@
 package model
 
 import (
+	"database/sql"
 	"fmt"
 	"log"
 	"net/url"
@@ -300,6 +301,9 @@ func is64BitIntegerType(dbType common.DatabaseType, dataType string) bool {
 }
 
 func migrateDB() error {
+	if err := migrateUserGroupToMultiGroupLength(); err != nil {
+		return err
+	}
 	// Migrate price_amount column from float/double to decimal for existing tables
 	migrateSubscriptionPlanPriceAmount()
 	// Migrate model_limits column from varchar to text for existing tables
@@ -340,10 +344,25 @@ func migrateDB() error {
 		&SystemInstance{},
 		&SystemTask{},
 		&SystemTaskLock{},
+		&ChannelControlPolicy{},
+		&ChannelRecoveryState{},
+		&ChannelErrorGuardState{},
+		&ChannelControlMetric{},
+		&UserPricingRule{},
+		&UserGroupMembership{},
 		&CasbinRule{},
 		&AuthzRole{},
 	)
 	if err != nil {
+		return err
+	}
+	if err := MigrateChannelNameRatiosIfRequested(DB); err != nil {
+		return err
+	}
+	if err := MigrateChannelNameContactsIfRequested(DB); err != nil {
+		return err
+	}
+	if err := normalizeChannelAdaptiveEnabled(DB); err != nil {
 		return err
 	}
 	if err := InitializeUserAuthVersions(); err != nil {
@@ -362,6 +381,46 @@ func migrateDB() error {
 		}
 	}
 	return nil
+}
+
+// migrateUserGroupToMultiGroupLength expands users.group for comma-separated assignments.
+func migrateUserGroupToMultiGroupLength() error {
+	if common.UsingMainDatabase(common.DatabaseTypeSQLite) || !DB.Migrator().HasTable("users") || !DB.Migrator().HasColumn(&User{}, "group") {
+		return nil
+	}
+	const maxLength = 512
+	var current sql.NullInt64
+	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
+		if err := DB.Raw(`SELECT character_maximum_length FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ? AND column_name = ?`, "users", "group").Scan(&current).Error; err != nil {
+			return err
+		}
+		if !current.Valid || current.Int64 >= maxLength {
+			return nil
+		}
+		return DB.Exec(`ALTER TABLE users ALTER COLUMN "group" TYPE varchar(512)`).Error
+	}
+	if common.UsingMainDatabase(common.DatabaseTypeMySQL) {
+		if err := DB.Raw(`SELECT CHARACTER_MAXIMUM_LENGTH FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?`, "users", "group").Scan(&current).Error; err != nil {
+			return err
+		}
+		if !current.Valid || current.Int64 >= maxLength {
+			return nil
+		}
+		return DB.Exec("ALTER TABLE users MODIFY COLUMN `group` varchar(512) DEFAULT 'default'").Error
+	}
+	return nil
+}
+
+// normalizeChannelAdaptiveEnabled upgrades channels created before adaptive
+// routing was introduced. A nullable boolean cannot be scanned into Go's bool
+// type and must retain the feature's opt-in default.
+func normalizeChannelAdaptiveEnabled(db *gorm.DB) error {
+	if !db.Migrator().HasColumn(&Channel{}, "adaptive_enabled") {
+		return nil
+	}
+	return db.Model(&Channel{}).
+		Where("adaptive_enabled IS NULL").
+		Update("adaptive_enabled", false).Error
 }
 
 func migrateDBFast() error {
@@ -403,6 +462,12 @@ func migrateDBFast() error {
 		{&SystemInstance{}, "SystemInstance"},
 		{&SystemTask{}, "SystemTask"},
 		{&SystemTaskLock{}, "SystemTaskLock"},
+		{&ChannelControlPolicy{}, "ChannelControlPolicy"},
+		{&ChannelRecoveryState{}, "ChannelRecoveryState"},
+		{&ChannelErrorGuardState{}, "ChannelErrorGuardState"},
+		{&ChannelControlMetric{}, "ChannelControlMetric"},
+		{&UserPricingRule{}, "UserPricingRule"},
+		{&UserGroupMembership{}, "UserGroupMembership"},
 	}
 	// 动态计算migration数量，确保errChan缓冲区足够大
 	errChan := make(chan error, len(migrations))
@@ -426,6 +491,15 @@ func migrateDBFast() error {
 		if err != nil {
 			return err
 		}
+	}
+	if err := MigrateChannelNameRatiosIfRequested(DB); err != nil {
+		return err
+	}
+	if err := MigrateChannelNameContactsIfRequested(DB); err != nil {
+		return err
+	}
+	if err := normalizeChannelAdaptiveEnabled(DB); err != nil {
+		return err
 	}
 	if err := InitializeUserAuthVersions(); err != nil {
 		return err

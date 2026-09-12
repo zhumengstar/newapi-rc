@@ -1,0 +1,12 @@
+[Unit]
+Description=Run GPTPro-对接池 TTFT controller every 30 seconds
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+AccuracySec=1s
+Persistent=true
+Unit=newapi-gptpro-link-ttft-controller.service
+
+[Install]
+WantedBy=timers.target

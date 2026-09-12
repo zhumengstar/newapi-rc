@@ -45,6 +45,9 @@ func Distribute() func(c *gin.Context) {
 			abortWithOpenAiMessage(c, http.StatusBadRequest, i18n.T(c, i18n.MsgDistributorInvalidRequest, map[string]any{"Error": err.Error()}))
 			return
 		}
+		if modelRequest != nil && modelRequest.Model != "" {
+			c.Set("original_model", modelRequest.Model)
+		}
 		if pin, found, overridden := constraints.ResolvedPin(); found {
 			for _, lost := range overridden {
 				logger.LogWarn(c, fmt.Sprintf(
@@ -197,11 +200,52 @@ func Distribute() func(c *gin.Context) {
 		}
 		common.SetContextKey(c, constant.ContextKeyRequestStartTime, time.Now())
 		SetupContextForSelectedChannel(c, channel, modelRequest.Model)
+		_, pinned, _ := constraints.ResolvedPin()
+		if !selectChannelWithinRPM(c, &channel, modelRequest.Model, pinned) {
+			return
+		}
 		c.Next()
 		if channel != nil && c.Writer != nil && c.Writer.Status() < http.StatusBadRequest {
 			service.RecordChannelAffinity(c, channel.Id)
 		}
 	}
+}
+
+// selectChannelWithinRPM keeps weighted routing useful when one channel is
+// saturated: it excludes that channel and asks the normal selector for the
+// next weighted candidate. Explicitly pinned channels cannot be diverted.
+func selectChannelWithinRPM(c *gin.Context, channel **model.Channel, modelName string, pinned bool) bool {
+	if channel == nil || *channel == nil {
+		return true
+	}
+	if AllowChannelRPM(c, (*channel).Id, (*channel).RPMLimit) {
+		return true
+	}
+	if pinned {
+		return enforceChannelRPM(c, (*channel).Id, (*channel).RPMLimit)
+	}
+
+	group := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
+	tried := map[int]bool{(*channel).Id: true}
+	for len(tried) < 64 {
+		candidate, _, err := service.CacheGetRandomSatisfiedChannel(&service.RetryParam{
+			Ctx: c, TokenGroup: group, ModelName: modelName,
+			RequestPath: c.Request.URL.Path, Retry: common.GetPointer(0),
+			TriedChannelIds: tried,
+		})
+		if err != nil || candidate == nil {
+			break
+		}
+		tried[candidate.Id] = true
+		if AllowChannelRPM(c, candidate.Id, candidate.RPMLimit) {
+			*channel = candidate
+			SetupContextForSelectedChannel(c, candidate, modelName)
+			return true
+		}
+	}
+	abortWithOpenAiMessage(c, http.StatusTooManyRequests,
+		"all available channels have reached their RPM limits")
+	return false
 }
 
 func channelMatchesExpectedTaskPlugin(c *gin.Context, channel *model.Channel, expected string) bool {

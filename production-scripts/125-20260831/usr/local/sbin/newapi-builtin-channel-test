@@ -1,0 +1,269 @@
+#!/usr/bin/env python3
+"""Run NewAPI's built-in channel test endpoint for every configured channel.
+
+The script uses a local super-admin access token only in process memory. It
+does not print tokens or change a channel's operational status, weight,
+priority, models, or ability state. It stores the latest test outcome in the
+same metadata consumed by the channel-status tooltip.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import re
+import subprocess
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+
+POSTGRES_CONTAINER = "newapi-standalone-postgres"
+POSTGRES_USER = "newapi"
+POSTGRES_DB = "new-api"
+DEFAULT_API_BASE = "http://127.0.0.1:13000"
+DEFAULT_LOG = Path("/var/log/newapi-builtin-channel-test.log")
+DEFAULT_RESULT = Path("/var/lib/newapi-builtin-channel-test/latest.json")
+
+UPSTREAM_HTTP_STATUS_RE = re.compile(
+    r"(?:bad response status code|status_code=|unexpected status)\s*(\d{3})",
+    re.IGNORECASE,
+)
+UPSTREAM_ERROR_CODE_RE = re.compile(r'"code"\s*:\s*"([^"\s]+)"')
+
+
+def run_psql(sql: str) -> str:
+    result = subprocess.run(
+        [
+            "docker", "exec", POSTGRES_CONTAINER, "psql", "-X",
+            "-v", "ON_ERROR_STOP=1", "-U", POSTGRES_USER, "-d", POSTGRES_DB,
+            "-Atq", "-F", "\t", "-c", sql,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=45,
+    )
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or "psql failed")
+    return result.stdout
+
+
+def decode(value: str) -> str:
+    return base64.b64decode(value).decode("utf-8", errors="replace") if value else ""
+
+
+def read_channels() -> list[dict]:
+    sql = """
+SELECT id, type, status,
+       replace(encode(convert_to(coalesce("group", ''), 'UTF8'), 'base64'), E'\\n', ''),
+       replace(encode(convert_to(coalesce(models, ''), 'UTF8'), 'base64'), E'\\n', '')
+FROM channels
+ORDER BY id;
+"""
+    channels = []
+    for line in run_psql(sql).splitlines():
+        fields = line.split("\t", 4)
+        if len(fields) != 5:
+            continue
+        channels.append({
+            "id": int(fields[0]),
+            "type": int(fields[1]),
+            "status_before": int(fields[2]),
+            "group": decode(fields[3]),
+            "models": decode(fields[4]),
+        })
+    return channels
+
+
+def super_admin_token() -> str:
+    token = run_psql(
+        "SELECT btrim(access_token) FROM users "
+        "WHERE role = 100 AND status = 1 "
+        "ORDER BY id LIMIT 1;"
+    ).strip()
+    if not token:
+        raise RuntimeError("no active super-admin access token")
+    return token
+
+
+def response_detail(payload: object) -> tuple[str, str]:
+    """Extract a useful code and message from the built-in API response."""
+    if not isinstance(payload, dict):
+        return "", str(payload)[:300]
+    error = payload.get("error", payload)
+    if not isinstance(error, dict):
+        error = payload
+    code = str(error.get("code") or payload.get("code") or "")
+    message = str(error.get("message") or payload.get("message") or "")
+    data = payload.get("data")
+    if not message and isinstance(data, str):
+        message = data
+    if not code:
+        match = UPSTREAM_ERROR_CODE_RE.search(message)
+        if match and match.group(1).lower() != "null":
+            code = match.group(1)
+    return code[:80], message[:300]
+
+
+def upstream_http_status(message: str) -> int | None:
+    match = UPSTREAM_HTTP_STATUS_RE.search(message)
+    return int(match.group(1)) if match else None
+
+
+def test_channel(channel: dict, token: str, api_base: str, timeout: int) -> dict:
+    result = dict(channel)
+    started = time.monotonic()
+    request = urllib.request.Request(
+        f"{api_base.rstrip('/')}/api/channel/test/{channel['id']}",
+        headers={"Authorization": f"Bearer {token}"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read(1024 * 1024)
+            result["http_status"] = response.status
+        payload = json.loads(raw.decode("utf-8", errors="replace"))
+        result["success"] = bool(payload.get("success")) if isinstance(payload, dict) else False
+        result["error_code"], result["message"] = response_detail(payload)
+        result["upstream_http_status"] = upstream_http_status(result["message"])
+        if result["success"] and not result["message"]:
+            result["message"] = "built-in connection test passed"
+    except urllib.error.HTTPError as error:
+        result["http_status"] = error.code
+        try:
+            payload = json.loads(error.read(1024 * 1024).decode("utf-8", errors="replace"))
+        except json.JSONDecodeError:
+            payload = {}
+        result["success"] = False
+        result["error_code"], result["message"] = response_detail(payload)
+        result["upstream_http_status"] = upstream_http_status(result["message"])
+    except Exception as error:
+        result["success"] = False
+        result["http_status"] = None
+        result["error_code"] = type(error).__name__
+        result["message"] = str(error)[:300]
+        result["upstream_http_status"] = None
+    result["seconds"] = round(time.monotonic() - started, 2)
+    return result
+
+
+def tooltip_reason(result: dict) -> str:
+    state = "可用" if result["success"] else "不可用"
+    fields = [
+        f"系统测试连接：{state}",
+        "上游 HTTP {}".format(
+            result["upstream_http_status"]
+            if result.get("upstream_http_status")
+            else (result["http_status"] if result.get("http_status") else "无响应")
+        ),
+    ]
+    if result.get("error_code"):
+        fields.append(f"错误码 {result['error_code']}")
+    if result.get("message"):
+        fields.append(f"原因 {result['message']}")
+    fields.append(f"耗时 {result['seconds']:.2f} 秒")
+    return "；".join(fields)
+
+
+def write_tooltip(result: dict, checked_at: int) -> None:
+    payload = json.dumps({
+        "status_reason": tooltip_reason(result),
+        "status_time": checked_at,
+        "connection_test_time": checked_at,
+        "connection_test_result": "ok" if result["success"] else "failed",
+        "connection_test_http_status": result.get("upstream_http_status") or result.get("http_status"),
+        "connection_test_api_http_status": result.get("http_status"),
+        "connection_test_error_code": result.get("error_code", ""),
+        "connection_test_message": result.get("message", ""),
+        "connection_test_source": "newapi_builtin",
+    }, ensure_ascii=False)
+    encoded = base64.b64encode(payload.encode("utf-8")).decode("ascii")
+    sql = f"""
+UPDATE channels AS c
+SET other = (
+      CASE WHEN coalesce(c.other, '') = '' THEN '{{}}'::jsonb ELSE c.other::jsonb END
+      || jsonb_build_object(
+           'previous_status_reason',
+           coalesce(
+             nullif((CASE WHEN coalesce(c.other, '') = '' THEN '{{}}'::jsonb ELSE c.other::jsonb END)
+               ->> 'previous_status_reason', ''),
+             (CASE WHEN coalesce(c.other, '') = '' THEN '{{}}'::jsonb ELSE c.other::jsonb END)
+               ->> 'status_reason',
+             ''
+           )
+         )
+      || convert_from(decode('{encoded}', 'base64'), 'UTF8')::jsonb
+    )::text,
+    other_info = (
+      CASE WHEN coalesce(c.other_info, '') = '' THEN '{{}}'::jsonb ELSE c.other_info::jsonb END
+      || jsonb_build_object(
+           'previous_status_reason',
+           coalesce(
+             nullif((CASE WHEN coalesce(c.other_info, '') = '' THEN '{{}}'::jsonb ELSE c.other_info::jsonb END)
+               ->> 'previous_status_reason', ''),
+             (CASE WHEN coalesce(c.other_info, '') = '' THEN '{{}}'::jsonb ELSE c.other_info::jsonb END)
+               ->> 'status_reason',
+             ''
+           )
+         )
+      || convert_from(decode('{encoded}', 'base64'), 'UTF8')::jsonb
+    )::text
+WHERE c.id = {int(result['id'])};
+"""
+    run_psql(sql)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--timeout", type=int, default=30)
+    parser.add_argument("--channel-ids", help="comma-separated IDs; omit for all")
+    parser.add_argument("--api-base", default=DEFAULT_API_BASE)
+    parser.add_argument("--log", type=Path, default=DEFAULT_LOG)
+    parser.add_argument("--result", type=Path, default=DEFAULT_RESULT)
+    parser.add_argument("--no-status-tooltip", action="store_true")
+    args = parser.parse_args()
+    if args.timeout < 1:
+        raise SystemExit("timeout must be positive")
+
+    channels = read_channels()
+    if args.channel_ids:
+        requested = {int(item) for item in args.channel_ids.split(",") if item.strip()}
+        channels = [channel for channel in channels if channel["id"] in requested]
+    token = super_admin_token()
+    results = []
+    for channel in channels:
+        result = test_channel(channel, token, args.api_base, args.timeout)
+        checked_at = int(time.time())
+        if not args.no_status_tooltip:
+            write_tooltip(result, checked_at)
+        result["checked_at"] = checked_at
+        results.append(result)
+        print(
+            "channel={} success={} http={} code={} seconds={} message={}".format(
+                result["id"], int(result["success"]), result.get("http_status", "-"),
+                result.get("error_code", "-"), result["seconds"], result.get("message", "")
+            )
+        )
+
+    report = {"checked_at": int(time.time()), "count": len(results), "results": results}
+    args.result.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+    args.result.write_text(json.dumps(report, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
+    args.result.chmod(0o600)
+    args.log.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+    with args.log.open("a", encoding="utf-8") as handle:
+        for result in results:
+            handle.write(
+                "{} channel={} success={} http={} code={} seconds={} message={}\n".format(
+                    time.strftime("%Y-%m-%dT%H:%M:%S%z"), result["id"], int(result["success"]),
+                    result.get("http_status", "-"), result.get("error_code", "-"),
+                    result["seconds"], result.get("message", ""),
+                )
+            )
+    return 0 if all(item["success"] for item in results) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

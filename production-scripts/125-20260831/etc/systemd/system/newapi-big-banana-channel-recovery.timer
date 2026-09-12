@@ -1,0 +1,13 @@
+[Unit]
+Description=Check script-disabled NewAPI big banana channels every 30 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+AccuracySec=15s
+RandomizedDelaySec=15s
+Persistent=true
+Unit=newapi-big-banana-channel-recovery.service
+
+[Install]
+WantedBy=timers.target

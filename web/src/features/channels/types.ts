@@ -37,11 +37,16 @@ export type ChannelInfo = z.infer<typeof channelInfoSchema>
 export const channelSchema = z.object({
   id: z.number(),
   type: z.number(),
+  site_type: z.enum(['newapi', 'sub2api', 'unknown']).nullish(),
+  balance_mode: z.enum(['auto', 'manual']).default('auto'),
+  balance_access_token_configured: z.boolean().default(false),
+  balance_login_configured: z.boolean().default(false),
   key: z.string(),
   openai_organization: z.string().nullish(),
   test_model: z.string().nullish(),
   status: z.number(), // 1: enabled, 0: manual disabled, 2: auto disabled
   name: z.string(),
+  contact: z.string().default(''),
   weight: z.number().nullish(),
   created_time: z.number(),
   test_time: z.number(),
@@ -50,6 +55,10 @@ export const channelSchema = z.object({
   other: z.string().default(''),
   balance: z.number().default(0), // in USD
   balance_updated_time: z.number(),
+  channel_ratio: z
+    .number()
+    .nullish()
+    .transform((value) => value ?? null),
   models: z.string().default(''),
   group: z.string().default('default'),
   used_quota: z.number().default(0),
@@ -57,6 +66,18 @@ export const channelSchema = z.object({
   status_code_mapping: z.string().nullish(),
   priority: z.number().nullish(),
   auto_ban: z.number().nullish(),
+  rpm_limit: z.number().int().min(0).default(0),
+  adaptive_enabled: z.boolean().default(false),
+  adaptive_window_seconds: z.number().default(300),
+  adaptive_min_samples: z.number().default(5),
+  adaptive_slow_threshold_ms: z.number().default(4000),
+  adaptive_min_weight: z.number().default(1),
+  adaptive_max_weight: z.number().default(1000),
+  adaptive_recovery_weight: z.number().default(5),
+  adaptive_cooldown_seconds: z.number().default(180),
+  adaptive_last_evaluated_at: z.number().default(0),
+  adaptive_last_applied_at: z.number().default(0),
+  adaptive_last_reason: z.string().default(''),
   other_info: z.string().default(''),
   tag: z.string().nullish(),
   setting: z.string().nullish(),
@@ -74,6 +95,33 @@ export const channelSchema = z.object({
 })
 
 export type Channel = z.infer<typeof channelSchema>
+
+export type ChannelProbeMode = 'auto' | 'chat' | 'responses' | 'image'
+
+export interface ChannelControlPolicy {
+  group: string
+  enabled: boolean
+  adaptive_enabled: boolean
+  adaptive_window_seconds: number
+  adaptive_min_samples: number
+  adaptive_slow_threshold_ms: number
+  adaptive_min_weight: number
+  adaptive_max_weight: number
+  adaptive_recovery_weight: number
+  adaptive_cooldown_seconds: number
+  probe_enabled: boolean
+  probe_mode: ChannelProbeMode
+  probe_model: string
+  recovery_enabled: boolean
+  recovery_successes_required: number
+  created_at: number
+  updated_at: number
+}
+
+export type ChannelControlPolicyInput = Omit<
+  ChannelControlPolicy,
+  'created_at' | 'updated_at'
+>
 
 // ============================================================================
 // Channel Settings Types
@@ -259,8 +307,12 @@ export interface MultiKeyStatusResponse {
 export type ChannelSortBy =
   | 'id'
   | 'name'
+  | 'site_type'
+  | 'type'
   | 'priority'
   | 'balance'
+  | 'channel_ratio'
+  | 'used_quota'
   | 'response_time'
   | 'test_time'
 
@@ -276,6 +328,7 @@ export interface GetChannelsParams {
   tag_mode?: boolean
   sort_by?: ChannelSortBy
   sort_order?: ChannelSortOrder
+  group_order?: string
 }
 
 export interface SearchChannelsParams {
@@ -288,6 +341,7 @@ export interface SearchChannelsParams {
   tag_mode?: boolean
   sort_by?: ChannelSortBy
   sort_order?: ChannelSortOrder
+  group_order?: string
   p?: number
   page_size?: number
 }
@@ -353,6 +407,14 @@ export interface ChannelFormData {
   weight?: number
   test_model?: string
   auto_ban?: number
+  adaptive_enabled?: boolean
+  adaptive_window_seconds?: number
+  adaptive_min_samples?: number
+  adaptive_slow_threshold_ms?: number
+  adaptive_min_weight?: number
+  adaptive_max_weight?: number
+  adaptive_recovery_weight?: number
+  adaptive_cooldown_seconds?: number
   status: number
   status_code_mapping?: string
   tag?: string
@@ -377,4 +439,8 @@ export interface AddChannelRequest {
   multi_key_mode?: 'random' | 'polling'
   batch_add_set_key_prefix_2_name?: boolean
   channel: Partial<Channel>
+  balance_access_token?: string
+  balance_username?: string
+  balance_password?: string
+  balance_mode?: 'auto' | 'manual'
 }

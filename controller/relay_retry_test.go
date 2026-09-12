@@ -85,3 +85,9 @@ func TestEmptyResponsesOutputCanRetryBeforeUsableOutput(t *testing.T) {
 	require.True(t, isEmptyResponsesOutputError(empty))
 	require.False(t, isEmptyResponsesOutputError(other))
 }
+
+func TestRetryAfterIsBounded(t *testing.T) {
+	require.Equal(t, time.Second, boundedRetryAfter(2*time.Hour))
+	require.Equal(t, 250*time.Millisecond, boundedRetryAfter(250*time.Millisecond))
+	require.Zero(t, boundedRetryAfter(0))
+}

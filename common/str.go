@@ -7,7 +7,6 @@ import (
 	kitutil "github.com/QuantumNous/new-api/relaykit/relayconvert/kitutil"
 	"strconv"
 	"strings"
-	"unsafe"
 
 	"github.com/samber/lo"
 )
@@ -89,11 +88,11 @@ func StringsContains(strs []string, str string) bool {
 	return false
 }
 
-// StringToByteSlice []byte only read, panic on append
+// StringToByteSlice returns an independent byte slice.
+// Keeping the slice independent avoids retaining a string backing store while
+// downstream JSON parsing operates on the data concurrently.
 func StringToByteSlice(s string) []byte {
-	tmp1 := (*[2]uintptr)(unsafe.Pointer(&s))
-	tmp2 := [3]uintptr{tmp1[0], tmp1[1], tmp1[1]}
-	return *(*[]byte)(unsafe.Pointer(&tmp2))
+	return []byte(s)
 }
 
 func EncodeBase64(str string) string {

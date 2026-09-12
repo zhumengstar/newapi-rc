@@ -61,16 +61,20 @@ func channelHasSensitiveChanges(channel *PatchChannel, origin *model.Channel, re
 // channelHasSensitiveChanges with a precise old-vs-new comparison; this set is
 // used to exclude them from the fail-closed scan for unknown fields.
 var channelSensitiveFields = map[string]struct{}{
-	"type":                {},
-	"key":                 {},
-	"base_url":            {},
-	"openai_organization": {},
-	"header_override":     {},
-	"param_override":      {},
-	"setting":             {},
-	"other":               {},
-	"settings":            {},
-	"key_mode":            {},
+	"type":                 {},
+	"key":                  {},
+	"base_url":             {},
+	"openai_organization":  {},
+	"header_override":      {},
+	"param_override":       {},
+	"setting":              {},
+	"other":                {},
+	"settings":             {},
+	"key_mode":             {},
+	"balance_access_token": {},
+	"balance_username":     {},
+	"balance_password":     {},
+	"balance_mode":         {},
 }
 
 // channelOperationalFields lists fields managed by operation endpoints instead
@@ -82,12 +86,15 @@ var channelOperationalFields = map[string]struct{}{
 // channelReadOnlyFields lists server-managed/accounting fields that the general
 // channel edit endpoint must ignore even if a client sends them.
 var channelReadOnlyFields = map[string]struct{}{
-	"created_time":         {},
-	"test_time":            {},
-	"response_time":        {},
-	"balance":              {},
-	"balance_updated_time": {},
-	"used_quota":           {},
+	"created_time":               {},
+	"test_time":                  {},
+	"response_time":              {},
+	"balance":                    {},
+	"balance_updated_time":       {},
+	"used_quota":                 {},
+	"adaptive_last_evaluated_at": {},
+	"adaptive_last_applied_at":   {},
+	"adaptive_last_reason":       {},
 }
 
 func clearChannelReadOnlyFields(channel *PatchChannel, requestData map[string]any) {
@@ -109,6 +116,15 @@ func clearChannelReadOnlyFields(channel *PatchChannel, requestData map[string]an
 	if _, ok := requestData["used_quota"]; ok {
 		channel.UsedQuota = 0
 	}
+	if _, ok := requestData["adaptive_last_evaluated_at"]; ok {
+		channel.AdaptiveLastEvaluatedAt = 0
+	}
+	if _, ok := requestData["adaptive_last_applied_at"]; ok {
+		channel.AdaptiveLastAppliedAt = 0
+	}
+	if _, ok := requestData["adaptive_last_reason"]; ok {
+		channel.AdaptiveLastReason = ""
+	}
 }
 
 // channelNonSensitiveFields lists routing / server-managed channel
@@ -118,19 +134,36 @@ func clearChannelReadOnlyFields(channel *PatchChannel, requestData map[string]an
 // to the fail-closed branch and is treated as sensitive. The
 // TestChannelFieldsAreClassified guard test enforces this.
 var channelNonSensitiveFields = map[string]struct{}{
-	"id":                  {},
-	"test_model":          {},
-	"name":                {},
-	"weight":              {},
-	"models":              {},
-	"group":               {},
-	"model_mapping":       {},
-	"status_code_mapping": {},
-	"priority":            {},
-	"auto_ban":            {},
-	"other_info":          {},
-	"tag":                 {},
-	"remark":              {},
-	"channel_info":        {},
-	"multi_key_mode":      {},
+	"id":                              {},
+	"test_model":                      {},
+	"name":                            {},
+	"contact":                         {},
+	"weight":                          {},
+	"models":                          {},
+	"group":                           {},
+	"model_mapping":                   {},
+	"status_code_mapping":             {},
+	"priority":                        {},
+	"cost_tier":                       {},
+	"input_price":                     {},
+	"output_price":                    {},
+	"channel_ratio":                   {},
+	"auto_ban":                        {},
+	"rpm_limit":                       {},
+	"other_info":                      {},
+	"site_type":                       {},
+	"balance_access_token_configured": {},
+	"balance_login_configured":        {},
+	"tag":                             {},
+	"remark":                          {},
+	"channel_info":                    {},
+	"multi_key_mode":                  {},
+	"adaptive_enabled":                {},
+	"adaptive_window_seconds":         {},
+	"adaptive_min_samples":            {},
+	"adaptive_slow_threshold_ms":      {},
+	"adaptive_min_weight":             {},
+	"adaptive_max_weight":             {},
+	"adaptive_recovery_weight":        {},
+	"adaptive_cooldown_seconds":       {},
 }

@@ -3,7 +3,9 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -72,6 +74,21 @@ func clearChannelInfo(channel *model.Channel) {
 	}
 }
 
+func applyCachedChannelSiteType(channel *model.Channel) {
+	if channel == nil {
+		return
+	}
+	if channel.SiteType != nil && (*channel.SiteType == channelPlatformNewAPI || *channel.SiteType == channelPlatformSub2API || *channel.SiteType == channelPlatformUnknown) {
+		return
+	}
+	// Read legacy cached metadata written by earlier builds and expose it in the
+	// new independent field. It will be migrated to the column on the next scan.
+	info := channel.GetOtherInfo()
+	if siteType, ok := info["site_type"].(string); ok && (siteType == channelPlatformNewAPI || siteType == channelPlatformSub2API || siteType == channelPlatformUnknown) {
+		channel.SiteType = &siteType
+	}
+}
+
 func applyChannelStatusFilter(query *gorm.DB, statusFilter int) *gorm.DB {
 	if statusFilter == common.ChannelStatusEnabled {
 		return query.Where("status = ?", common.ChannelStatusEnabled)
@@ -102,7 +119,7 @@ func GetAllChannels(c *gin.Context) {
 	pageInfo := common.GetPageQuery(c)
 	channelData := make([]*model.Channel, 0)
 	idSort, _ := strconv.ParseBool(c.Query("id_sort"))
-	sortOptions := model.NewChannelSortOptions(c.Query("sort_by"), c.Query("sort_order"), idSort)
+	sortOptions := model.NewChannelSortOptions(c.Query("sort_by"), c.Query("sort_order"), idSort, c.Query("group_order"))
 	enableTagMode, _ := strconv.ParseBool(c.Query("tag_mode"))
 	groupFilter := model.NormalizeChannelGroupFilter(c.Query("group"))
 	statusParam := c.Query("status")
@@ -168,6 +185,7 @@ func GetAllChannels(c *gin.Context) {
 
 	for _, datum := range channelData {
 		clearChannelInfo(datum)
+		applyCachedChannelSiteType(datum)
 	}
 
 	countQuery := buildChannelListQuery(groupFilter, statusFilter, -1)
@@ -280,7 +298,7 @@ func SearchChannels(c *gin.Context) {
 	statusParam := c.Query("status")
 	statusFilter := parseStatusFilter(statusParam)
 	idSort, _ := strconv.ParseBool(c.Query("id_sort"))
-	sortOptions := model.NewChannelSortOptions(c.Query("sort_by"), c.Query("sort_order"), idSort)
+	sortOptions := model.NewChannelSortOptions(c.Query("sort_by"), c.Query("sort_order"), idSort, c.Query("group_order"))
 	enableTagMode, _ := strconv.ParseBool(c.Query("tag_mode"))
 	channelData := make([]*model.Channel, 0)
 	if enableTagMode {
@@ -381,6 +399,7 @@ func SearchChannels(c *gin.Context) {
 
 	for _, datum := range pagedData {
 		clearChannelInfo(datum)
+		applyCachedChannelSiteType(datum)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -471,10 +490,37 @@ func validateTwoFactorAuth(twoFA *model.TwoFA, code string) bool {
 	return false
 }
 
+const maxChannelRatio = model.MaxChannelRatio
+
 // validateChannel 通用的渠道校验函数
 func validateChannel(channel *model.Channel, isAdd bool) error {
 	if channel == nil {
 		return fmt.Errorf("channel cannot be empty")
+	}
+	if channel.ChannelRatio != nil &&
+		(*channel.ChannelRatio < 0 || math.IsNaN(*channel.ChannelRatio) ||
+			math.IsInf(*channel.ChannelRatio, 0) || *channel.ChannelRatio > maxChannelRatio) {
+		return fmt.Errorf("channel ratio must be between 0 and %d", maxChannelRatio)
+	}
+	for field, value := range map[string]float64{
+		"input price":  channel.InputPrice,
+		"output price": channel.OutputPrice,
+	} {
+		if value < 0 || math.IsNaN(value) || math.IsInf(value, 0) {
+			return fmt.Errorf("%s must be a finite non-negative number", field)
+		}
+	}
+	if channel.CostTier < 0 {
+		return fmt.Errorf("cost tier must be non-negative")
+	}
+	if channel.RPMLimit < 0 || channel.RPMLimit > 1000000 {
+		return fmt.Errorf("rpm limit must be between 0 and 1000000")
+	}
+	if channel.Priority != nil && *channel.Priority < 0 {
+		return fmt.Errorf("priority must be non-negative")
+	}
+	if channel.SiteType != nil && *channel.SiteType != "" && *channel.SiteType != channelPlatformNewAPI && *channel.SiteType != channelPlatformSub2API && *channel.SiteType != channelPlatformUnknown {
+		return fmt.Errorf("site type must be empty, newapi, sub2api, or unknown")
 	}
 
 	// 校验 channel settings
@@ -499,6 +545,9 @@ func validateChannel(channel *model.Channel, isAdd bool) error {
 
 	if channel.Type == constant.ChannelTypeNewAPI && strings.TrimSpace(channel.GetBaseURL()) == "" {
 		return fmt.Errorf("New API channel base URL cannot be empty")
+	}
+	if channel.Type == constant.ChannelTypeSub2API && strings.TrimSpace(channel.GetBaseURL()) == "" {
+		return fmt.Errorf("Sub2API channel base URL cannot be empty")
 	}
 
 	// 如果是添加操作，检查 channel 和 key 是否为空
@@ -591,6 +640,62 @@ type AddChannelRequest struct {
 	MultiKeyMode              constant.MultiKeyMode `json:"multi_key_mode"`
 	BatchAddSetKeyPrefix2Name bool                  `json:"batch_add_set_key_prefix_2_name"`
 	Channel                   *model.Channel        `json:"channel"`
+	BalanceAccessToken        string                `json:"balance_access_token,omitempty"`
+	BalanceUsername           string                `json:"balance_username,omitempty"`
+	BalancePassword           string                `json:"balance_password,omitempty"`
+	BalanceMode               string                `json:"balance_mode,omitempty"`
+}
+
+// buildChannelsForAdd expands a channel into one record per key and group.
+// A channel may still be edited with multiple groups for backward compatibility,
+// but new channels are stored separately so each group has an independent ID,
+// ability set, status, and routing weight.
+func buildChannelsForAdd(source *model.Channel, keys []string, setKeyPrefix bool) []model.Channel {
+	if source == nil {
+		return nil
+	}
+
+	groups := source.GetGroups()
+	if len(groups) == 0 {
+		groups = []string{source.Group}
+	}
+	// Avoid creating duplicate channels when the form submits a repeated group.
+	uniqueGroups := make([]string, 0, len(groups))
+	seenGroups := make(map[string]struct{}, len(groups))
+	for _, group := range groups {
+		group = strings.TrimSpace(group)
+		if _, exists := seenGroups[group]; exists {
+			continue
+		}
+		seenGroups[group] = struct{}{}
+		uniqueGroups = append(uniqueGroups, group)
+	}
+	if len(uniqueGroups) == 0 {
+		uniqueGroups = []string{source.Group}
+	}
+
+	channels := make([]model.Channel, 0, len(keys)*len(uniqueGroups))
+	for _, key := range keys {
+		if key == "" {
+			continue
+		}
+		name := source.Name
+		if setKeyPrefix && len(keys) > 1 {
+			keyPrefix := key
+			if len(keyPrefix) > 8 {
+				keyPrefix = keyPrefix[:8]
+			}
+			name = fmt.Sprintf("%s %s", name, keyPrefix)
+		}
+		for _, group := range uniqueGroups {
+			localChannel := *source
+			localChannel.Key = key
+			localChannel.Name = name
+			localChannel.Group = group
+			channels = append(channels, localChannel)
+		}
+	}
+	return channels
 }
 
 func getVertexArrayKeys(keys string) ([]string, error) {
@@ -652,6 +757,17 @@ func AddChannel(c *gin.Context) {
 	}
 
 	addChannelRequest.Channel.CreatedTime = common.GetTimestamp()
+	if addChannelRequest.BalanceAccessToken != "" || addChannelRequest.BalanceUsername != "" || addChannelRequest.BalancePassword != "" {
+		if err := addChannelRequest.Channel.SetBalanceCredentials(addChannelRequest.BalanceAccessToken, addChannelRequest.BalanceUsername, addChannelRequest.BalancePassword); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+	}
+	if addChannelRequest.BalanceMode == "manual" {
+		addChannelRequest.Channel.BalanceMode = "manual"
+	} else {
+		addChannelRequest.Channel.BalanceMode = "auto"
+	}
 	keys := make([]string, 0)
 	switch addChannelRequest.Mode {
 	case "multi_to_single":
@@ -705,35 +821,45 @@ func AddChannel(c *gin.Context) {
 		return
 	}
 
-	channels := make([]model.Channel, 0, len(keys))
-	for _, key := range keys {
-		if key == "" {
-			continue
+	channels := buildChannelsForAdd(
+		addChannelRequest.Channel,
+		keys,
+		addChannelRequest.BatchAddSetKeyPrefix2Name,
+	)
+	for index := range channels {
+		requestedPriority := int64(0)
+		if channels[index].Priority != nil {
+			requestedPriority = *channels[index].Priority
 		}
-		localChannel := addChannelRequest.Channel
-		localChannel.Key = key
-		if addChannelRequest.BatchAddSetKeyPrefix2Name && len(keys) > 1 {
-			keyPrefix := localChannel.Key
-			if len(localChannel.Key) > 8 {
-				keyPrefix = localChannel.Key[:8]
-			}
-			localChannel.Name = fmt.Sprintf("%s %s", localChannel.Name, keyPrefix)
+		priority, priorityErr := constrainNewChannelPriority(channels[index].Group, requestedPriority)
+		if priorityErr != nil {
+			common.ApiError(c, priorityErr)
+			return
 		}
-		channels = append(channels, *localChannel)
+		channels[index].Priority = &priority
 	}
 	err = model.BatchInsertChannels(channels)
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
+	if err := model.RebalanceChannelWeightsForChannel(0); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	model.InitChannelCache()
 	recordManageAudit(c, "channel.create", map[string]interface{}{
-		"name":  addChannelRequest.Channel.Name,
-		"type":  addChannelRequest.Channel.Type,
-		"count": len(channels),
+		"name":   addChannelRequest.Channel.Name,
+		"type":   addChannelRequest.Channel.Type,
+		"groups": addChannelRequest.Channel.GetGroups(),
+		"count":  len(channels),
 	})
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
+		"data": gin.H{
+			"count": len(channels),
+		},
 	})
 	return
 }
@@ -901,10 +1027,45 @@ func EditTagChannels(c *gin.Context) {
 		}
 		channelTag.HeaderOverride = common.GetPointer[string](trimmed)
 	}
-	err = model.EditChannelByTag(channelTag.Tag, channelTag.NewTag, channelTag.ModelMapping, channelTag.Models, channelTag.Groups, channelTag.Priority, channelTag.Weight, channelTag.ParamOverride, channelTag.HeaderOverride)
+	// Priority ranges depend on each channel's first group, so do not apply one
+	// unbounded bulk value before per-channel clamping below.
+	bulkPriority := (*int64)(nil)
+	err = model.EditChannelByTag(channelTag.Tag, channelTag.NewTag, channelTag.ModelMapping, channelTag.Models, channelTag.Groups, bulkPriority, channelTag.Weight, channelTag.ParamOverride, channelTag.HeaderOverride)
 	if err != nil {
 		common.ApiError(c, err)
 		return
+	}
+	updatedTag := channelTag.Tag
+	if channelTag.NewTag != nil && *channelTag.NewTag != "" {
+		updatedTag = *channelTag.NewTag
+	}
+	if channelTag.Priority != nil {
+		channels, queryErr := model.GetChannelsByTag(updatedTag, false, true)
+		if queryErr != nil {
+			common.ApiError(c, queryErr)
+			return
+		}
+		for _, taggedChannel := range channels {
+			priority, priorityErr := constrainChannelPriority(taggedChannel.Id, *channelTag.Priority)
+			if priorityErr != nil {
+				common.ApiError(c, priorityErr)
+				return
+			}
+			if priorityErr = model.DB.Model(&model.Channel{}).Where("id = ?", taggedChannel.Id).Update("priority", priority).Error; priorityErr != nil {
+				common.ApiError(c, priorityErr)
+				return
+			}
+			if priorityErr = model.DB.Model(&model.Ability{}).Where("channel_id = ?", taggedChannel.Id).Update("priority", priority).Error; priorityErr != nil {
+				common.ApiError(c, priorityErr)
+				return
+			}
+		}
+	}
+	if channelTag.Weight != nil {
+		if err := model.RebalanceChannelWeightsForChannel(0); err != nil {
+			common.ApiError(c, err)
+			return
+		}
 	}
 	model.InitChannelCache()
 	recordManageAudit(c, "channel.tag_edit", map[string]interface{}{
@@ -915,6 +1076,45 @@ func EditTagChannels(c *gin.Context) {
 		"message": "",
 	})
 	return
+}
+
+// constrainChannelPriority keeps a channel inside the reserved nine-value
+// range of its first routing group. Channels without abilities are legacy or
+// incomplete records; use the first range rather than accepting an unbounded
+// value so a subsequent ability rebuild cannot introduce an invalid priority.
+func constrainChannelPriority(channelID int, requested int64) (int64, error) {
+	var ability model.Ability
+	err := model.DB.Where("channel_id = ?", channelID).Order("priority ASC").First(&ability).Error
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return 0, err
+	}
+	if err == nil {
+		return constrainPriorityToGroupRange(ability.Priority, requested), nil
+	}
+	return constrainPriorityToGroupRange(nil, requested), nil
+}
+
+func constrainNewChannelPriority(group string, requested int64) (int64, error) {
+	var ability model.Ability
+	err := model.DB.Where(&model.Ability{Group: group}).Order("priority ASC").First(&ability).Error
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return 0, err
+	}
+	return constrainPriorityToGroupRange(ability.Priority, requested), nil
+}
+
+func constrainPriorityToGroupRange(groupPriority *int64, requested int64) int64 {
+	if groupPriority == nil || *groupPriority <= 0 {
+		return 1
+	}
+	base := ((*groupPriority - 1) / 10) * 10
+	if requested < base+1 {
+		return base + 1
+	}
+	if requested > base+9 {
+		return base + 9
+	}
+	return requested
 }
 
 type ChannelBatch struct {
@@ -958,6 +1158,56 @@ type PatchChannel struct {
 	KeyMode      *string `json:"key_mode"` // 多key模式下密钥覆盖或者追加
 }
 
+// updateAdaptiveRoutingConfig explicitly updates adaptive fields supplied by
+// the client. GORM omits zero values when Updates receives a struct, which
+// would otherwise make it impossible to turn the feature off or reset a value
+// to zero through the channel management form.
+func updateAdaptiveRoutingConfig(channel *PatchChannel, requestData map[string]any) error {
+	updates := make(map[string]any, 8)
+	if _, ok := requestData["adaptive_enabled"]; ok {
+		updates["adaptive_enabled"] = channel.AdaptiveEnabled
+	}
+	if _, ok := requestData["adaptive_window_seconds"]; ok {
+		updates["adaptive_window_seconds"] = channel.AdaptiveWindowSeconds
+	}
+	if _, ok := requestData["adaptive_min_samples"]; ok {
+		updates["adaptive_min_samples"] = channel.AdaptiveMinSamples
+	}
+	if _, ok := requestData["adaptive_slow_threshold_ms"]; ok {
+		updates["adaptive_slow_threshold_ms"] = channel.AdaptiveSlowThresholdMs
+	}
+	if _, ok := requestData["adaptive_min_weight"]; ok {
+		updates["adaptive_min_weight"] = channel.AdaptiveMinWeight
+	}
+	if _, ok := requestData["adaptive_max_weight"]; ok {
+		updates["adaptive_max_weight"] = channel.AdaptiveMaxWeight
+	}
+	if _, ok := requestData["adaptive_recovery_weight"]; ok {
+		updates["adaptive_recovery_weight"] = channel.AdaptiveRecoveryWeight
+	}
+	if _, ok := requestData["adaptive_cooldown_seconds"]; ok {
+		updates["adaptive_cooldown_seconds"] = channel.AdaptiveCooldownSeconds
+	}
+	if len(updates) == 0 {
+		return nil
+	}
+	return model.DB.Model(&model.Channel{}).
+		Where("id = ?", channel.Id).
+		Updates(updates).Error
+}
+
+func isChannelRatioOnlyUpdate(requestData map[string]any) bool {
+	if _, provided := requestData["channel_ratio"]; !provided {
+		return false
+	}
+	for field := range requestData {
+		if field != "id" && field != "channel_ratio" {
+			return false
+		}
+	}
+	return true
+}
+
 type ChannelStatusRequest struct {
 	Status int `json:"status"`
 }
@@ -983,6 +1233,7 @@ func UpdateChannel(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	_, channel.ChannelRatioProvided = requestData["channel_ratio"]
 	if _, ok := requestData["status"]; ok {
 		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
 		return
@@ -1016,6 +1267,19 @@ func UpdateChannel(c *gin.Context) {
 		return
 	}
 	originProxy := originChannel.GetSetting().Proxy
+	if channel.Weight != nil && *channel.Weight > 300 {
+		// A single channel can never consume more than the group's 300-point
+		// budget. Clamp first, then rebalance the complete group below.
+		*channel.Weight = 300
+	}
+	if channel.Priority != nil {
+		priority, priorityErr := constrainChannelPriority(channel.Id, *channel.Priority)
+		if priorityErr != nil {
+			common.ApiError(c, priorityErr)
+			return
+		}
+		*channel.Priority = priority
+	}
 	proxyChanged := false
 	if _, settingProvided := requestData["setting"]; settingProvided {
 		newProxy, _ := service.NormalizeProxyURL(channel.GetSetting().Proxy)
@@ -1117,8 +1381,22 @@ func UpdateChannel(c *gin.Context) {
 			// 覆盖模式：直接使用新密钥（默认行为，不需要特殊处理）
 		}
 	}
-	err = channel.Update()
+	if isChannelRatioOnlyUpdate(requestData) {
+		err = channel.UpdateChannelRatio()
+	} else {
+		err = channel.Update()
+	}
 	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if channel.Weight != nil && !isChannelRatioOnlyUpdate(requestData) {
+		if err := model.RebalanceChannelWeightsForChannel(channel.Id); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+	}
+	if err := updateAdaptiveRoutingConfig(&channel, requestData); err != nil {
 		common.ApiError(c, err)
 		return
 	}
@@ -1142,6 +1420,21 @@ func UpdateChannel(c *gin.Context) {
 	}
 	if channel.Key != "" && channel.Key != originChannel.Key {
 		changedFields = append(changedFields, "key")
+	}
+	for _, field := range []string{
+		"channel_ratio",
+		"adaptive_enabled",
+		"adaptive_window_seconds",
+		"adaptive_min_samples",
+		"adaptive_slow_threshold_ms",
+		"adaptive_min_weight",
+		"adaptive_max_weight",
+		"adaptive_recovery_weight",
+		"adaptive_cooldown_seconds",
+	} {
+		if _, ok := requestData[field]; ok {
+			changedFields = append(changedFields, field)
+		}
 	}
 	recordManageAudit(c, "channel.update", map[string]interface{}{
 		"id":             channel.Id,
@@ -1213,7 +1506,7 @@ func BatchUpdateChannelStatus(c *gin.Context) {
 }
 
 func isManageableChannelStatus(status int) bool {
-	return status == common.ChannelStatusEnabled || status == common.ChannelStatusManuallyDisabled
+	return status == common.ChannelStatusEnabled || status == common.ChannelStatusManuallyDisabled || status == common.ChannelStatusAutoDisabled
 }
 
 // equalStringPtr 比较两个 *string 是否相等（均为 nil 视为相等）。

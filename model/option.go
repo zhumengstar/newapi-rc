@@ -571,6 +571,12 @@ func updateOptionMap(key string, value string) (err error) {
 		err = setting.UpdateModelRequestRateLimitGroupByJSONString(value)
 	case "RetryTimes":
 		common.RetryTimes, _ = strconv.Atoi(value)
+		if common.RetryTimes < 0 {
+			common.RetryTimes = 0
+		}
+		if common.RetryTimes > 2 {
+			common.RetryTimes = 2
+		}
 	case "DataExportInterval":
 		common.DataExportInterval, _ = strconv.Atoi(value)
 	case "DataExportDefaultTime":

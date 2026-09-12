@@ -158,6 +158,26 @@ export async function handleDisableChannel(
   }
 }
 
+/** Manually mark a channel as auto-disabled so it follows recovery handling. */
+export async function handleAutoDisableChannel(
+  id: number,
+  queryClient?: QueryClient,
+  onSuccess?: () => void
+): Promise<void> {
+  try {
+    const response = await updateChannelStatus(id, CHANNEL_STATUS.AUTO_DISABLED)
+    if (response.success) {
+      toast.success(i18next.t(SUCCESS_MESSAGES.AUTO_DISABLED))
+      queryClient?.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+      onSuccess?.()
+    } else {
+      toast.error(response.message || i18next.t(ERROR_MESSAGES.UPDATE_FAILED))
+    }
+  } catch {
+    toast.error(i18next.t(ERROR_MESSAGES.UPDATE_FAILED))
+  }
+}
+
 /**
  * Toggle channel status (enable/disable)
  */
@@ -202,7 +222,7 @@ export async function handleDeleteChannel(
 export async function handleUpdateChannelField(
   id: number,
   fieldName: string,
-  value: number,
+  value: number | string | null,
   queryClient?: QueryClient,
   onSuccess?: () => void
 ): Promise<void> {
@@ -649,7 +669,7 @@ export async function handleTestAllChannels(
 }
 
 /**
- * Update balance for all enabled channels
+ * Start a background balance refresh for all eligible channels
  */
 export async function handleUpdateAllBalances(
   queryClient?: QueryClient,

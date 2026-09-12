@@ -3,6 +3,7 @@ package controller
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -28,9 +29,13 @@ import (
 )
 
 type LoginRequest struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
+	Username         string `json:"username"`
+	Password         string `json:"password"`
+	AccessToken      string `json:"access_token"`
+	AccessTokenCamel string `json:"accessToken"`
 }
+
+const loginViaAccessTokenContextKey = "login_via_access_token"
 
 var (
 	errUserPasswordUnset    = errors.New("user password is not set")
@@ -38,37 +43,66 @@ var (
 )
 
 func Login(c *gin.Context) {
-	if !common.PasswordLoginEnabled {
-		common.ApiErrorI18n(c, i18n.MsgUserPasswordLoginDisabled)
-		return
-	}
 	var loginRequest LoginRequest
 	err := common.DecodeJson(c.Request.Body, &loginRequest)
 	if err != nil {
 		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
 		return
 	}
-	username := loginRequest.Username
+	username := strings.TrimSpace(loginRequest.Username)
 	password := loginRequest.Password
-	if username == "" || password == "" {
-		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
-		return
+	accessToken := normalizeLoginAccessToken(loginRequest.AccessToken)
+	if accessToken == "" {
+		accessToken = normalizeLoginAccessToken(loginRequest.AccessTokenCamel)
 	}
-	user := model.User{
-		Username: username,
-		Password: password,
-	}
-	err = user.ValidateAndFill()
-	if err != nil {
-		switch {
-		case errors.Is(err, model.ErrDatabase):
+	passwordAttempted := false
+	var user model.User
+
+	// Preserve password login as the primary path. A supplied access token is
+	// only used when password authentication is unavailable or unsuccessful.
+	if common.PasswordLoginEnabled && username != "" && password != "" {
+		passwordAttempted = true
+		user = model.User{
+			Username: username,
+			Password: password,
+		}
+		err = user.ValidateAndFill()
+		if err == nil {
+			accessToken = ""
+		} else if errors.Is(err, model.ErrDatabase) {
 			common.SysLog(fmt.Sprintf("Login database error for user %s: %v", username, err))
 			common.ApiErrorI18n(c, i18n.MsgDatabaseError)
-		case errors.Is(err, model.ErrUserEmptyCredentials):
-			common.ApiErrorI18n(c, i18n.MsgInvalidParams)
-		default:
-			common.ApiErrorI18n(c, i18n.MsgUserUsernameOrPasswordError)
+			return
 		}
+	}
+
+	if accessToken != "" {
+		var tokenUser *model.User
+		tokenUser, err = validateLoginAccessToken(accessToken)
+		if err != nil {
+			if errors.Is(err, model.ErrDatabase) {
+				common.SysLog(fmt.Sprintf("Access token login database error: %v", err))
+				common.ApiErrorI18n(c, i18n.MsgDatabaseError)
+			} else {
+				common.ApiErrorI18n(c, i18n.MsgUserUsernameOrPasswordError)
+			}
+			return
+		}
+		if tokenUser == nil {
+			common.ApiErrorI18n(c, i18n.MsgUserUsernameOrPasswordError)
+			return
+		}
+		user = *tokenUser
+		c.Set(loginViaAccessTokenContextKey, true)
+	} else if !passwordAttempted {
+		if !common.PasswordLoginEnabled {
+			common.ApiErrorI18n(c, i18n.MsgUserPasswordLoginDisabled)
+		} else {
+			common.ApiErrorI18n(c, i18n.MsgInvalidParams)
+		}
+		return
+	} else if err != nil {
+		common.ApiErrorI18n(c, i18n.MsgUserUsernameOrPasswordError)
 		return
 	}
 
@@ -112,8 +146,43 @@ func Login(c *gin.Context) {
 	setupLogin(&user, c)
 }
 
+// normalizeLoginAccessToken accepts the raw token and the common Bearer form
+// used by dashboard clients, while rejecting malformed multi-part values.
+func normalizeLoginAccessToken(raw string) string {
+	parts := strings.Fields(strings.TrimSpace(raw))
+	if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
+		return parts[1]
+	}
+	if len(parts) != 1 {
+		return ""
+	}
+	return parts[0]
+}
+
+// validateLoginAccessToken supports both NewAPI dashboard sessions and
+// personal access tokens. Session tokens are checked against the server-side
+// session record before a fresh login session is issued.
+func validateLoginAccessToken(token string) (*model.User, error) {
+	identity, internal, err := service.ParseDashboardAccessToken(token)
+	if internal {
+		if err != nil {
+			return nil, err
+		}
+		if _, _, err = service.ValidateLoginSession(identity); err != nil {
+			return nil, err
+		}
+		return model.GetUserById(identity.UserID, false)
+	}
+	return model.ValidateAccessToken(token)
+}
+
 // loginMethodFromContext 根据请求路径推导登录方式，用于登录审计日志。
 func loginMethodFromContext(c *gin.Context) string {
+	if viaAccessToken, ok := c.Get(loginViaAccessTokenContextKey); ok {
+		if enabled, ok := viaAccessToken.(bool); ok && enabled {
+			return "access_token"
+		}
+	}
 	switch c.FullPath() {
 	case "/api/user/login":
 		return "password"
@@ -389,6 +458,14 @@ func GetUser(c *gin.Context) {
 		return
 	}
 	user.AdminPermissions = authz.Capabilities(user.Id, user.Role)
+	userSetting := user.GetSetting()
+	user.EffectiveGroupRatios = make(map[string]float64)
+	for _, group := range service.ParseUserGroups(user.Group) {
+		user.EffectiveGroupRatios[group] = service.GetUserGroupRatioWithSetting(userSetting, user.Group, group)
+	}
+	for group, ratio := range userSetting.UserGroupRatios {
+		user.EffectiveGroupRatios[group] = ratio
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
@@ -663,8 +740,12 @@ func GetUserModels(c *gin.Context) {
 }
 
 func UpdateUser(c *gin.Context) {
-	var updatedUser model.User
-	err := common.DecodeJson(c.Request.Body, &updatedUser)
+	var request struct {
+		model.User
+		UserGroupRatios map[string]float64 `json:"user_group_ratios"`
+	}
+	err := common.DecodeJson(c.Request.Body, &request)
+	updatedUser := request.User
 	if err != nil || updatedUser.Id == 0 {
 		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
 		return
@@ -698,6 +779,33 @@ func UpdateUser(c *gin.Context) {
 	}
 	if updatedUser.Password == "$I_LOVE_U" {
 		updatedUser.Password = "" // rollback to what it should be
+	}
+	updatedUser.Group = service.JoinUserGroupsWithDefault(service.ParseUserGroups(updatedUser.Group))
+	if len(updatedUser.Group) > 512 {
+		common.ApiErrorMsg(c, "user group is too long")
+		return
+	}
+	if request.UserGroupRatios != nil {
+		userSetting := originUser.GetSetting()
+		selectedGroups := make(map[string]bool)
+		for _, group := range service.ParseUserGroups(updatedUser.Group) {
+			selectedGroups[group] = true
+		}
+		for group, ratio := range request.UserGroupRatios {
+			if ratio < 0 || math.IsNaN(ratio) || math.IsInf(ratio, 0) {
+				common.ApiErrorMsg(c, "user group ratio must be a non-negative finite number")
+				return
+			}
+			if !selectedGroups[group] || !service.GroupInUserUsableGroups(updatedUser.Group, group) {
+				delete(request.UserGroupRatios, group)
+			}
+		}
+		if len(request.UserGroupRatios) == 0 {
+			userSetting.UserGroupRatios = nil
+		} else {
+			userSetting.UserGroupRatios = request.UserGroupRatios
+		}
+		updatedUser.SetSetting(userSetting)
 	}
 	updatePassword := updatedUser.Password != ""
 	authzTouched := false

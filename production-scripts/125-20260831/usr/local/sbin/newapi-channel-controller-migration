@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Retire every external controller that writes channel state. Scheduling now
+# runs inside NewAPI under a database lease, so leaving any of these timers
+# enabled races with the application for weights, priorities, and status.
+retired_services=(
+    newapi-channel-weight-controller.service
+    newapi-channel-recovery.service
+    newapi-channel-error-guard.service
+)
+retired_timers=(
+    newapi-channel-weight-controller.timer
+    newapi-channel-recovery.timer
+    newapi-channel-error-guard.timer
+)
+legacy_services=(
+    newapi-banana-groups-controller.service
+    newapi-banana-weight-controller.service
+    newapi-banana-channel-recovery.service
+    newapi-big-banana-weight-controller.service
+    newapi-big-banana-channel-recovery.service
+    newapi-image-weight-controller.service
+    newapi-image-channel-health.service
+    newapi-gpt-weight-controller.service
+    newapi-gpt-discount-controller.service
+    newapi-gpt-discount-ha-controller.service
+    newapi-gpt-text-groups-controller.service
+)
+legacy_timers=(
+    newapi-banana-groups-controller.timer
+    newapi-banana-weight-controller.timer
+    newapi-banana-channel-recovery.timer
+    newapi-big-banana-weight-controller.timer
+    newapi-big-banana-channel-recovery.timer
+    newapi-image-weight-controller.timer
+    newapi-image-channel-health.timer
+    newapi-gpt-weight-controller.timer
+    newapi-gpt-discount-controller.timer
+    newapi-gpt-discount-ha-controller.timer
+    newapi-gpt-text-groups-controller.timer
+)
+state_dir=/var/lib/newapi-channel-controller-migration
+active_legacy_state=$state_dir/active-legacy-timers
+
+stop_timers() {
+    local unit
+    for unit in "$@"; do
+        systemctl disable --now "$unit" 2>/dev/null || true
+    done
+}
+
+stop_units() {
+    local unit
+    for unit in "$@"; do
+        systemctl stop "$unit" 2>/dev/null || true
+    done
+}
+
+record_active_legacy_timers() {
+    local unit
+    install -d -m 700 "$state_dir"
+    : >"$active_legacy_state.tmp"
+    chmod 600 "$active_legacy_state.tmp"
+    for unit in "${legacy_timers[@]}"; do
+        if systemctl is-active --quiet "$unit"; then
+            printf '%s\n' "$unit" >>"$active_legacy_state.tmp"
+        fi
+    done
+    mv -f "$active_legacy_state.tmp" "$active_legacy_state"
+}
+
+restore_recorded_legacy_timers() {
+    local unit
+    [[ -f "$active_legacy_state" ]] || return 0
+    while IFS= read -r unit; do
+        [[ -n "$unit" ]] || continue
+        systemctl enable --now "$unit"
+    done <"$active_legacy_state"
+}
+
+systemctl daemon-reload
+
+case "${1:-apply}" in
+    apply)
+        # Stop every external writer. NewAPI owns these operations in-process;
+        # there is deliberately no replacement systemd timer to start here.
+        record_active_legacy_timers
+        stop_timers "${retired_timers[@]}"
+        stop_units "${retired_services[@]}"
+        stop_timers "${legacy_timers[@]}"
+        stop_units "${legacy_services[@]}"
+        ;;
+    rollback)
+        stop_timers "${retired_timers[@]}"
+        stop_units "${retired_services[@]}"
+        restore_recorded_legacy_timers
+        ;;
+    *)
+        printf 'usage: %s [apply|rollback]\n' "$0" >&2
+        exit 2
+        ;;
+esac

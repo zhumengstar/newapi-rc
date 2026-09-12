@@ -1,0 +1,13 @@
+[Unit]
+Description=Run NewAPI channel error guard every 10 seconds
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=10s
+AccuracySec=1s
+RandomizedDelaySec=0
+Persistent=true
+Unit=newapi-channel-error-guard.service
+
+[Install]
+WantedBy=timers.target

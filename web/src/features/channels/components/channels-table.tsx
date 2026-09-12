@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
 import type {
   ColumnFiltersState,
@@ -24,9 +24,10 @@ import type {
   SortingState,
   Row,
 } from '@tanstack/react-table'
-import { Eye, EyeOff } from 'lucide-react'
-import { useState, useMemo, useEffect } from 'react'
+import { Eye, EyeOff, Power, PowerOff, ScanLine } from 'lucide-react'
+import { useState, useMemo, useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
+import { toast } from 'sonner'
 
 import {
   DISABLED_ROW_DESKTOP,
@@ -42,15 +43,24 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
+import { usePricingData } from '@/features/pricing/hooks'
 import { useMediaQuery } from '@/hooks'
 import { useTableUrlState } from '@/hooks/use-table-url-state'
 import { getLobeIcon } from '@/lib/lobe-icon'
 
-import { getChannels, searchChannels, getGroups } from '../api'
+import {
+  detectAllChannelTypes,
+  getChannelGroups,
+  getChannels,
+  searchChannels,
+  updateChannelGroupAdaptiveEnabled,
+  updateChannelGroupPriorityOrder,
+} from '../api'
 import {
   DEFAULT_PAGE_SIZE,
   CHANNEL_STATUS,
   CHANNEL_STATUS_OPTIONS,
+  CHANNEL_TYPE_OPTIONS,
 } from '../constants'
 import {
   channelsQueryKeys,
@@ -59,6 +69,7 @@ import {
   isTagAggregateRow,
   getChannelTypeIcon,
   getChannelTypeLabel,
+  sortGroupsByModelAndRatio,
 } from '../lib'
 import type { Channel, ChannelSortBy } from '../types'
 import { ChannelCard } from './channel-card'
@@ -68,15 +79,60 @@ import { DataTableBulkActions } from './data-table-bulk-actions'
 
 const route = getRouteApi('/_authenticated/channels/')
 const CHANNELS_COLUMN_VISIBILITY_STORAGE_KEY = 'channels:column-visibility'
+// v2 places the independently managed site type column next to the channel
+// name. The versioned key migrates users who still have the pre-site-type
+// column order persisted in localStorage.
+const CHANNELS_COLUMN_ORDER_STORAGE_KEY = 'channels:column-order:v2'
 const CHANNELS_COLUMN_SIZING_STORAGE_KEY = 'channels:column-sizing'
 const CHANNELS_VIEW_MODE_STORAGE_KEY = 'channels:view-mode'
 const CHANNELS_STATUS_FILTER_STORAGE_KEY = 'channel-status-filter'
+const CHANNELS_TYPE_FILTER_STORAGE_KEY = 'channel-type-filter'
+const CHANNELS_GROUP_FILTER_STORAGE_KEY = 'channel-group-filter'
+const CHANNELS_GROUP_ORDER_STORAGE_KEY = 'channel-group-order'
+
+function getStoredChannelArrayFilter(key: string): string[] | undefined {
+  try {
+    const stored = localStorage.getItem(key)
+    if (stored === null) return undefined
+
+    const parsed: unknown = JSON.parse(stored)
+    return Array.isArray(parsed)
+      ? parsed.filter((value): value is string => typeof value === 'string')
+      : []
+  } catch {
+    return []
+  }
+}
+
+function setStoredChannelArrayFilter(key: string, value: string[]) {
+  try {
+    if (value.length === 0) {
+      localStorage.removeItem(key)
+      return
+    }
+    localStorage.setItem(key, JSON.stringify(value))
+  } catch {
+    // Ignore storage failures, such as private browsing restrictions.
+  }
+}
+
+function clearStoredChannelFilter(key: string) {
+  try {
+    localStorage.removeItem(key)
+  } catch {
+    // Ignore storage failures, such as private browsing restrictions.
+  }
+}
 
 const CHANNEL_SORTABLE_COLUMNS = new Set<ChannelSortBy>([
   'id',
   'name',
+  'site_type',
+  'type',
   'priority',
   'balance',
+  'channel_ratio',
+  'used_quota',
   'response_time',
   'test_time',
 ])
@@ -89,17 +145,45 @@ function isDisabledChannelRow(channel: Channel) {
 
 export function ChannelsTable() {
   const { t } = useTranslation()
+  const queryClient = useQueryClient()
   const {
     enableTagMode,
     idSort,
+    groupSort,
     batchMode,
+    groupOrderSort,
     sensitiveVisible,
     setSensitiveVisible,
   } = useChannels()
   const isMobile = useMediaQuery('(max-width: 640px)')
+  const { groupRatio, models } = usePricingData()
+
+  const groupModels = useMemo(() => {
+    const modelNamesByGroup = new Map<string, string[]>()
+    for (const model of models) {
+      for (const group of model.enable_groups) {
+        const groupName = group.trim()
+        if (!groupName || groupName === 'auto') {
+          continue
+        }
+
+        const existingModelNames = modelNamesByGroup.get(groupName)
+        if (existingModelNames) {
+          if (!existingModelNames.includes(model.model_name)) {
+            existingModelNames.push(model.model_name)
+          }
+          continue
+        }
+        modelNamesByGroup.set(groupName, [model.model_name])
+      }
+    }
+    return modelNamesByGroup
+  }, [models])
 
   // Table state
-  const [sorting, setSorting] = useState<SortingState>([])
+  const [sorting, setSorting] = useState<SortingState>([
+    { id: 'type', desc: false },
+  ])
 
   // URL state management
   const {
@@ -131,8 +215,24 @@ export function ChannelsTable() {
           return stored === 'enabled' || stored === 'disabled' ? [stored] : []
         },
       },
-      { columnId: 'type', searchKey: 'type', type: 'array' },
-      { columnId: 'group', searchKey: 'group', type: 'array' },
+      {
+        columnId: 'type',
+        searchKey: 'type',
+        type: 'array',
+        deserialize: (value) =>
+          value !== undefined
+            ? value
+            : getStoredChannelArrayFilter(CHANNELS_TYPE_FILTER_STORAGE_KEY),
+      },
+      {
+        columnId: 'group',
+        searchKey: 'group',
+        type: 'array',
+        deserialize: (value) =>
+          value !== undefined
+            ? value
+            : getStoredChannelArrayFilter(CHANNELS_GROUP_FILTER_STORAGE_KEY),
+      },
       { columnId: 'model', searchKey: 'model', type: 'string' },
     ],
   })
@@ -148,6 +248,20 @@ export function ChannelsTable() {
       localStorage.setItem(
         CHANNELS_STATUS_FILTER_STORAGE_KEY,
         status?.[0] ?? 'all'
+      )
+      const type = next.find((f) => f.id === 'type')?.value
+      setStoredChannelArrayFilter(
+        CHANNELS_TYPE_FILTER_STORAGE_KEY,
+        Array.isArray(type)
+          ? type.filter((value): value is string => typeof value === 'string')
+          : []
+      )
+      const group = next.find((f) => f.id === 'group')?.value
+      setStoredChannelArrayFilter(
+        CHANNELS_GROUP_FILTER_STORAGE_KEY,
+        Array.isArray(group)
+          ? group.filter((value): value is string => typeof value === 'string')
+          : []
       )
       return next
     })
@@ -203,10 +317,11 @@ export function ChannelsTable() {
     })
   }
 
-  // Fetch groups for filter
+  // The group filter order is also the canonical order used by the table when
+  // group sorting is enabled. Keep both views driven by the same memoized list.
   const { data: groupsData } = useQuery({
-    queryKey: ['groups'],
-    queryFn: getGroups,
+    queryKey: ['channel-groups'],
+    queryFn: getChannelGroups,
   })
 
   const groupOptions = useMemo(
@@ -217,6 +332,63 @@ export function ChannelsTable() {
       })),
     [groupsData]
   )
+
+  const [groupOrderOverride, setGroupOrderOverride] = useState<string[]>(
+    () => getStoredChannelArrayFilter(CHANNELS_GROUP_ORDER_STORAGE_KEY) ?? []
+  )
+  const groupOrder = useMemo(
+    () => {
+      const naturalOrder = sortGroupsByModelAndRatio(
+        groupOptions.map((option) => option.value),
+        groupRatio,
+        groupModels
+      )
+      const known = new Set(naturalOrder)
+      const persisted = groupOrderOverride.filter((group) => known.has(group))
+      return [...persisted, ...naturalOrder.filter((group) => !persisted.includes(group))]
+    },
+    [groupModels, groupOptions, groupOrderOverride, groupRatio]
+  )
+
+  const groupPriorityMutation = useMutation({
+    mutationFn: updateChannelGroupPriorityOrder,
+    onSuccess: (_, order) => {
+      lastAppliedGroupPriorityOrder.current = order.join(',')
+      queryClient.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+    },
+    onError: (error, order) => {
+      if (order) pendingGroupPriorityOrder.current = ''
+      toast.error(error instanceof Error ? error.message : t('Failed to update channel'))
+    },
+  })
+
+  // Applying group-order sorting also normalizes persisted priorities once per
+  // order. This keeps existing channels consistent even when the user only
+  // enables the toggle and does not drag a row first.
+  const lastAppliedGroupPriorityOrder = useRef('')
+  const pendingGroupPriorityOrder = useRef('')
+  useEffect(() => {
+    if (!groupOrderSort || groupOrder.length === 0) return
+    const orderKey = groupOrder.join(',')
+    if (
+      lastAppliedGroupPriorityOrder.current === orderKey ||
+      pendingGroupPriorityOrder.current === orderKey
+    ) return
+    pendingGroupPriorityOrder.current = orderKey
+    groupPriorityMutation.mutate(groupOrder)
+  }, [groupOrder, groupOrderSort, groupPriorityMutation])
+
+  const moveGroup = (source: string, target: string) => {
+    if (source === target || target === 'all' || source === 'all') return
+    const next = [...groupOrder]
+    const sourceIndex = next.indexOf(source)
+    const targetIndex = next.indexOf(target)
+    if (sourceIndex < 0 || targetIndex < 0) return
+    next.splice(sourceIndex, 1)
+    next.splice(next.indexOf(target), 0, source)
+    setGroupOrderOverride(next)
+    setStoredChannelArrayFilter(CHANNELS_GROUP_ORDER_STORAGE_KEY, next)
+  }
 
   // Fetch channels data
   // eslint-disable-next-line @tanstack/query/exhaustive-deps
@@ -237,8 +409,10 @@ export function ChannelsTable() {
           ? Number(typeFilter[0])
           : undefined,
       tag_mode: enableTagMode,
-      id_sort: idSort,
-      ...sortParams,
+      id_sort: groupSort || groupOrderSort ? false : idSort,
+      ...(groupSort ? { sort_by: 'priority' as const, sort_order: 'desc' as const } : {}),
+      ...(groupOrderSort ? { group_order: groupOrder.join(',') } : {}),
+      ...(groupSort || groupOrderSort ? {} : sortParams),
       p: pagination.pageIndex + 1,
       page_size: pagination.pageSize,
     }),
@@ -260,8 +434,10 @@ export function ChannelsTable() {
               ? Number(typeFilter[0])
               : undefined,
           tag_mode: enableTagMode,
-          id_sort: idSort,
-          ...sortParams,
+          id_sort: groupSort || groupOrderSort ? false : idSort,
+          ...(groupSort ? { sort_by: 'priority' as const, sort_order: 'desc' as const } : {}),
+          ...(groupOrderSort ? { group_order: groupOrder.join(',') } : {}),
+          ...(groupSort || groupOrderSort ? {} : sortParams),
           p: pagination.pageIndex + 1,
           page_size: pagination.pageSize,
         })
@@ -280,14 +456,22 @@ export function ChannelsTable() {
               ? Number(typeFilter[0])
               : undefined,
           tag_mode: enableTagMode,
-          id_sort: idSort,
-          ...sortParams,
+          id_sort: groupSort || groupOrderSort ? false : idSort,
+          ...(groupSort ? { sort_by: 'priority' as const, sort_order: 'desc' as const } : {}),
+          ...(groupOrderSort ? { group_order: groupOrder.join(',') } : {}),
+          ...(groupSort || groupOrderSort ? {} : sortParams),
           p: pagination.pageIndex + 1,
           page_size: pagination.pageSize,
         })
       }
     },
     placeholderData: (previousData) => previousData,
+  })
+
+  const detectSiteTypesMutation = useMutation({
+    mutationFn: (ids: number[]) => detectAllChannelTypes(ids, true),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: channelsQueryKeys.lists() }),
   })
 
   // Apply tag aggregation if tag mode is enabled
@@ -318,6 +502,11 @@ export function ChannelsTable() {
       tag: false,
     },
     columnVisibilityStorageKey: CHANNELS_COLUMN_VISIBILITY_STORAGE_KEY,
+    columnOrderStorageKey: CHANNELS_COLUMN_ORDER_STORAGE_KEY,
+    fixedColumnOrder: {
+      start: batchMode ? ['select'] : [],
+      end: ['actions'],
+    },
     columnSizingStorageKey: isMobile
       ? false
       : CHANNELS_COLUMN_SIZING_STORAGE_KEY,
@@ -357,9 +546,18 @@ export function ChannelsTable() {
       }))
       .filter((item) => item.type > 0 && item.count > 0)
       .sort((a, b) => {
-        const labelA = t(getChannelTypeLabel(a.type))
-        const labelB = t(getChannelTypeLabel(b.type))
-        return labelA.localeCompare(labelB)
+        const orderA = CHANNEL_TYPE_OPTIONS.findIndex(
+          (option) => option.value === a.type
+        )
+        const orderB = CHANNEL_TYPE_OPTIONS.findIndex(
+          (option) => option.value === b.type
+        )
+        // Keep the filter order aligned with the channel type order used by
+        // the channel form; unknown types remain at the end.
+        return (
+          (orderA < 0 ? Number.MAX_SAFE_INTEGER : orderA) -
+          (orderB < 0 ? Number.MAX_SAFE_INTEGER : orderB)
+        )
       })
 
     const selectedType = typeFilter.find((value) => value !== 'all')
@@ -397,15 +595,53 @@ export function ChannelsTable() {
         }
       }),
     ]
-  }, [t, typeCounts, typeFilter])
+  }, [typeCounts, typeFilter])
 
-  const groupFilterOptions = [
-    { label: t('All Groups'), value: 'all' },
-    ...groupOptions.map((option) => ({
-      ...option,
-      label: sensitiveVisible ? option.label : '••••',
-    })),
-  ]
+  const sortedGroupNames = groupOrder
+
+  const groupAdaptiveMutation = useMutation({
+    mutationFn: ({ group, enabled }: { group: string; enabled: boolean }) =>
+      updateChannelGroupAdaptiveEnabled(group, enabled),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: channelsQueryKeys.lists() }),
+    onError: (error) =>
+      toast.error(
+        error instanceof Error ? error.message : t('Failed to update channel')
+      ),
+  })
+
+  const groupAdaptiveState = useMemo(() => {
+    const state = new Map<string, boolean>()
+    for (const channel of data?.data?.items || []) {
+      for (const group of channel.group?.split(',').map((item) => item.trim()) || []) {
+        if (!group) continue
+        state.set(group, (state.get(group) ?? true) && channel.adaptive_enabled)
+      }
+    }
+    return state
+  }, [data])
+
+  const groupFilterOptions = useMemo(() => {
+    const ratioForGroup = (group: string) => {
+      const ratio = groupRatio[group]
+      return typeof ratio === 'number' && Number.isFinite(ratio) ? ratio : null
+    }
+
+    return [
+      { label: t('All Groups'), value: 'all' },
+      ...sortedGroupNames.map((group) => {
+        const ratio = ratioForGroup(group)
+        const label = sensitiveVisible ? group : '••••'
+        return {
+          value: group,
+          label:
+            ratio === null
+              ? label
+              : `${label} · ${t('Ratio: {{value}}', { value: `${ratio}x` })}`,
+        }
+      }),
+    ]
+  }, [groupRatio, sensitiveVisible, sortedGroupNames, t])
 
   return (
     <DataTablePage
@@ -421,11 +657,16 @@ export function ChannelsTable() {
       enableCardView
       viewModeStorageKey={CHANNELS_VIEW_MODE_STORAGE_KEY}
       renderCard={(row, { isSelected }) => (
-        <ChannelCard row={row} isSelected={isSelected} />
+        <ChannelCard
+          row={row}
+          isSelected={isSelected}
+          groupRatio={groupRatio}
+        />
       )}
       cardGridClassName='grid grid-cols-1 gap-3 sm:gap-4 lg:grid-cols-3'
       applyHeaderSize
       toolbarProps={{
+        enableColumnReordering: true,
         searchPlaceholder: t('Filter by name, ID, or key...'),
         searchDebounceMs: 500,
         onReset: () => {
@@ -447,39 +688,106 @@ export function ChannelsTable() {
             title: t('Status'),
             options: [...CHANNEL_STATUS_OPTIONS],
             singleSelect: true,
+            onClear: () =>
+              clearStoredChannelFilter(CHANNELS_STATUS_FILTER_STORAGE_KEY),
           },
           {
             columnId: 'type',
             title: t('Type'),
             options: typeFilterOptions,
             singleSelect: true,
+            onClear: () =>
+              clearStoredChannelFilter(CHANNELS_TYPE_FILTER_STORAGE_KEY),
           },
           {
             columnId: 'group',
             title: t('Group'),
             options: groupFilterOptions,
             singleSelect: true,
-          },
-        ],
-        preActions: (
-          <Tooltip>
-            <TooltipTrigger
-              render={
+            renderOptionActions: (option) => {
+              if (option.value === 'all') return null
+              const enabled = groupAdaptiveState.get(option.value) ?? false
+              return (
                 <Button
                   variant='ghost'
                   size='icon'
-                  onClick={() => setSensitiveVisible(!sensitiveVisible)}
-                  aria-label={sensitiveVisible ? t('Hide') : t('Show')}
-                  className='text-muted-foreground hover:text-foreground size-8'
-                />
-              }
-            >
-              {sensitiveVisible ? <Eye /> : <EyeOff />}
-            </TooltipTrigger>
-            <TooltipContent>
-              {sensitiveVisible ? t('Hide') : t('Show')}
-            </TooltipContent>
-          </Tooltip>
+                  className='size-7 shrink-0 text-muted-foreground hover:text-foreground'
+                  disabled={groupAdaptiveMutation.isPending}
+                  title={t(enabled ? 'Disable' : 'Enable')}
+                  aria-label={t(enabled ? 'Disable' : 'Enable')}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    event.preventDefault()
+                    groupAdaptiveMutation.mutate({
+                      group: option.value,
+                      enabled: !enabled,
+                    })
+                  }}
+                >
+                  {enabled ? <PowerOff className='size-3.5' /> : <Power className='size-3.5' />}
+                </Button>
+              )
+            },
+            onOptionReorder: moveGroup,
+            onClear: () =>
+              clearStoredChannelFilter(CHANNELS_GROUP_FILTER_STORAGE_KEY),
+          },
+        ],
+        preActions: (
+          <>
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    variant='ghost'
+                    size='icon'
+                    onClick={() => {
+                      const ids = (data?.data?.items || [])
+                        .filter(
+                          (channel) =>
+                            !channel.site_type || channel.site_type === 'unknown'
+                        )
+                        .map((channel) => channel.id)
+                      if (ids.length > 0) {
+                        detectSiteTypesMutation.mutate(ids)
+                      }
+                    }}
+                    disabled={
+                      detectSiteTypesMutation.isPending ||
+                      !(data?.data?.items || []).some(
+                        (channel) =>
+                          !channel.site_type || channel.site_type === 'unknown'
+                      )
+                    }
+                    aria-label={t('Detect Site Types')}
+                    className='text-muted-foreground hover:text-foreground size-8'
+                  />
+                }
+              >
+                <ScanLine />
+              </TooltipTrigger>
+              <TooltipContent>{t('Detect Site Types')}</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    variant='ghost'
+                    size='icon'
+                    onClick={() => setSensitiveVisible(!sensitiveVisible)}
+                    aria-label={sensitiveVisible ? t('Hide') : t('Show')}
+                    className='text-muted-foreground hover:text-foreground size-8'
+                  />
+                }
+              >
+                {sensitiveVisible ? <Eye /> : <EyeOff />}
+              </TooltipTrigger>
+              <TooltipContent>
+                {sensitiveVisible ? t('Hide') : t('Show')}
+              </TooltipContent>
+            </Tooltip>
+          </>
         ),
       }}
       getRowClassName={(row, { isMobile }) => {

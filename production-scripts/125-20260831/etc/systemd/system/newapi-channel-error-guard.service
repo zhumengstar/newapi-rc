@@ -1,0 +1,23 @@
+[Unit]
+Description=NewAPI fast rolling-window channel error guard
+After=docker.service
+Requires=docker.service
+ConditionPathExists=/var/run/docker.sock
+
+[Service]
+Type=oneshot
+TimeoutStartSec=15s
+ExecStart=/usr/local/sbin/newapi-channel-error-guard --disable-only --threshold 10 --recent-requests 20 --error-window-seconds 300 --hard-threshold 3 --hard-recent-requests 5 --transient-streak 10 --hard-streak 2 --recovery-fast-threshold 2 --recovery-fast-recent-requests 5 --recovery-fast-streak 2 --recovery-cooldown-seconds 180 --hard-error-cooldown-seconds 1800 --probe-timeout 8 --image-probe-timeout 90 --image-recovery-cooldown-seconds 600 --no-recovery-probe --no-weight-adjust --state /var/lib/newapi-channel-error-guard/disable-state.json --lock /run/newapi-channel-error-guard-disable.lock
+User=root
+Group=root
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/newapi-channel-error-guard /run
+ReadWritePaths=/var/log/newapi-channel-error-guard.log
+StandardOutput=append:/var/log/newapi-channel-error-guard.log
+StandardError=append:/var/log/newapi-channel-error-guard.log

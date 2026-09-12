@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -454,11 +455,24 @@ func fetchAdvancedCustomBalance(channel *model.Channel) (channelBalanceResult, e
 	return channelBalanceResult{RawResponse: string(formatted)}, nil
 }
 
-func updateChannelBalance(channel *model.Channel) (channelBalanceResult, error) {
+func supportsSiteBalance(channel *model.Channel) bool {
+	if channel == nil {
+		return false
+	}
+	if channel.Type == constant.ChannelTypeAdvancedCustom || channel.Type == constant.ChannelTypeNewAPI || channel.Type == constant.ChannelTypeSub2API {
+		return true
+	}
+	return channel.SiteType != nil && (strings.EqualFold(*channel.SiteType, "newapi") || strings.EqualFold(*channel.SiteType, "sub2api"))
+}
+
+func updateChannelSiteBalance(channel *model.Channel) (channelBalanceResult, error) {
 	if channel.Type == constant.ChannelTypeAdvancedCustom {
 		return fetchAdvancedCustomBalance(channel)
 	}
-	balance, err := updateStandardChannelBalance(channel)
+	if !supportsSiteBalance(channel) {
+		return channelBalanceResult{}, errors.New("站点类型尚未识别或不支持站点账户余额查询")
+	}
+	balance, err := updatePlatformChannelBalance(channel)
 	return channelBalanceResult{Balance: balance}, err
 }
 
@@ -468,6 +482,8 @@ func updateStandardChannelBalance(channel *model.Channel) (float64, error) {
 		channel.BaseURL = &baseURL
 	}
 	switch channel.Type {
+	case constant.ChannelTypeNewAPI, constant.ChannelTypeSub2API:
+		return updatePlatformChannelBalance(channel)
 	case constant.ChannelTypeOpenAI:
 		if channel.GetBaseURL() != "" {
 			baseURL = channel.GetBaseURL()
@@ -549,7 +565,7 @@ func UpdateChannelBalance(c *gin.Context) {
 		})
 		return
 	}
-	result, err := updateChannelBalance(channel)
+	result, err := updateChannelSiteBalance(channel)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -566,55 +582,245 @@ func UpdateChannelBalance(c *gin.Context) {
 	c.JSON(http.StatusOK, response)
 }
 
-func updateAllChannelsBalance() error {
+type channelBalanceSettingsRequest struct {
+	AccessToken *string `json:"access_token"`
+	Username    *string `json:"username"`
+	Password    *string `json:"password"`
+	Mode        *string `json:"mode"`
+}
+
+// GetChannelBalanceSettings returns the balance configuration used to populate
+// the admin balance dialog. This endpoint is protected by the sensitive-channel
+// permission; credentials are decrypted only for this explicit admin view.
+func GetChannelBalanceSettings(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	channel, err := model.GetChannelById(id, true)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	channel.NormalizeBalanceSettings()
+	token, username, password, credentialErr := channel.GetBalanceCredentialsWithError()
+	if credentialErr != nil {
+		// Never fabricate a password when the encryption key changed or is
+		// missing. Returning a guessed credential can overwrite the only valid
+		// secret when the operator saves the dialog.
+		common.ApiError(c, fmt.Errorf("无法读取余额凭据，请检查 CRYPTO_SECRET 并重新录入: %w", credentialErr))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": gin.H{
+		"username":                username,
+		"password":                password,
+		"access_token":            token,
+		"access_token_configured": token != "",
+		"login_configured":        username != "" && password != "",
+		"mode":                    channel.BalanceMode,
+	}})
+}
+
+// UpdateChannelBalanceSettings stores login/token material separately from the
+// regular channel form. Secrets are encrypted at rest by model.Channel.
+func UpdateChannelBalanceSettings(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	channel, err := model.GetChannelById(id, true)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	request := channelBalanceSettingsRequest{}
+	if err := c.ShouldBindJSON(&request); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if request.Mode != nil && *request.Mode != "auto" && *request.Mode != "manual" {
+		common.ApiError(c, errors.New("invalid balance mode"))
+		return
+	}
+	token, username, password, credentialErr := channel.GetBalanceCredentialsWithError()
+	if credentialErr != nil {
+		// Permit an explicit full secret replacement so an operator can recover
+		// after rotating CRYPTO_SECRET. Partial updates must fail closed because
+		// they cannot safely preserve the unreadable value.
+		if request.AccessToken == nil || request.Password == nil {
+			common.ApiError(c, fmt.Errorf("无法读取已保存的余额凭据，请检查 CRYPTO_SECRET 后重新录入完整凭据: %w", credentialErr))
+			return
+		}
+		token, password = "", ""
+	}
+	if request.AccessToken != nil {
+		token = strings.TrimSpace(*request.AccessToken)
+	}
+	if request.Username != nil {
+		username = strings.TrimSpace(*request.Username)
+	}
+	if request.Password != nil {
+		password = *request.Password
+	}
+	if err := channel.SetBalanceCredentials(token, username, password); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	updates := map[string]any{"balance_access_token": channel.BalanceAccessToken, "balance_username": channel.BalanceUsername, "balance_password": channel.BalancePassword}
+	if request.Mode != nil {
+		updates["balance_mode"] = *request.Mode
+	}
+	if request.Mode != nil {
+		channel.BalanceMode = *request.Mode
+	}
+	channel.NormalizeBalanceSettings()
+	if err := model.DB.Model(&model.Channel{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	model.InitChannelCache()
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": gin.H{"access_token_configured": channel.BalanceAccessToken != "", "login_configured": username != "" && password != "", "mode": channel.BalanceMode}})
+}
+
+type manualChannelBalanceRequest struct {
+	Balance float64 `json:"balance"`
+	Mode    string  `json:"mode"`
+}
+
+func SetChannelBalance(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	request := manualChannelBalanceRequest{}
+	if err := c.ShouldBindJSON(&request); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if math.IsNaN(request.Balance) || math.IsInf(request.Balance, 0) || request.Balance < 0 || request.Balance > 1e12 {
+		common.ApiError(c, errors.New("balance must be between 0 and 1000000000000"))
+		return
+	}
+	mode := request.Mode
+	if mode == "" {
+		mode = "manual"
+	}
+	if mode != "manual" && mode != "auto" {
+		common.ApiError(c, errors.New("invalid balance mode"))
+		return
+	}
+	updates := map[string]any{"balance": request.Balance, "balance_updated_time": common.GetTimestamp(), "balance_mode": mode}
+	if err := model.DB.Model(&model.Channel{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	model.InitChannelCache()
+	c.JSON(http.StatusOK, gin.H{"success": true, "balance": request.Balance, "mode": mode})
+}
+
+type channelBalanceSummary struct {
+	Total              int `json:"total"`
+	Updated            int `json:"updated"`
+	Failed             int `json:"failed"`
+	SkippedDisabled    int `json:"skipped_disabled"`
+	SkippedManual      int `json:"skipped_manual"`
+	SkippedMultiKey    int `json:"skipped_multi_key"`
+	SkippedUnsupported int `json:"skipped_unsupported"`
+}
+
+func updateAllChannelsBalance(ctx context.Context, includeDisabled bool, report func(processed, total int)) (channelBalanceSummary, error) {
+	summary := channelBalanceSummary{}
 	channels, err := model.GetAllChannels(0, 0, true, false)
 	if err != nil {
-		return err
+		return summary, err
 	}
+	summary.Total = len(channels)
+	processed := 0
 	for _, channel := range channels {
-		if channel.Status != common.ChannelStatusEnabled {
+		if err := ctx.Err(); err != nil {
+			return summary, err
+		}
+		if !includeDisabled && channel.Status != common.ChannelStatusEnabled {
+			summary.SkippedDisabled++
+			processed++
+			if report != nil {
+				report(processed, summary.Total)
+			}
 			continue
 		}
 		if channel.ChannelInfo.IsMultiKey {
-			continue // skip multi-key channels
+			summary.SkippedMultiKey++
+			processed++
+			if report != nil {
+				report(processed, summary.Total)
+			}
+			continue
+		}
+		channel.NormalizeBalanceSettings()
+		if channel.BalanceMode == "manual" {
+			summary.SkippedManual++
+			processed++
+			if report != nil {
+				report(processed, summary.Total)
+			}
+			continue
+		}
+		if !supportsSiteBalance(channel) {
+			summary.SkippedUnsupported++
+			processed++
+			if report != nil {
+				report(processed, summary.Total)
+			}
+			continue
 		}
 		// TODO: support Azure
 		//if channel.Type != common.ChannelTypeOpenAI && channel.Type != common.ChannelTypeCustom {
 		//	continue
 		//}
-		result, err := updateChannelBalance(channel)
+		result, err := updateChannelSiteBalance(channel)
 		if err != nil {
-			continue
+			summary.Failed++
+			common.SysLog(fmt.Sprintf("channel balance refresh failed: id=%d name=%q: %v", channel.Id, channel.Name, err))
 		} else if result.RawResponse == "" {
+			summary.Updated++
 			// err is nil & balance <= 0 means quota is used up
-			if result.Balance <= 0 {
+			isPlatformChannel := channel.Type == constant.ChannelTypeNewAPI || channel.Type == constant.ChannelTypeSub2API ||
+				(channel.SiteType != nil && (strings.EqualFold(*channel.SiteType, "newapi") || strings.EqualFold(*channel.SiteType, "sub2api")))
+			if result.Balance <= 0 && !isPlatformChannel && channel.Status == common.ChannelStatusEnabled {
 				service.DisableChannel(*types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, "", channel.GetAutoBan()), "余额不足")
 			}
+		} else {
+			summary.Failed++
+		}
+		processed++
+		if report != nil {
+			report(processed, summary.Total)
 		}
 		time.Sleep(common.RequestInterval)
 	}
-	return nil
+	return summary, nil
 }
 
 func UpdateAllChannelsBalance(c *gin.Context) {
-	// TODO: make it async
-	err := updateAllChannelsBalance()
+	task, created, err := service.EnqueueSystemTask(model.SystemTaskTypeChannelBalance, channelBalanceTaskPayload{IncludeDisabled: true})
 	if err != nil {
 		common.ApiError(c, err)
+		return
+	}
+	if !created {
+		c.JSON(http.StatusConflict, gin.H{
+			"success": false,
+			"message": "已有渠道余额更新任务正在运行或等待中",
+			"data":    gin.H{"task_id": task.TaskID, "status": task.Status, "type": task.Type},
+		})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
+		"data":    gin.H{"task_id": task.TaskID, "status": task.Status},
 	})
-	return
-}
-
-func AutomaticallyUpdateChannels(frequency int) {
-	for {
-		time.Sleep(time.Duration(frequency) * time.Minute)
-		common.SysLog("updating all channels")
-		_ = updateAllChannelsBalance()
-		common.SysLog("channels update done")
-	}
 }

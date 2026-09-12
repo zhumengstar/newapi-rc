@@ -76,7 +76,7 @@ const createRoutingReliabilitySchema = (
 ) =>
   z
     .object({
-      RetryTimes: z.coerce.number().min(0).max(10),
+      RetryTimes: z.coerce.number().int().min(0).max(2),
       ChannelDisableThreshold: numericString,
       AutomaticDisableChannelEnabled: z.boolean(),
       AutomaticEnableChannelEnabled: z.boolean(),

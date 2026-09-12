@@ -1,0 +1,18 @@
+[Unit]
+Description=NewAPI safe request metrics observer
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/newapi-request-observer
+Restart=always
+RestartSec=3
+User=root
+Group=root
+Nice=10
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

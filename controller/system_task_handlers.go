@@ -3,6 +3,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -22,6 +24,169 @@ func RegisterScheduledSystemTasks() {
 	service.RegisterSystemTaskHandler(modelUpdateHandler{})
 	service.RegisterSystemTaskHandler(midjourneyPollHandler{})
 	service.RegisterSystemTaskHandler(asyncTaskPollHandler{})
+	service.RegisterSystemTaskHandler(adaptiveRoutingHandler{})
+	service.RegisterSystemTaskHandler(channelBalanceHandler{})
+	service.RegisterSystemTaskHandler(channelErrorGuardHandler{})
+	service.RegisterSystemTaskHandler(channelRecoveryHandler{})
+	service.RegisterSystemTaskHandler(channelHealthHandler{})
+	service.RegisterSystemTaskHandler(priorityNormalizeHandler{})
+}
+
+// channelErrorGuardHandler evaluates recent deduplicated upstream errors and
+// applies the configured automatic-disable policy. It is dormant when the
+// global automatic-disable switch is off, preserving the existing safety
+// control for installations that only want observation.
+type channelErrorGuardHandler struct{}
+
+func (channelErrorGuardHandler) Type() string { return model.SystemTaskTypeChannelErrorGuard }
+func (channelErrorGuardHandler) Enabled() bool {
+	return common.AutomaticDisableChannelEnabled && common.GetEnvOrDefaultBool("CHANNEL_ERROR_GUARD_ENABLED", true)
+}
+func (channelErrorGuardHandler) Interval() time.Duration {
+	seconds := common.GetEnvOrDefault("CHANNEL_ERROR_GUARD_INTERVAL_SECONDS", 10)
+	if seconds < 1 {
+		seconds = 10
+	}
+	return time.Duration(seconds) * time.Second
+}
+func (channelErrorGuardHandler) NewPayload() any { return nil }
+func (channelErrorGuardHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	summary, err := service.RunChannelErrorGuardOnce(ctx)
+	if err != nil {
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, summary, err)
+		return
+	}
+	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
+}
+
+type channelBalanceHandler struct{}
+
+type channelBalanceTaskPayload struct {
+	IncludeDisabled bool `json:"include_disabled,omitempty"`
+}
+
+func (channelBalanceHandler) Type() string { return model.SystemTaskTypeChannelBalance }
+func (channelBalanceHandler) Enabled() bool {
+	return common.GetEnvOrDefaultBool("CHANNEL_BALANCE_REFRESH_ENABLED", true)
+}
+func (channelBalanceHandler) Interval() time.Duration {
+	minutes := 60
+	if raw := os.Getenv("CHANNEL_BALANCE_REFRESH_INTERVAL_MINUTES"); raw != "" {
+		if value, err := strconv.Atoi(raw); err == nil && value > 0 {
+			minutes = value
+		}
+	} else if raw := os.Getenv("CHANNEL_UPDATE_FREQUENCY"); raw != "" {
+		if value, err := strconv.Atoi(raw); err == nil && value > 0 {
+			minutes = value
+		}
+	}
+	return time.Duration(minutes) * time.Minute
+}
+func (channelBalanceHandler) NewPayload() any { return nil }
+func (channelBalanceHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	payload := channelBalanceTaskPayload{}
+	if err := task.DecodePayload(&payload); err != nil {
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, nil, err)
+		return
+	}
+	if err := ctx.Err(); err != nil {
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, nil, err)
+		return
+	}
+	summary, err := updateAllChannelsBalance(ctx, payload.IncludeDisabled, service.NewSystemTaskProgressReporter(task, runnerID))
+	if err != nil {
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, summary, err)
+		return
+	}
+	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
+}
+
+// adaptiveRoutingHandler adjusts only ability weights for channels that opt in
+// through channel management or a configured legacy controller group. Native
+// channel testing remains the owner of status changes and recovery.
+type adaptiveRoutingHandler struct{}
+
+func (adaptiveRoutingHandler) Type() string { return model.SystemTaskTypeAdaptiveRouting }
+
+func (adaptiveRoutingHandler) Enabled() bool {
+	return service.HasAdaptiveRoutingChannels()
+}
+
+func (adaptiveRoutingHandler) Interval() time.Duration { return time.Minute }
+
+func (adaptiveRoutingHandler) NewPayload() any { return nil }
+
+func (adaptiveRoutingHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	summary, err := service.RunAdaptiveRoutingOnce(ctx)
+	if err != nil {
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, summary, err)
+		return
+	}
+	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
+}
+
+// channelRecoveryHandler replaces the legacy recovery timers. It deliberately
+// runs the existing passive channel test path, which skips manual disables and
+// only enables channels after a successful provider-specific test.
+type channelRecoveryHandler struct{}
+
+func (channelRecoveryHandler) Type() string  { return model.SystemTaskTypeChannelRecovery }
+func (channelRecoveryHandler) Enabled() bool { return service.ChannelRecoveryEnabled() }
+func (channelRecoveryHandler) Interval() time.Duration {
+	return time.Duration(service.ChannelRecoveryIntervalSeconds()) * time.Second
+}
+func (channelRecoveryHandler) NewPayload() any { return nil }
+func (channelRecoveryHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	recovery, err := service.RunChannelRecoveryOnce(ctx, func(runCtx context.Context) (int, int, int, error) {
+		testSummary, runErr := runChannelTestTask(runCtx, operation_setting.ChannelTestModePassiveRecovery, false, service.NewSystemTaskProgressReporter(task, runnerID))
+		return testSummary.Tested, testSummary.Enabled, testSummary.PendingRecovery, runErr
+	})
+	status := model.SystemTaskStatusSucceeded
+	if err != nil {
+		status = model.SystemTaskStatusFailed
+	}
+	finishSystemTaskHandler(task, runnerID, status, recovery, err)
+}
+
+// channelHealthHandler is the proactive counterpart to error protection. It
+// exercises enabled and auto-disabled auto-ban channels through the normal
+// provider test adapters, allowing failed channels to be quarantined and
+// healthy channels to recover when automatic enablement is enabled.
+type channelHealthHandler struct{}
+
+func (channelHealthHandler) Type() string  { return model.SystemTaskTypeChannelHealth }
+func (channelHealthHandler) Enabled() bool { return service.ChannelHealthCheckEnabled() }
+func (channelHealthHandler) Interval() time.Duration {
+	return time.Duration(service.ChannelHealthCheckIntervalSeconds()) * time.Second
+}
+func (channelHealthHandler) NewPayload() any { return nil }
+func (channelHealthHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	summary, err := runChannelTestTask(ctx, operation_setting.ChannelTestModeAutoBanOnly, false, service.NewSystemTaskProgressReporter(task, runnerID))
+	status := model.SystemTaskStatusSucceeded
+	if err != nil {
+		status = model.SystemTaskStatusFailed
+	}
+	finishSystemTaskHandler(task, runnerID, status, summary, err)
+}
+
+// priorityNormalizeHandler replaces the one-shot priority-normalizer script
+// when explicitly enabled. It is disabled by default because priority is an
+// operational setting and should not be changed implicitly after deployment.
+type priorityNormalizeHandler struct{}
+
+func (priorityNormalizeHandler) Type() string  { return model.SystemTaskTypePriorityNormalize }
+func (priorityNormalizeHandler) Enabled() bool { return service.PriorityNormalizerEnabled() }
+func (priorityNormalizeHandler) Interval() time.Duration {
+	return time.Duration(service.PriorityNormalizerIntervalSeconds()) * time.Second
+}
+func (priorityNormalizeHandler) NewPayload() any { return nil }
+func (priorityNormalizeHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	summary, err := service.RunPriorityNormalizerOnce(ctx)
+	status := model.SystemTaskStatusSucceeded
+	if err != nil {
+		status = model.SystemTaskStatusFailed
+	}
+	finishSystemTaskHandler(task, runnerID, status, summary, err)
 }
 
 // channelTestHandler runs the scheduled "test all channels" job. Enablement and
