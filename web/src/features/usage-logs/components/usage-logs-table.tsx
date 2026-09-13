@@ -38,12 +38,16 @@ import {
 } from '../constants'
 import { useColumnsByCategory } from '../lib/columns'
 import { parseLogOther } from '../lib/format'
-import { fetchLogsByCategory } from '../lib/utils'
+import { fetchLogsByCategory, getDefaultTimeRange } from '../lib/utils'
 import type { LogCategory } from '../types'
 import { CommonLogsFilterBar } from './common-logs-filter-bar'
 import { TaskLogsFilterBar } from './task-logs-filter-bar'
 import { UsageLogsMobileList } from './usage-logs-mobile-card'
-import { useLogsViewScope, type LogsViewAccess } from './usage-logs-provider'
+import {
+  useLogsViewScope,
+  useUsageLogsContext,
+  type LogsViewAccess,
+} from './usage-logs-provider'
 
 const route = getRouteApi('/_authenticated/usage-logs/$section')
 
@@ -125,6 +129,8 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
     ],
   })
 
+  const { autoRefresh, refreshInterval, refreshTrigger } = useUsageLogsContext()
+
   const { data, isLoading, isFetching } = useQuery({
     queryKey: [
       'logs',
@@ -134,15 +140,31 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
       pagination.pageSize,
       columnFilters,
       searchParams,
+      refreshTrigger,
       t,
     ],
     queryFn: async () => {
+      let effectiveSearchParams = searchParams
+      if (autoRefresh && pagination.pageIndex === 0) {
+        const nowMs = Date.now()
+        const endParam = searchParams.endTime ? Number(searchParams.endTime) : 0
+        const isHistorical = endParam > 0 && endParam < nowMs - 60 * 1000
+        if (!isHistorical) {
+          const defaultRange = getDefaultTimeRange()
+          effectiveSearchParams = {
+            ...searchParams,
+            startTime: searchParams.startTime ?? defaultRange.start.getTime(),
+            endTime: nowMs + 3600 * 1000,
+          }
+        }
+      }
+
       const result = await fetchLogsByCategory({
         logCategory,
         isAdmin,
         page: pagination.pageIndex + 1,
         pageSize: pagination.pageSize,
-        searchParams,
+        searchParams: effectiveSearchParams,
         columnFilters,
       })
 
@@ -152,6 +174,8 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
 
       return result.data || DEFAULT_LOGS_DATA
     },
+    refetchInterval: autoRefresh ? refreshInterval : false,
+    refetchIntervalInBackground: false,
     placeholderData: (previousData, previousQuery) => {
       if (
         previousQuery?.queryKey[1] === logCategory &&

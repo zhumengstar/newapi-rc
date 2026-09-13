@@ -4,12 +4,15 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"sync"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
 
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type TopUp struct {
@@ -23,6 +26,177 @@ type TopUp struct {
 	CreateTime      int64   `json:"create_time"`
 	CompleteTime    int64   `json:"complete_time"`
 	Status          string  `json:"status"`
+}
+
+type DailyIncomeStat struct {
+	Date  string `json:"date"`
+	Quota int64  `json:"quota"`
+}
+
+type UserConsumptionStats struct {
+	Daily        []DailyIncomeStat `json:"daily"`
+	TodayQuota   int64             `json:"today_quota"`
+	TotalQuota   int64             `json:"total_quota"`
+	BalanceQuota int64             `json:"balance_quota"`
+}
+
+type UserConsumptionDailyStat struct {
+	Date      string `gorm:"type:varchar(10);primaryKey"`
+	Quota     int64  `gorm:"not null;default:0"`
+	UpdatedAt int64  `gorm:"autoUpdateTime"`
+}
+
+func (UserConsumptionDailyStat) TableName() string {
+	return "user_consumption_daily_stats"
+}
+
+var (
+	userConsumptionStatsCacheLock sync.RWMutex
+	cachedUserConsumptionStats     *UserConsumptionStats
+	cachedUserConsumptionStatsAt   time.Time
+)
+
+// GetRecentDailyIncomeStats returns consumed quota for non-admin users.
+func GetRecentDailyIncomeStats(days int) ([]DailyIncomeStat, error) {
+	stats, err := GetUserConsumptionStats(days)
+	if err != nil {
+		return nil, err
+	}
+	return stats.Daily, nil
+}
+
+// GetUserConsumptionStats returns recent and all-time consumed quota for non-admin users.
+func GetUserConsumptionStats(days int) (*UserConsumptionStats, error) {
+	if days <= 0 {
+		return &UserConsumptionStats{Daily: []DailyIncomeStat{}}, nil
+	}
+
+	userConsumptionStatsCacheLock.RLock()
+	if cachedUserConsumptionStats != nil && time.Since(cachedUserConsumptionStatsAt) < 30*time.Second {
+		stats := cachedUserConsumptionStats
+		userConsumptionStatsCacheLock.RUnlock()
+		return stats, nil
+	}
+	userConsumptionStatsCacheLock.RUnlock()
+
+	location := time.FixedZone("Asia/Shanghai", 8*60*60)
+	now := time.Now().In(location)
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	start := today.AddDate(0, 0, 1-days)
+
+	dateExpr := "DATE_FORMAT(FROM_UNIXTIME(logs.created_at), '%Y-%m-%d')"
+	switch {
+	case common.UsingLogDatabase(common.DatabaseTypePostgreSQL):
+		dateExpr = "TO_CHAR(TO_TIMESTAMP(logs.created_at) AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD')"
+	case common.UsingLogDatabase(common.DatabaseTypeSQLite):
+		dateExpr = "strftime('%Y-%m-%d', logs.created_at, 'unixepoch', '+8 hours')"
+	}
+
+	var adminIDs []int
+	if err := DB.Unscoped().Model(&User{}).
+		Where("role >= ?", common.RoleAdminUser).
+		Pluck("id", &adminIDs).Error; err != nil {
+		return nil, err
+	}
+
+	quotas := make(map[string]int64, days)
+	var persisted []UserConsumptionDailyStat
+	if err := DB.Where("date >= ? AND date < ?", start.Format("2006-01-02"), today.Format("2006-01-02")).
+		Find(&persisted).Error; err != nil {
+		return nil, err
+	}
+	for _, row := range persisted {
+		quotas[row.Date] = row.Quota
+	}
+
+	missingDays := make([]time.Time, 0, days-1)
+	for day := start; day.Before(today); day = day.AddDate(0, 0, 1) {
+		if _, ok := quotas[day.Format("2006-01-02")]; !ok {
+			missingDays = append(missingDays, day)
+		}
+	}
+	if len(missingDays) > 0 {
+		missingStart := missingDays[0]
+		rows, err := aggregateUserConsumptionByDay(adminIDs, dateExpr, missingStart.Unix(), today.Unix())
+		if err != nil {
+			return nil, err
+		}
+		aggregated := make(map[string]int64, len(rows))
+		for _, row := range rows {
+			aggregated[row.Date] = row.Quota
+		}
+		toPersist := make([]UserConsumptionDailyStat, 0, len(missingDays))
+		for _, day := range missingDays {
+			date := day.Format("2006-01-02")
+			quota := aggregated[date]
+			quotas[date] = quota
+			toPersist = append(toPersist, UserConsumptionDailyStat{Date: date, Quota: quota})
+		}
+		if err := DB.Clauses(clause.OnConflict{DoNothing: true}).Create(&toPersist).Error; err != nil {
+			return nil, err
+		}
+	}
+
+	todayRows, err := aggregateUserConsumptionByDay(adminIDs, dateExpr, today.Unix(), today.AddDate(0, 0, 1).Unix())
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range todayRows {
+		quotas[row.Date] = row.Quota
+	}
+
+	stats := make([]DailyIncomeStat, 0, days)
+	for day := start; day.Before(today.AddDate(0, 0, 1)); day = day.AddDate(0, 0, 1) {
+		date := day.Format("2006-01-02")
+		stats = append(stats, DailyIncomeStat{Date: date, Quota: quotas[date]})
+	}
+
+	var totalQuota int64
+	if err := DB.Unscoped().Model(&User{}).
+		Select("COALESCE(SUM(used_quota), 0)").
+		Where("role < ?", common.RoleAdminUser).
+		Scan(&totalQuota).Error; err != nil {
+		return nil, err
+	}
+	var balanceQuota int64
+	if err := DB.Model(&User{}).
+		Select("COALESCE(SUM(quota), 0)").
+		Where("role < ? AND status = ?", common.RoleAdminUser, common.UserStatusEnabled).
+		Scan(&balanceQuota).Error; err != nil {
+		return nil, err
+	}
+
+	res := &UserConsumptionStats{
+		Daily:        stats,
+		TodayQuota:   quotas[today.Format("2006-01-02")],
+		TotalQuota:   totalQuota,
+		BalanceQuota: balanceQuota,
+	}
+
+	userConsumptionStatsCacheLock.Lock()
+	cachedUserConsumptionStats = res
+	cachedUserConsumptionStatsAt = time.Now()
+	userConsumptionStatsCacheLock.Unlock()
+
+	return res, nil
+}
+
+func aggregateUserConsumptionByDay(adminIDs []int, dateExpr string, startUnix int64, endUnix int64) ([]DailyIncomeStat, error) {
+	rows := make([]DailyIncomeStat, 0)
+	var quotaDB *gorm.DB = LOG_DB
+	if quotaDB == nil {
+		quotaDB = DB
+	}
+	query := quotaDB.Table("logs").
+		Select(dateExpr + " AS date, COALESCE(SUM(logs.quota), 0) AS quota").
+		Where("logs.type = ? AND logs.created_at >= ? AND logs.created_at < ?", LogTypeConsume, startUnix, endUnix)
+	if len(adminIDs) > 0 {
+		query = query.Where("logs.user_id NOT IN ?", adminIDs)
+	}
+	if err := query.Group(dateExpr).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 const (

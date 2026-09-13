@@ -2,12 +2,20 @@ package controller
 
 import (
 	"net/http"
+	"os"
+	"regexp"
 	"strconv"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
 
 	"github.com/gin-gonic/gin"
+)
+
+var (
+	generatedImageDatePattern     = regexp.MustCompile(`^\d{8}$`)
+	generatedImageFilenamePattern = regexp.MustCompile(`^[0-9a-zA-Z_\-\.]+\.(jpg|jpeg|png|webp|gif|bin)$`)
 )
 
 func GetAllLogs(c *gin.Context) {
@@ -32,6 +40,7 @@ func GetAllLogs(c *gin.Context) {
 	} else {
 		model.FormatRootLogs(logs)
 	}
+	stripRequestBodyFromLogs(c, logs)
 	pageInfo.SetTotal(int(total))
 	pageInfo.SetItems(logs)
 	common.ApiSuccess(c, pageInfo)
@@ -54,10 +63,31 @@ func GetUserLogs(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	stripRequestBodyFromLogs(c, logs)
 	pageInfo.SetTotal(int(total))
 	pageInfo.SetItems(logs)
 	common.ApiSuccess(c, pageInfo)
 	return
+}
+
+func stripRequestBodyFromLogs(c *gin.Context, logs []*model.Log) {
+	if c.GetInt("role") >= common.RoleRootUser {
+		return
+	}
+	for _, log := range logs {
+		if log == nil || log.Other == "" {
+			continue
+		}
+		var other map[string]interface{}
+		if err := common.UnmarshalJsonStr(log.Other, &other); err != nil {
+			continue
+		}
+		if _, ok := other["request_body"]; !ok {
+			continue
+		}
+		delete(other, "request_body")
+		log.Other = common.MapToJsonStr(other)
+	}
 }
 
 // Deprecated: SearchAllLogs 已废弃，前端未使用该接口。
@@ -154,3 +184,48 @@ func GetLogsSelfStat(c *gin.Context) {
 	})
 	return
 }
+
+func GetCurrentMinuteIncome(c *gin.Context) {
+	income, err := model.GetCachedRecentIncome()
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, gin.H{
+		"quota":        income.MinuteQuota,
+		"minute_quota": income.MinuteQuota,
+		"hour_quota":   income.HourQuota,
+	})
+}
+
+func GetGeneratedImageAsset(c *gin.Context) {
+	date := c.Param("date")
+	filename := c.Param("filename")
+	if !generatedImageDatePattern.MatchString(date) || !generatedImageFilenamePattern.MatchString(filename) {
+		c.Status(http.StatusNotFound)
+		return
+	}
+
+	userId := c.GetInt("id")
+	role := c.GetInt("role")
+	if userId <= 0 {
+		c.Status(http.StatusUnauthorized)
+		return
+	}
+
+	if !model.CanAccessGeneratedImageAsset(userId, role, date, filename) {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	path := service.GeneratedImageAssetFilePath(date, filename)
+	if _, err := os.Stat(path); err != nil {
+		c.Status(http.StatusGone)
+		return
+	}
+	if c.Query("download") == "1" || c.Query("download") == "true" {
+		c.FileAttachment(path, filename)
+		return
+	}
+	c.File(path)
+}
+

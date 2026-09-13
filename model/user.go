@@ -4,8 +4,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
@@ -20,12 +23,14 @@ import (
 const UserNameMaxLength = 20
 
 var userSortColumns = map[string]string{
-	"id":            "id",
-	"username":      "username",
-	"quota":         "quota",
-	"group":         "group",
-	"created_at":    "created_at",
-	"last_login_at": "last_login_at",
+	"id":                   "id",
+	"username":             "username",
+	"quota":                "quota",
+	"group":                "group",
+	"created_at":           "created_at",
+	"last_login_at":        "last_login_at",
+	"total_consumed_quota": "used_quota",
+	"today_consumed_quota": "today_consumed_quota",
 }
 
 type UserSortOptions struct {
@@ -51,7 +56,7 @@ func NewUserSortOptions(sortBy string, sortOrder string) UserSortOptions {
 
 func (options UserSortOptions) Apply(query *gorm.DB) *gorm.DB {
 	columnName, ok := userSortColumns[options.SortBy]
-	if !ok {
+	if !ok || options.SortBy == "today_consumed_quota" {
 		columnName = "id"
 	}
 	q := query.Order(clause.OrderByColumn{
@@ -111,8 +116,11 @@ type User struct {
 	CreatedAt            int64                      `json:"created_at" gorm:"autoCreateTime;column:created_at"`
 	LastLoginAt          int64                      `json:"last_login_at" gorm:"default:0;column:last_login_at"`
 	AuthVersion          int64                      `json:"-" gorm:"type:bigint;not null;default:1;column:auth_version"`
+	RegisterIP           string                     `json:"register_ip,omitempty" gorm:"column:register_ip;type:varchar(64);index"`
 	AdminPermissions     map[string]map[string]bool `json:"admin_permissions,omitempty" gorm:"-:all"`
 	EffectiveGroupRatios map[string]float64         `json:"effective_group_ratios,omitempty" gorm:"-:all"`
+	TodayConsumedQuota   int64                      `json:"today_consumed_quota" gorm:"-:all"`
+	TotalConsumedQuota   int64                      `json:"total_consumed_quota" gorm:"-:all"`
 }
 
 func (user *User) ToBaseUser() *UserBase {
@@ -415,7 +423,243 @@ func GetMaxUserId() int {
 	return user.Id
 }
 
+type userTodayQuotaCacheEntry struct {
+	lastUpdate    time.Time
+	dayStart      int64
+	quotaMap      map[int]int64
+	sortedUserIDs []int
+}
+
+var (
+	userTodayQuotaCacheLock sync.RWMutex
+	userTodayQuotaCache     userTodayQuotaCacheEntry
+)
+
+func shanghaiTodayStartUnix() int64 {
+	location := time.FixedZone("Asia/Shanghai", 8*60*60)
+	now := time.Now().In(location)
+	return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, location).Unix()
+}
+
+func getTodayUserConsumptionMap() (map[int]int64, []int, error) {
+	todayStart := shanghaiTodayStartUnix()
+	userTodayQuotaCacheLock.RLock()
+	if time.Since(userTodayQuotaCache.lastUpdate) < 15*time.Second && userTodayQuotaCache.dayStart == todayStart && userTodayQuotaCache.quotaMap != nil {
+		m := userTodayQuotaCache.quotaMap
+		ids := userTodayQuotaCache.sortedUserIDs
+		userTodayQuotaCacheLock.RUnlock()
+		return m, ids, nil
+	}
+	userTodayQuotaCacheLock.RUnlock()
+
+	userTodayQuotaCacheLock.Lock()
+	defer userTodayQuotaCacheLock.Unlock()
+
+	if time.Since(userTodayQuotaCache.lastUpdate) < 15*time.Second && userTodayQuotaCache.dayStart == todayStart && userTodayQuotaCache.quotaMap != nil {
+		return userTodayQuotaCache.quotaMap, userTodayQuotaCache.sortedUserIDs, nil
+	}
+
+	var quotaDB *gorm.DB = LOG_DB
+	if quotaDB == nil {
+		quotaDB = DB
+	}
+
+	type userQuotaRow struct {
+		UserID int   `gorm:"column:user_id"`
+		Quota  int64 `gorm:"column:today_quota"`
+	}
+	var rows []userQuotaRow
+	err := quotaDB.Table("logs").
+		Select("user_id, COALESCE(SUM(quota), 0) AS today_quota").
+		Where("type = ? AND created_at >= ?", LogTypeConsume, todayStart).
+		Group("user_id").
+		Having("SUM(quota) > 0").
+		Order("today_quota DESC").
+		Scan(&rows).Error
+	if err != nil {
+		return nil, nil, err
+	}
+
+	quotaMap := make(map[int]int64, len(rows))
+	sortedIDs := make([]int, 0, len(rows))
+	for _, row := range rows {
+		quotaMap[row.UserID] = row.Quota
+		sortedIDs = append(sortedIDs, row.UserID)
+	}
+
+	userTodayQuotaCache = userTodayQuotaCacheEntry{
+		lastUpdate:    time.Now(),
+		dayStart:      todayStart,
+		quotaMap:      quotaMap,
+		sortedUserIDs: sortedIDs,
+	}
+	return quotaMap, sortedIDs, nil
+}
+
+func applyUserConsumedQuota(users []*User) {
+	if len(users) == 0 {
+		return
+	}
+	quotaMap, _, err := getTodayUserConsumptionMap()
+	if err != nil {
+		common.SysError("failed to get today consumption map: " + err.Error())
+	}
+	for _, u := range users {
+		if u != nil {
+			u.TotalConsumedQuota = int64(u.UsedQuota)
+			if quotaMap != nil {
+				u.TodayConsumedQuota = quotaMap[u.Id]
+			}
+		}
+	}
+}
+
+func getAllUsersSortedByToday(db *gorm.DB, startIdx int, num int, sortOrder string, total int64) ([]*User, error) {
+	if total == 0 || startIdx >= int(total) || num <= 0 {
+		return []*User{}, nil
+	}
+
+	_, sortedActiveUserIDs, err := getTodayUserConsumptionMap()
+	if err != nil {
+		return nil, err
+	}
+
+	ascending := strings.EqualFold(sortOrder, "asc")
+	var pageUsers []*User
+
+	if !ascending {
+		// Descending: active users with consumption > 0 come first
+		activeCount := len(sortedActiveUserIDs)
+
+		if startIdx < activeCount {
+			end := startIdx + num
+			if end > activeCount {
+				end = activeCount
+			}
+			activeSlice := sortedActiveUserIDs[startIdx:end]
+			if len(activeSlice) > 0 {
+				var fetched []*User
+				if err := db.Unscoped().Where("id IN ?", activeSlice).Omit("password", "access_token").Find(&fetched).Error; err != nil {
+					return nil, err
+				}
+				fetchedMap := make(map[int]*User, len(fetched))
+				for _, u := range fetched {
+					fetchedMap[u.Id] = u
+				}
+				for _, id := range activeSlice {
+					if u, ok := fetchedMap[id]; ok {
+						pageUsers = append(pageUsers, u)
+					}
+				}
+			}
+
+			needed := num - len(pageUsers)
+			if needed > 0 {
+				var zeroUsers []*User
+				zeroQuery := db.Unscoped().Model(&User{})
+				if activeCount > 0 {
+					zeroQuery = zeroQuery.Where("id NOT IN ?", sortedActiveUserIDs)
+				}
+				if err := zeroQuery.Order("quota desc, id desc").Limit(needed).Omit("password", "access_token").Find(&zeroUsers).Error; err != nil {
+					return nil, err
+				}
+				pageUsers = append(pageUsers, zeroUsers...)
+			}
+		} else {
+			zeroOffset := startIdx - activeCount
+			var zeroUsers []*User
+			zeroQuery := db.Unscoped().Model(&User{})
+			if activeCount > 0 {
+				zeroQuery = zeroQuery.Where("id NOT IN ?", sortedActiveUserIDs)
+			}
+			if err := zeroQuery.Order("quota desc, id desc").Offset(zeroOffset).Limit(num).Omit("password", "access_token").Find(&zeroUsers).Error; err != nil {
+				return nil, err
+			}
+			pageUsers = zeroUsers
+		}
+	} else {
+		// Ascending: users with 0 consumption come first, then active users in reverse order
+		activeCount := len(sortedActiveUserIDs)
+		zeroCount := int(total) - activeCount
+		if zeroCount < 0 {
+			zeroCount = 0
+		}
+
+		if startIdx < zeroCount {
+			zeroQuery := db.Unscoped().Model(&User{})
+			if activeCount > 0 {
+				zeroQuery = zeroQuery.Where("id NOT IN ?", sortedActiveUserIDs)
+			}
+			var zeroUsers []*User
+			if err := zeroQuery.Order("quota asc, id asc").Offset(startIdx).Limit(num).Omit("password", "access_token").Find(&zeroUsers).Error; err != nil {
+				return nil, err
+			}
+			pageUsers = append(pageUsers, zeroUsers...)
+
+			needed := num - len(pageUsers)
+			if needed > 0 && activeCount > 0 {
+				var activeAsc []int
+				for i := activeCount - 1; i >= 0 && len(activeAsc) < needed; i-- {
+					activeAsc = append(activeAsc, sortedActiveUserIDs[i])
+				}
+				if len(activeAsc) > 0 {
+					var fetched []*User
+					if err := db.Unscoped().Where("id IN ?", activeAsc).Omit("password", "access_token").Find(&fetched).Error; err != nil {
+						return nil, err
+					}
+					fetchedMap := make(map[int]*User, len(fetched))
+					for _, u := range fetched {
+						fetchedMap[u.Id] = u
+					}
+					for _, id := range activeAsc {
+						if u, ok := fetchedMap[id]; ok {
+							pageUsers = append(pageUsers, u)
+						}
+					}
+				}
+			}
+		} else {
+			activeOffset := startIdx - zeroCount
+			var activeAsc []int
+			for i := activeCount - 1 - activeOffset; i >= 0 && len(activeAsc) < num; i-- {
+				activeAsc = append(activeAsc, sortedActiveUserIDs[i])
+			}
+			if len(activeAsc) > 0 {
+				var fetched []*User
+				if err := db.Unscoped().Where("id IN ?", activeAsc).Omit("password", "access_token").Find(&fetched).Error; err != nil {
+					return nil, err
+				}
+				fetchedMap := make(map[int]*User, len(fetched))
+				for _, u := range fetched {
+					fetchedMap[u.Id] = u
+				}
+				for _, id := range activeAsc {
+					if u, ok := fetchedMap[id]; ok {
+						pageUsers = append(pageUsers, u)
+					}
+				}
+			}
+		}
+	}
+
+	applyUserConsumedQuota(pageUsers)
+	return pageUsers, nil
+}
+
 func GetAllUsers(pageInfo *common.PageInfo, sortOptions ...UserSortOptions) (users []*User, total int64, err error) {
+	order := resolveUserSortOptions(sortOptions)
+	if order.SortBy == "today_consumed_quota" {
+		err = DB.Unscoped().Model(&User{}).Count(&total).Error
+		if err != nil {
+			return nil, 0, err
+		}
+		users, err = getAllUsersSortedByToday(DB, pageInfo.GetStartIdx(), pageInfo.GetPageSize(), order.SortOrder, total)
+		if err != nil {
+			return nil, 0, err
+		}
+		return users, total, nil
+	}
+
 	// Start transaction
 	tx := DB.Begin()
 	if tx.Error != nil {
@@ -435,12 +679,13 @@ func GetAllUsers(pageInfo *common.PageInfo, sortOptions ...UserSortOptions) (use
 	}
 
 	// Get paginated users within same transaction
-	order := resolveUserSortOptions(sortOptions)
 	err = order.Apply(tx.Unscoped()).Limit(pageInfo.GetPageSize()).Offset(pageInfo.GetStartIdx()).Omit("password", "access_token").Find(&users).Error
 	if err != nil {
 		tx.Rollback()
 		return nil, 0, err
 	}
+
+	applyUserConsumedQuota(users)
 
 	// Commit transaction
 	if err = tx.Commit().Error; err != nil {
@@ -455,19 +700,8 @@ func SearchUsers(keyword string, group string, role *int, status *int, startIdx 
 	var total int64
 	var err error
 
-	// 开始事务
-	tx := DB.Begin()
-	if tx.Error != nil {
-		return nil, 0, tx.Error
-	}
-	defer func() {
-		if r := recover(); r != nil {
-			tx.Rollback()
-		}
-	}()
-
 	// 构建基础查询
-	query := tx.Unscoped().Model(&User{})
+	query := DB.Unscoped().Model(&User{})
 
 	// 构建搜索条件
 	likeCondition := "username LIKE ? OR email LIKE ? OR display_name LIKE ?"
@@ -496,26 +730,88 @@ func SearchUsers(keyword string, group string, role *int, status *int, startIdx 
 		}
 	}
 
+	order := resolveUserSortOptions(sortOptions)
+	if order.SortBy == "today_consumed_quota" {
+		var matchingUserIDs []int
+		if err := query.Pluck("id", &matchingUserIDs).Error; err != nil {
+			return nil, 0, err
+		}
+		total = int64(len(matchingUserIDs))
+		if total == 0 || startIdx >= len(matchingUserIDs) || num <= 0 {
+			return []*User{}, total, nil
+		}
+
+		quotaMap, _, _ := getTodayUserConsumptionMap()
+
+		type idQuota struct {
+			ID    int `gorm:"column:id"`
+			Quota int `gorm:"column:quota"`
+		}
+		var iq []idQuota
+		DB.Unscoped().Model(&User{}).Where("id IN ?", matchingUserIDs).Select("id, quota").Find(&iq)
+		balanceMap := make(map[int]int, len(iq))
+		for _, item := range iq {
+			balanceMap[item.ID] = item.Quota
+		}
+
+		ascending := strings.EqualFold(order.SortOrder, "asc")
+		sort.Slice(matchingUserIDs, func(i, j int) bool {
+			var qI, qJ int64
+			if quotaMap != nil {
+				qI = quotaMap[matchingUserIDs[i]]
+				qJ = quotaMap[matchingUserIDs[j]]
+			}
+			if qI == qJ {
+				if balanceMap[matchingUserIDs[i]] != balanceMap[matchingUserIDs[j]] {
+					return balanceMap[matchingUserIDs[i]] > balanceMap[matchingUserIDs[j]]
+				}
+				return matchingUserIDs[i] > matchingUserIDs[j]
+			}
+			if ascending {
+				return qI < qJ
+			}
+			return qI > qJ
+		})
+
+		endIdx := startIdx + num
+		if endIdx > len(matchingUserIDs) {
+			endIdx = len(matchingUserIDs)
+		}
+		pageIDs := matchingUserIDs[startIdx:endIdx]
+
+		var fetchedUsers []*User
+		if err := DB.Unscoped().Where("id IN ?", pageIDs).Omit("password", "access_token").Find(&fetchedUsers).Error; err != nil {
+			return nil, 0, err
+		}
+
+		userMap := make(map[int]*User, len(fetchedUsers))
+		for _, u := range fetchedUsers {
+			userMap[u.Id] = u
+		}
+		users = make([]*User, 0, len(pageIDs))
+		for _, id := range pageIDs {
+			if u, ok := userMap[id]; ok {
+				users = append(users, u)
+			}
+		}
+
+		applyUserConsumedQuota(users)
+		return users, total, nil
+	}
+
 	// 获取总数
 	err = query.Count(&total).Error
 	if err != nil {
-		tx.Rollback()
 		return nil, 0, err
 	}
 
 	// 获取分页数据
-	order := resolveUserSortOptions(sortOptions)
 	err = order.Apply(query.Omit("password", "access_token")).Limit(num).Offset(startIdx).Find(&users).Error
 	if err != nil {
-		tx.Rollback()
 		return nil, 0, err
 	}
 
-	// 提交事务
-	if err = tx.Commit().Error; err != nil {
-		return nil, 0, err
-	}
-
+	applyUserConsumedQuota(users)
 	return users, total, nil
 }
 
@@ -632,10 +928,18 @@ func (user *User) TransferAffQuotaToQuota(quota int) error {
 	return tx.Commit().Error
 }
 
+var ErrIPRegisterLimitReached = errors.New("同一 IP 最多只允许注册 2 个账号")
+
 func (user *User) prepareForInsert(tx *gorm.DB) error {
 	user.Email = NormalizeEmail(user.Email)
 	if err := ensureEmailAvailableWithTx(tx, user.Email, 0); err != nil {
 		return err
+	}
+	user.RegisterIP = strings.TrimSpace(user.RegisterIP)
+	if user.RegisterIP != "" {
+		if err := ensureRegisterIPAvailableWithTx(tx, user.RegisterIP); err != nil {
+			return err
+		}
 	}
 	if user.Password == "" {
 		return nil
@@ -643,6 +947,52 @@ func (user *User) prepareForInsert(tx *gorm.DB) error {
 	var err error
 	user.Password, err = common.HashAccountPassword(user.Password)
 	return err
+}
+
+func ensureRegisterIPAvailableWithTx(tx *gorm.DB, ip string) error {
+	if common.MaxUsersPerIP <= 0 {
+		return nil
+	}
+	ip = strings.TrimSpace(ip)
+	if ip == "" {
+		return nil
+	}
+	var count int64
+	if err := tx.Unscoped().Model(&User{}).Where("register_ip = ?", ip).Count(&count).Error; err != nil {
+		return err
+	}
+	if count >= int64(common.MaxUsersPerIP) {
+		return ErrIPRegisterLimitReached
+	}
+	return nil
+}
+
+func CountUsersByRegisterIP(ip string) (int64, error) {
+	ip = strings.TrimSpace(ip)
+	if ip == "" {
+		return 0, nil
+	}
+	var count int64
+	err := DB.Unscoped().Model(&User{}).Where("register_ip = ?", ip).Count(&count).Error
+	return count, err
+}
+
+func CheckRegisterIPAvailable(ip string) error {
+	if common.MaxUsersPerIP <= 0 {
+		return nil
+	}
+	ip = strings.TrimSpace(ip)
+	if ip == "" {
+		return nil
+	}
+	count, err := CountUsersByRegisterIP(ip)
+	if err != nil {
+		return err
+	}
+	if count >= int64(common.MaxUsersPerIP) {
+		return ErrIPRegisterLimitReached
+	}
+	return nil
 }
 
 // BindEmailToUser atomically checks email availability and assigns it to the

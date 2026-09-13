@@ -185,3 +185,15 @@ func GetUserGroupRatioWithSetting(userSetting dto.UserSetting, userGroup, group 
 	}
 	return GetUserGroupRatio(userGroup, group)
 }
+
+func GetUserGroupRatioForUser(userId int, userGroup, group string) float64 {
+	if userId > 0 {
+		userSetting, err := model.GetUserSetting(userId, false)
+		if err == nil && userSetting.UserGroupRatios != nil {
+			if ratio, ok := userSetting.UserGroupRatios[group]; ok {
+				return ratio
+			}
+		}
+	}
+	return GetUserGroupRatio(userGroup, group)
+}

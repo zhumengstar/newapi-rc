@@ -17,14 +17,17 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useState } from 'react'
+import { Download } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 import { Dialog } from '@/components/dialog'
+import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Skeleton } from '@/components/ui/skeleton'
 
 interface ImageDialogProps {
   imageUrl: string
+  previewUrl?: string
   taskId?: string
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -32,6 +35,7 @@ interface ImageDialogProps {
 
 export function ImageDialog({
   imageUrl,
+  previewUrl,
   taskId,
   open,
   onOpenChange,
@@ -59,6 +63,22 @@ export function ImageDialog({
     setHasError(true)
   }
 
+  const handleDownload = () => {
+    let downloadUrl = imageUrl
+    if (downloadUrl.startsWith('/generated-images/')) {
+      downloadUrl = `/api/log${downloadUrl}`
+    }
+    const separator = downloadUrl.includes('?') ? '&' : '?'
+    const finalUrl = `${downloadUrl}${separator}download=1`
+    const link = document.createElement('a')
+    link.href = finalUrl
+    link.download = taskId ? `${taskId}.jpg` : 'generated-image.jpg'
+    link.rel = 'noopener noreferrer'
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+  }
+
   return (
     <Dialog
       open={open}
@@ -81,7 +101,7 @@ export function ImageDialog({
 
             {/* Actual Image */}
             <img
-              src={imageUrl}
+              src={previewUrl || imageUrl}
               alt={t('Generated image')}
               className={`max-h-[550px] w-full rounded-lg object-contain ${
                 isLoading || hasError ? 'opacity-0' : 'opacity-100'
@@ -104,8 +124,20 @@ export function ImageDialog({
           {/* Image URL */}
           <div className='bg-muted mt-4 rounded-md p-3'>
             <p className='text-muted-foreground font-mono text-xs break-all'>
-              {imageUrl}
+              {previewUrl || imageUrl}
             </p>
+          </div>
+
+          <div className='mt-3 flex items-center justify-end'>
+            <Button
+              type='button'
+              size='sm'
+              className='gap-1.5'
+              onClick={handleDownload}
+            >
+              <Download className='size-4' />
+              {t('Download Original')}
+            </Button>
           </div>
         </div>
       </ScrollArea>

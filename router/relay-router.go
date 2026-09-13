@@ -15,6 +15,7 @@ func SetRelayRouter(router *gin.Engine) {
 	router.Use(middleware.DecompressRequestMiddleware())
 	router.Use(middleware.BodyStorageCleanup()) // 清理请求体存储
 	router.Use(middleware.StatsMiddleware())
+	router.Static("/generated-images", "/data/generated-images")
 	// https://platform.openai.com/docs/api-reference/introduction
 	modelsRouter := router.Group("/v1/models")
 	modelsRouter.Use(middleware.RouteTag("relay"))
@@ -190,6 +191,31 @@ func SetRelayRouter(router *gin.Engine) {
 		// Gemini API 路径格式: /v1beta/models/{model_name}:{action}
 		relayGeminiRouter.POST("/models/*path", func(c *gin.Context) {
 			controller.Relay(c, types.RelayFormatGemini)
+		})
+	}
+
+	canvasV1Router := router.Group("/canvas/v1")
+	canvasV1Router.Use(middleware.RouteTag("relay"))
+	canvasV1Router.Use(middleware.SystemPerformanceCheck())
+	canvasV1Router.Use(middleware.UserAuth())
+	canvasV1Router.Use(middleware.CanvasTokenNameAuth())
+	canvasV1Router.Use(middleware.TokenAuth())
+	canvasV1Router.Use(middleware.ModelRequestRateLimit())
+	{
+		canvasHTTPRouter := canvasV1Router.Group("")
+		canvasHTTPRouter.Use(middleware.Distribute())
+
+		canvasHTTPRouter.POST("/messages", func(c *gin.Context) {
+			controller.Relay(c, types.RelayFormatClaude)
+		})
+		canvasHTTPRouter.POST("/completions", func(c *gin.Context) {
+			controller.Relay(c, types.RelayFormatOpenAI)
+		})
+		canvasHTTPRouter.POST("/chat/completions", func(c *gin.Context) {
+			controller.Relay(c, types.RelayFormatOpenAI)
+		})
+		canvasHTTPRouter.POST("/responses", func(c *gin.Context) {
+			controller.Relay(c, types.RelayFormatOpenAIResponses)
 		})
 	}
 }

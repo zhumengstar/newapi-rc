@@ -31,7 +31,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import { getCurrencyDisplay } from '@/lib/currency'
+import { getCurrencyDisplay, formatQuotaWithCurrency } from '@/lib/currency'
 import { formatQuota } from '@/lib/format'
 import { useSystemConfigStore } from '@/stores/system-config-store'
 
@@ -189,14 +189,71 @@ export function useUsersColumns(): ColumnDef<User>[] {
       meta: { mobileOrder: 40 },
     },
     {
+      accessorKey: 'today_consumed_quota',
+      header: t('Today Consumed Quota'),
+      cell: ({ row }) => {
+        const val = row.original.today_consumed_quota ?? 0
+        return (
+          <span className='font-mono text-sm tabular-nums'>
+            {formatQuotaWithCurrency(val, {
+              digitsLarge: 2,
+              digitsSmall: 6,
+              abbreviate: false,
+            })}
+          </span>
+        )
+      },
+      enableSorting: true,
+      size: 150,
+    },
+    {
+      accessorKey: 'total_consumed_quota',
+      header: t('Total Consumed Quota'),
+      cell: ({ row }) => {
+        const val =
+          row.original.total_consumed_quota ?? row.original.used_quota ?? 0
+        return (
+          <span className='font-mono text-sm tabular-nums'>
+            {formatQuotaWithCurrency(val, {
+              digitsLarge: 2,
+              digitsSmall: 6,
+              abbreviate: false,
+            })}
+          </span>
+        )
+      },
+      enableSorting: true,
+      size: 150,
+    },
+    {
       accessorKey: 'group',
       header: t('User Group'),
       cell: ({ row }) => {
-        const group = row.getValue('group') as string
+        const rawGroup = (row.getValue('group') as string) || ''
+        const effectiveRatios = row.original.effective_group_ratios
+        const groups = (
+          effectiveRatios && Object.keys(effectiveRatios).length > 0
+            ? Object.keys(effectiveRatios)
+            : rawGroup.split(',')
+        )
+          .map((g) => g.trim())
+          .filter(Boolean)
+          .sort()
+
         return (
-          <BadgeCell>
-            <GroupBadge group={group} className='font-normal' />
-          </BadgeCell>
+          <div className='flex flex-wrap items-center gap-1.5 py-1'>
+            {groups.map((group) => {
+              const ratio = effectiveRatios?.[group]
+              return (
+                <GroupBadge
+                  key={group}
+                  group={group}
+                  ratio={ratio}
+                  className='font-normal text-xs'
+                />
+              )
+            })}
+          </div>
         )
       },
       filterFn: (row, id, value) => {
@@ -204,7 +261,7 @@ export function useUsersColumns(): ColumnDef<User>[] {
         const searchValue = String(value).toLowerCase()
         return group.includes(searchValue)
       },
-      size: 140,
+      size: 180,
       meta: { mobileOrder: 30 },
     },
     {

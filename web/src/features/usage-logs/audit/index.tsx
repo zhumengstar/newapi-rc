@@ -31,9 +31,10 @@ import {
 import { ROLE } from '@/lib/roles'
 import { useAuthStore } from '@/stores/auth-store'
 
+import { UsageLogsProvider } from '../components/usage-logs-provider'
 import { AuditLogViewer } from './components/audit-log-viewer'
 
-export function AuditLogs() {
+function AuditLogsContent() {
   const { t } = useTranslation()
   const user = useAuthStore((state) => state.auth.user)
   const queryClient = useQueryClient()
@@ -122,5 +123,13 @@ export function AuditLogs() {
         </div>
       </SectionPageLayout.Content>
     </SectionPageLayout>
+  )
+}
+
+export function AuditLogs() {
+  return (
+    <UsageLogsProvider>
+      <AuditLogsContent />
+    </UsageLogsProvider>
   )
 }

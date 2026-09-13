@@ -35,6 +35,10 @@ export function resolveLogsViewAccess(
   return role === ROLE.SUPER_ADMIN ? 'root' : 'admin'
 }
 
+export const AUTO_REFRESH_STORAGE_KEY = 'usage-logs:auto-refresh'
+export const REFRESH_INTERVAL_STORAGE_KEY = 'usage-logs:refresh-interval'
+export const DEFAULT_REFRESH_INTERVAL = 5000
+
 interface UsageLogsContextValue {
   selectedUserId: number | null
   setSelectedUserId: (userId: number | null) => void
@@ -48,6 +52,12 @@ interface UsageLogsContextValue {
   setSensitiveVisible: (visible: boolean) => void
   viewScope: LogsViewScope
   setViewScope: (scope: LogsViewScope) => void
+  autoRefresh: boolean
+  setAutoRefresh: (enabled: boolean) => void
+  refreshInterval: number
+  setRefreshInterval: (interval: number) => void
+  refreshTrigger: number
+  triggerRefresh: () => void
 }
 
 const UsageLogsContext = createContext<UsageLogsContextValue | undefined>(
@@ -62,6 +72,51 @@ export function UsageLogsProvider({ children }: { children: ReactNode }) {
   const [affinityDialogOpen, setAffinityDialogOpen] = useState(false)
   const [sensitiveVisible, setSensitiveVisible] = useState(true)
   const [viewScope, setViewScope] = useState<LogsViewScope>('all')
+  const [refreshTrigger, setRefreshTrigger] = useState(0)
+
+  const [autoRefresh, setAutoRefreshState] = useState<boolean>(() => {
+    try {
+      const stored = localStorage.getItem(AUTO_REFRESH_STORAGE_KEY)
+      return stored === 'true'
+    } catch {
+      return false
+    }
+  })
+
+  const [refreshInterval, setRefreshIntervalState] = useState<number>(() => {
+    try {
+      const stored = localStorage.getItem(REFRESH_INTERVAL_STORAGE_KEY)
+      if (stored) {
+        const parsed = Number(stored)
+        if (Number.isFinite(parsed) && parsed >= 1000) return parsed
+      }
+    } catch {
+      /* ignore */
+    }
+    return DEFAULT_REFRESH_INTERVAL
+  })
+
+  const setAutoRefresh = (enabled: boolean) => {
+    setAutoRefreshState(enabled)
+    try {
+      localStorage.setItem(AUTO_REFRESH_STORAGE_KEY, String(enabled))
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const setRefreshInterval = (interval: number) => {
+    setRefreshIntervalState(interval)
+    try {
+      localStorage.setItem(REFRESH_INTERVAL_STORAGE_KEY, String(interval))
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const triggerRefresh = () => {
+    setRefreshTrigger(Date.now())
+  }
 
   return (
     <UsageLogsContext.Provider
@@ -78,6 +133,12 @@ export function UsageLogsProvider({ children }: { children: ReactNode }) {
         setSensitiveVisible,
         viewScope,
         setViewScope,
+        autoRefresh,
+        setAutoRefresh,
+        refreshInterval,
+        setRefreshInterval,
+        refreshTrigger,
+        triggerRefresh,
       }}
     >
       {children}
@@ -91,6 +152,10 @@ export function useUsageLogsContext() {
     throw new Error('useUsageLogsContext must be used within UsageLogsProvider')
   }
   return context
+}
+
+export function useOptionalUsageLogsContext() {
+  return useContext(UsageLogsContext)
 }
 
 /**

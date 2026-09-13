@@ -60,6 +60,9 @@ export const userSchema = z.object({
   last_login_at: z.number().optional(),
   DeletedAt: z.any().nullable().optional(),
   remark: z.string().optional(),
+  today_consumed_quota: z.number().optional(),
+  total_consumed_quota: z.number().optional(),
+  setting: z.string().optional(),
   admin_permissions: z
     .record(z.string(), z.record(z.string(), z.boolean()))
     .optional(),
@@ -86,6 +89,20 @@ export type UserSortBy =
   | 'group'
   | 'created_at'
   | 'last_login_at'
+  | 'today_consumed_quota'
+  | 'total_consumed_quota'
+
+export interface DailyIncomeStat {
+  date: string
+  quota: number
+}
+
+export interface UserConsumptionStats {
+  daily: DailyIncomeStat[]
+  today_quota: number
+  total_quota: number
+  balance_quota: number
+}
 
 export type UserSortOrder = 'asc' | 'desc'
 
@@ -118,6 +135,12 @@ export interface SearchUsersParams {
   sort_order?: UserSortOrder
 }
 
+export interface UserModelPriceRule {
+  group: string
+  models: string[]
+  price: number
+}
+
 export interface UserFormData {
   username: string
   display_name: string
@@ -126,6 +149,7 @@ export interface UserFormData {
   quota?: number // Only used when updating user
   group?: string // Comma-separated groups when updating user
   user_group_ratios?: Record<string, number>
+  user_model_price_rules?: UserModelPriceRule[]
   remark?: string // Only used when updating user
   admin_permissions?: AdminPermissionMatrix
 }

@@ -25,9 +25,9 @@ import { formatLogQuota } from '@/lib/format'
 import { requireServerSuccess } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
 
-import { getLogStats, getUserLogStats } from '../api'
+import { getCurrentMinuteIncome, getLogStats, getUserLogStats } from '../api'
 import { DEFAULT_LOG_STATS } from '../constants'
-import { buildApiParams } from '../lib/utils'
+import { buildApiParams, getDefaultTimeRange } from '../lib/utils'
 import { useLogsViewScope, useUsageLogsContext } from './usage-logs-provider'
 
 const route = getRouteApi('/_authenticated/usage-logs/$section')
@@ -36,9 +36,13 @@ function StatBadge(props: {
   label: string
   value: string | number
   accent: string
+  title?: string
 }) {
   return (
-    <span className='border-border/60 bg-muted/25 inline-flex h-7 items-center gap-2 rounded-md border px-2.5 text-xs shadow-xs'>
+    <span
+      title={props.title}
+      className='border-border/60 bg-muted/25 inline-flex h-7 items-center gap-2 rounded-md border px-2.5 text-xs shadow-xs'
+    >
       <span className={cn('h-3.5 w-0.5 rounded-full', props.accent)} />
       <span className='text-muted-foreground'>{props.label}</span>
       <span className='text-foreground/85 font-mono font-semibold tabular-nums'>
@@ -52,15 +56,31 @@ export function CommonLogsStats() {
   const { t } = useTranslation()
   const { isAdminView: isAdmin } = useLogsViewScope()
   const searchParams = route.useSearch()
-  const { sensitiveVisible } = useUsageLogsContext()
+  const { sensitiveVisible, autoRefresh, refreshInterval, refreshTrigger } =
+    useUsageLogsContext()
 
   const { data: stats, isLoading } = useQuery({
-    queryKey: ['usage-logs-stats', isAdmin, searchParams],
+    queryKey: ['usage-logs-stats', isAdmin, searchParams, refreshTrigger],
     queryFn: async () => {
+      let effectiveSearchParams = searchParams
+      if (autoRefresh) {
+        const nowMs = Date.now()
+        const endParam = searchParams.endTime ? Number(searchParams.endTime) : 0
+        const isHistorical = endParam > 0 && endParam < nowMs - 60 * 1000
+        if (!isHistorical) {
+          const defaultRange = getDefaultTimeRange()
+          effectiveSearchParams = {
+            ...searchParams,
+            startTime: searchParams.startTime ?? defaultRange.start.getTime(),
+            endTime: nowMs + 3600 * 1000,
+          }
+        }
+      }
+
       const params = buildApiParams({
         page: 1,
         pageSize: 1,
-        searchParams,
+        searchParams: effectiveSearchParams,
         columnFilters: [],
         isAdmin,
       })
@@ -73,6 +93,20 @@ export function CommonLogsStats() {
         ? result.data || DEFAULT_LOG_STATS
         : DEFAULT_LOG_STATS
     },
+    refetchInterval: autoRefresh ? refreshInterval : false,
+    refetchIntervalInBackground: false,
+    placeholderData: (previousData) => previousData,
+  })
+
+  const { data: incomeData } = useQuery({
+    queryKey: ['usage-logs-current-minute-income', refreshTrigger],
+    queryFn: async () => {
+      const result = await getCurrentMinuteIncome()
+      return result.success ? result.data : null
+    },
+    enabled: isAdmin,
+    refetchInterval: autoRefresh ? refreshInterval : false,
+    refetchIntervalInBackground: false,
     placeholderData: (previousData) => previousData,
   })
 
@@ -82,6 +116,7 @@ export function CommonLogsStats() {
         <Skeleton className='h-7 w-[150px] rounded-md' />
         <Skeleton className='h-7 w-[100px] rounded-md' />
         <Skeleton className='h-7 w-[120px] rounded-md' />
+        {isAdmin && <Skeleton className='h-7 w-[130px] rounded-md' />}
       </div>
     )
   }
@@ -103,6 +138,22 @@ export function CommonLogsStats() {
         value={stats?.tpm || 0}
         accent='bg-slate-400/70'
       />
+      {isAdmin && (
+        <StatBadge
+          label={t('MPM')}
+          value={
+            sensitiveVisible
+              ? formatLogQuota(incomeData?.minute_quota ?? 0)
+              : '••••'
+          }
+          accent='bg-emerald-500/70'
+          title={
+            incomeData?.hour_quota
+              ? `${t('Current Minute Income')}: ${formatLogQuota(incomeData.minute_quota)} (${t('Last Hour')}: ${formatLogQuota(incomeData.hour_quota)})`
+              : t('Current Minute Income')
+          }
+        />
+      )}
     </div>
   )
 }

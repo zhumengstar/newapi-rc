@@ -427,12 +427,23 @@ function getGroupModelFamilyRank(category: string): number {
   return GROUP_MODEL_CATEGORY_ORDER.length
 }
 
+export function isDefaultGroup(group: string): boolean {
+  const normalized = group.trim().toLowerCase()
+  return normalized === 'default' || normalized === '默认'
+}
+
 export function sortGroupsByModelAndRatio(
   groups: string[],
   groupRatio: Record<string, number>,
   groupModels?: ReadonlyMap<string, readonly string[]>
 ): string[] {
   return [...groups].sort((a, b) => {
+    const isDefaultA = isDefaultGroup(a)
+    const isDefaultB = isDefaultGroup(b)
+    if (isDefaultA !== isDefaultB) {
+      return isDefaultA ? -1 : 1
+    }
+
     const categoryA = getGroupModelCategory(a, groupModels)
     const categoryB = getGroupModelCategory(b, groupModels)
     const familyRankA = getGroupModelFamilyRank(categoryA)

@@ -27,6 +27,7 @@ import {
 } from '@/components/data-table'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { AutoRefreshControl } from './auto-refresh-control'
 import {
   Drawer,
   DrawerContent,
@@ -57,11 +58,13 @@ interface LogsFilterToolbarProps<TData> {
   onReset: () => void
   onSearch: () => void
   className?: string
+  showAutoRefresh?: boolean
 }
 
 interface LogsFilterFieldProps {
   children: ReactNode
   wide?: boolean
+  flex?: boolean
   className?: string
 }
 
@@ -70,7 +73,11 @@ export function LogsFilterField(props: LogsFilterFieldProps) {
     <div
       className={cn(
         'min-w-0 [&_[data-slot=select-trigger]]:w-full [&_[data-slot=select-trigger]]:text-sm [&_[data-slot=select-value]]:leading-5',
-        props.wide && 'sm:col-span-2',
+        props.wide
+          ? 'w-full sm:w-auto sm:min-w-[210px] shrink-0'
+          : props.flex
+            ? 'w-full sm:flex-1'
+            : 'w-full sm:w-auto sm:min-w-[80px] shrink-0',
         props.className
       )}
     >
@@ -117,7 +124,7 @@ export function LogsFilterToolbar<TData>(props: LogsFilterToolbarProps<TData>) {
       onClick={() => setAdvancedOpen((open) => !open)}
       aria-expanded={advancedOpen}
       className={cn(
-        'text-muted-foreground hover:text-foreground gap-1 px-2',
+        'text-muted-foreground hover:text-foreground gap-1 px-2 shrink-0',
         props.hasAdvancedActiveFilters &&
           !advancedOpen &&
           'text-primary hover:text-primary'
@@ -247,27 +254,17 @@ export function LogsFilterToolbar<TData>(props: LogsFilterToolbarProps<TData>) {
         props.className
       )}
     >
-      <div className='flex flex-wrap items-start gap-2'>
-        <div className='grid min-w-0 flex-1 grid-cols-1 gap-2 sm:grid-cols-[repeat(auto-fit,minmax(10rem,1fr))]'>
-          {props.primaryFilters}
-        </div>
-        {advancedToggle && (
-          <div className='flex shrink-0 items-center justify-end'>
-            {advancedToggle}
-          </div>
-        )}
+      <div className='flex w-full flex-wrap items-center gap-2'>
+        {props.primaryFilters}
+        {advancedOpen && props.advancedFilters}
+        {advancedToggle}
       </div>
 
-      {advancedOpen && props.advancedFilters && (
-        <div className='mt-2 grid grid-cols-1 gap-2 sm:grid-cols-[repeat(auto-fit,minmax(10rem,1fr))]'>
-          {props.advancedFilters}
-        </div>
-      )}
-
-      <div className='mt-2 flex flex-wrap items-center gap-2'>
+      <div className='mt-2 flex w-full flex-wrap items-center gap-2'>
         {props.stats}
         <div className='ms-auto flex flex-wrap items-center justify-end gap-1.5 sm:gap-2'>
           {props.actionStart}
+          {props.showAutoRefresh !== false && <AutoRefreshControl />}
           <Button
             type='button'
             variant='outline'

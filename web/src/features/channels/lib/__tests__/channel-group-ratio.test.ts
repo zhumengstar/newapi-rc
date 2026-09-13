@@ -104,4 +104,40 @@ describe('channel group pricing ratios', () => {
       })
     ).toEqual(['GPTPro', 'custom-high', 'custom-low'])
   })
+
+  test('always places default group at the very top regardless of models or ratio', () => {
+    const groups = ['CCMAX', 'gpt-discount', 'default', 'banana']
+    const groupModels = new Map<string, string[]>([
+      ['CCMAX', ['claude-3-7-sonnet']],
+      ['gpt-discount', ['gpt-4.1']],
+      ['default', ['gpt-4.1']],
+      ['banana', ['gemini-2.5-pro']],
+    ])
+    expect(
+      sortGroupsByModelAndRatio(
+        groups,
+        {
+          CCMAX: 0.95,
+          'gpt-discount': 0.09,
+          default: 0.01,
+          banana: 0.15,
+        },
+        groupModels
+      )
+    ).toEqual(['default', 'gpt-discount', 'CCMAX', 'banana'])
+
+    // Also works for '默认' in Chinese
+    expect(
+      sortGroupsByModelAndRatio(
+        ['CCMAX', 'gpt-discount', '默认', 'banana'],
+        {
+          CCMAX: 0.95,
+          'gpt-discount': 0.09,
+          '默认': 0.01,
+          banana: 0.15,
+        },
+        groupModels
+      )
+    ).toEqual(['默认', 'gpt-discount', 'CCMAX', 'banana'])
+  })
 })

@@ -144,7 +144,9 @@ describe('audit log sidebar entry', () => {
     const items =
       result.current.find((group) => group.id === 'general')?.items ?? []
     const usageIndex = items.findIndex((item) => item.title === 'Usage Logs')
-    expect(items[usageIndex + 1]).toMatchObject({
+    const auditIndex = items.findIndex((item) => item.title === 'Audit Logs')
+    expect(auditIndex).toBeGreaterThan(usageIndex)
+    expect(items[auditIndex]).toMatchObject({
       title: 'Audit Logs',
       url: '/usage-logs/audit',
     })

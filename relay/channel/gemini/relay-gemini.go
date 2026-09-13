@@ -490,28 +490,44 @@ func GeminiImageHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.
 	}
 	_ = resp.Body.Close()
 
-	var geminiResponse dto.GeminiImageResponse
-	if jsonErr := common.Unmarshal(responseBody, &geminiResponse); jsonErr != nil {
-		return nil, types.NewOpenAIError(jsonErr, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
+	if resp.StatusCode != http.StatusOK {
+		return nil, types.NewOpenAIError(fmt.Errorf("upstream returned error (status %d): %s", resp.StatusCode, string(responseBody)), types.ErrorCodeBadResponseBody, resp.StatusCode)
 	}
 
-	if len(geminiResponse.Predictions) == 0 {
-		return nil, types.NewOpenAIError(errors.New("no images generated"), types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
-	}
-
-	// convert to openai format response
 	openAIResponse := dto.ImageResponse{
 		Created: common.GetTimestamp(),
-		Data:    make([]dto.ImageData, 0, len(geminiResponse.Predictions)),
+		Data:    make([]dto.ImageData, 0),
 	}
 
-	for _, prediction := range geminiResponse.Predictions {
-		if prediction.RaiFilteredReason != "" {
-			continue // skip filtered image
+	var geminiResponse dto.GeminiImageResponse
+	if err := common.Unmarshal(responseBody, &geminiResponse); err == nil && len(geminiResponse.Predictions) > 0 {
+		for _, prediction := range geminiResponse.Predictions {
+			if prediction.RaiFilteredReason != "" {
+				continue // skip filtered image
+			}
+			openAIResponse.Data = append(openAIResponse.Data, dto.ImageData{
+				B64Json: prediction.BytesBase64Encoded,
+			})
 		}
-		openAIResponse.Data = append(openAIResponse.Data, dto.ImageData{
-			B64Json: prediction.BytesBase64Encoded,
-		})
+	}
+
+	if len(openAIResponse.Data) == 0 {
+		var geminiChatResponse dto.GeminiChatResponse
+		if err := common.Unmarshal(responseBody, &geminiChatResponse); err == nil && len(geminiChatResponse.Candidates) > 0 {
+			for _, candidate := range geminiChatResponse.Candidates {
+				for _, part := range candidate.Content.Parts {
+					if part.InlineData != nil && part.InlineData.Data != "" {
+						openAIResponse.Data = append(openAIResponse.Data, dto.ImageData{
+							B64Json: part.InlineData.Data,
+						})
+					}
+				}
+			}
+		}
+	}
+
+	if len(openAIResponse.Data) == 0 {
+		return nil, types.NewOpenAIError(fmt.Errorf("no images generated: %s", string(responseBody)), types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
 
 	jsonResponse, jsonErr := common.Marshal(openAIResponse)

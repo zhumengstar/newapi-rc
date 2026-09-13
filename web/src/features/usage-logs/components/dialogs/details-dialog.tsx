@@ -35,6 +35,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { useState } from 'react'
 import {
   Copy,
   Check,
@@ -62,8 +63,10 @@ import { BILLING_PRICING_VARS } from '@/features/pricing/lib/billing-expr'
 import { pluginUsageSchema } from '@/features/pricing/lib/plugin-pricing'
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
 import { formatBillingCurrencyFromUSD } from '@/lib/currency'
-import { formatLogQuota, formatTokens, formatUseTime } from '@/lib/format'
+import { formatBytes, formatLogQuota, formatTokens, formatUseTime } from '@/lib/format'
 import { cn } from '@/lib/utils'
+
+import { ImageDialog } from './image-dialog'
 
 import { AuditDetailFields } from '../../audit/components/audit-detail-fields'
 import type { UsageLog } from '../../data/schema'
@@ -364,6 +367,66 @@ function BillingBreakdown(props: {
         value={formatLogQuota(log.quota)}
         mono
       />
+    </DetailSection>
+  )
+}
+
+function GeneratedImagesSection(props: {
+  other: LogOtherData
+  taskId?: string
+}) {
+  const { t } = useTranslation()
+  const [selectedImage, setSelectedImage] = useState<string | null>(null)
+  const images = props.other.generated_images?.filter((image) => image.url)
+
+  if (!images || images.length === 0) return null
+
+  return (
+    <DetailSection label={t('Generated Images')}>
+      <div className='grid grid-cols-2 gap-2 sm:grid-cols-3'>
+        {images.map((image, idx) => (
+          <div
+            key={`${image.url}-${idx}`}
+            role='button'
+            tabIndex={0}
+            className='bg-muted/50 group block cursor-pointer overflow-hidden rounded-md border transition-all hover:border-primary/50'
+            onClick={() => setSelectedImage(image.url)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                setSelectedImage(image.url)
+              }
+            }}
+          >
+            <div className='aspect-video overflow-hidden bg-muted/20'>
+              <img
+                src={image.url}
+                alt={t('Generated image')}
+                className='h-full w-full object-cover transition-transform group-hover:scale-105'
+                loading='lazy'
+              />
+            </div>
+            <div className='space-y-0.5 p-1.5'>
+              <div className='text-foreground truncate text-xs font-medium'>
+                {t('Image')} {idx + 1}
+              </div>
+              <div className='text-muted-foreground flex items-center justify-between text-[10px] font-mono'>
+                <span>{image.mime_type || ''}</span>
+                {image.size ? <span>{formatBytes(image.size)}</span> : null}
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+      {selectedImage && (
+        <ImageDialog
+          imageUrl={selectedImage}
+          taskId={props.taskId}
+          open={!!selectedImage}
+          onOpenChange={(open) => {
+            if (!open) setSelectedImage(null)
+          }}
+        />
+      )}
     </DetailSection>
   )
 }
@@ -1132,6 +1195,10 @@ export function DetailsDialog(props: DetailsDialogProps) {
               mono
             />
           </DetailSection>
+        )}
+
+        {other?.generated_images && (
+          <GeneratedImagesSection other={other} taskId={props.log.request_id} />
         )}
 
         {/* Token breakdown (for consume/error types with token data) */}

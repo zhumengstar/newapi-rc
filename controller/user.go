@@ -6,9 +6,11 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/i18n"
@@ -349,12 +351,22 @@ func Register(c *gin.Context) {
 	}
 	affCode := user.AffCode // this code is the inviter's code, not the user's own code
 	inviterId, _ := model.GetUserIdByAffCode(affCode)
+	clientIP := c.ClientIP()
+	if err := model.CheckRegisterIPAvailable(clientIP); err != nil {
+		if errors.Is(err, model.ErrIPRegisterLimitReached) {
+			common.ApiErrorI18n(c, i18n.MsgUserIPRegisterLimitReached)
+			return
+		}
+		common.ApiError(c, err)
+		return
+	}
 	cleanUser := model.User{
 		Username:    user.Username,
 		Password:    user.Password,
 		DisplayName: user.Username,
 		InviterId:   inviterId,
 		Role:        common.RoleCommonUser, // 明确设置角色为普通用户
+		RegisterIP:  clientIP,
 	}
 	if common.EmailVerificationEnabled {
 		cleanUser.Email = user.Email
@@ -362,6 +374,10 @@ func Register(c *gin.Context) {
 	if err := cleanUser.Insert(inviterId); err != nil {
 		if errors.Is(err, model.ErrEmailAlreadyTaken) {
 			common.ApiErrorI18n(c, i18n.MsgUserEmailAlreadyTaken)
+			return
+		}
+		if errors.Is(err, model.ErrIPRegisterLimitReached) {
+			common.ApiErrorI18n(c, i18n.MsgUserIPRegisterLimitReached)
 			return
 		}
 		common.ApiError(c, err)
@@ -410,6 +426,21 @@ func Register(c *gin.Context) {
 	return
 }
 
+func attachEffectiveGroupRatios(users []*model.User) {
+	for _, user := range users {
+		userSetting := user.GetSetting()
+		assignedGroups := service.ParseUserGroups(user.Group)
+		ratios := make(map[string]float64, len(assignedGroups)+len(userSetting.UserGroupRatios))
+		for _, group := range assignedGroups {
+			ratios[group] = service.GetUserGroupRatioWithSetting(userSetting, user.Group, group)
+		}
+		for group, ratio := range userSetting.UserGroupRatios {
+			ratios[group] = ratio
+		}
+		user.EffectiveGroupRatios = ratios
+	}
+}
+
 func GetAllUsers(c *gin.Context) {
 	pageInfo := common.GetPageQuery(c)
 	sortOptions := model.NewUserSortOptions(c.Query("sort_by"), c.Query("sort_order"))
@@ -419,6 +450,7 @@ func GetAllUsers(c *gin.Context) {
 		return
 	}
 
+	attachEffectiveGroupRatios(users)
 	pageInfo.SetTotal(int(total))
 	pageInfo.SetItems(users)
 
@@ -449,10 +481,20 @@ func SearchUsers(c *gin.Context) {
 		return
 	}
 
+	attachEffectiveGroupRatios(users)
 	pageInfo.SetTotal(int(total))
 	pageInfo.SetItems(users)
 	common.ApiSuccess(c, pageInfo)
 	return
+}
+
+func GetRecentDailyIncomeStats(c *gin.Context) {
+	stats, err := model.GetUserConsumptionStats(7)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, stats)
 }
 
 func canManageTargetRole(myRole int, targetRole int) bool {
@@ -476,14 +518,7 @@ func GetUser(c *gin.Context) {
 		return
 	}
 	user.AdminPermissions = authz.Capabilities(user.Id, user.Role)
-	userSetting := user.GetSetting()
-	user.EffectiveGroupRatios = make(map[string]float64)
-	for _, group := range service.ParseUserGroups(user.Group) {
-		user.EffectiveGroupRatios[group] = service.GetUserGroupRatioWithSetting(userSetting, user.Group, group)
-	}
-	for group, ratio := range userSetting.UserGroupRatios {
-		user.EffectiveGroupRatios[group] = ratio
-	}
+	attachEffectiveGroupRatios([]*model.User{user})
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
@@ -730,10 +765,153 @@ func GetUserModels(c *gin.Context) {
 	})
 }
 
+type perCallModelCatalogItem struct {
+	Model          string   `json:"model"`
+	Price          float64  `json:"price"`
+	HasGlobalPrice bool     `json:"has_global_price"`
+	Groups         []string `json:"groups"`
+}
+
+var (
+	perCallCatalogCache     []perCallModelCatalogItem
+	perCallCatalogCacheTime time.Time
+	perCallCatalogMutex     sync.RWMutex
+)
+
+func InvalidatePerCallCatalogCache() {
+	perCallCatalogMutex.Lock()
+	defer perCallCatalogMutex.Unlock()
+	perCallCatalogCache = nil
+	perCallCatalogCacheTime = time.Time{}
+}
+
+func GetPerCallModelPrices(c *gin.Context) {
+	perCallCatalogMutex.RLock()
+	if perCallCatalogCache != nil && time.Since(perCallCatalogCacheTime) < time.Minute {
+		cached := perCallCatalogCache
+		perCallCatalogMutex.RUnlock()
+		c.JSON(http.StatusOK, gin.H{"success": true, "data": cached})
+		return
+	}
+	perCallCatalogMutex.RUnlock()
+
+	pricing := model.GetPricing()
+	abilities, err := model.GetAllEnableAbilityWithChannels()
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	result := buildPerCallModelCatalog(pricing, abilities)
+
+	perCallCatalogMutex.Lock()
+	perCallCatalogCache = result
+	perCallCatalogCacheTime = time.Now()
+	perCallCatalogMutex.Unlock()
+
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": result})
+}
+
+func buildPerCallModelCatalog(pricing []model.Pricing, abilities []model.AbilityWithChannel) []perCallModelCatalogItem {
+	globalPrices := make(map[string]model.Pricing)
+	for _, item := range pricing {
+		if item.QuotaType == 1 {
+			globalPrices[item.ModelName] = item
+		}
+	}
+
+	groupsByModel := make(map[string]map[string]struct{})
+	for _, ability := range abilities {
+		item, ok := globalPrices[ability.Model]
+		if !ok {
+			continue
+		}
+		if common.StringsContains(item.EnableGroup, ability.Group) || common.StringsContains(item.EnableGroup, "all") {
+			if groupsByModel[ability.Model] == nil {
+				groupsByModel[ability.Model] = make(map[string]struct{})
+			}
+			groupsByModel[ability.Model][ability.Group] = struct{}{}
+		}
+	}
+
+	result := make([]perCallModelCatalogItem, 0, len(groupsByModel))
+	for modelName, groupSet := range groupsByModel {
+		groups := make([]string, 0, len(groupSet))
+		for group := range groupSet {
+			groups = append(groups, group)
+		}
+		sort.Strings(groups)
+		item := globalPrices[modelName]
+		result = append(result, perCallModelCatalogItem{
+			Model:          modelName,
+			Price:          item.ModelPrice,
+			HasGlobalPrice: true,
+			Groups:         groups,
+		})
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Model < result[j].Model })
+	return result
+}
+
+func normalizeUserModelPriceRules(rules []dto.UserModelPriceRule, userGroup string) ([]dto.UserModelPriceRule, error) {
+	if rules == nil {
+		return nil, nil
+	}
+	usableGroups := service.GetUserUsableGroups(userGroup)
+	abilities, err := model.GetAllEnableAbilityWithChannels()
+	if err != nil {
+		return nil, err
+	}
+	modelsByGroup := make(map[string]map[string]struct{})
+	for _, item := range buildPerCallModelCatalog(model.GetPricing(), abilities) {
+		for _, group := range item.Groups {
+			if modelsByGroup[group] == nil {
+				modelsByGroup[group] = make(map[string]struct{})
+			}
+			modelsByGroup[group][item.Model] = struct{}{}
+		}
+	}
+
+	seen := make(map[string]struct{})
+	normalized := make([]dto.UserModelPriceRule, 0, len(rules))
+	for _, rawRule := range rules {
+		group := strings.TrimSpace(rawRule.Group)
+		if group == "" {
+			return nil, fmt.Errorf("per-call price group is required")
+		}
+		if _, ok := usableGroups[group]; !ok {
+			return nil, fmt.Errorf("group %s is not available to this user", group)
+		}
+		if math.IsNaN(rawRule.Price) || math.IsInf(rawRule.Price, 0) || rawRule.Price < 0 {
+			return nil, fmt.Errorf("invalid per-call price for group %s", group)
+		}
+		models := make([]string, 0, len(rawRule.Models))
+		for _, rawModelName := range rawRule.Models {
+			modelName := strings.TrimSpace(rawModelName)
+			if _, ok := modelsByGroup[group][modelName]; !ok {
+				return nil, fmt.Errorf("model %s is not billed per call in group %s", modelName, group)
+			}
+			key := group + "\x00" + modelName
+			if _, ok := seen[key]; ok {
+				return nil, fmt.Errorf("model %s has more than one price in group %s", modelName, group)
+			}
+			seen[key] = struct{}{}
+			models = append(models, modelName)
+		}
+		if len(models) == 0 {
+			return nil, fmt.Errorf("at least one per-call model is required for group %s", group)
+		}
+		sort.Strings(models)
+		normalized = append(normalized, dto.UserModelPriceRule{Group: group, Models: models, Price: rawRule.Price})
+	}
+	return normalized, nil
+}
+
 func UpdateUser(c *gin.Context) {
 	var request struct {
 		model.User
-		UserGroupRatios map[string]float64 `json:"user_group_ratios"`
+		UserGroupRatios     map[string]float64       `json:"user_group_ratios"`
+		UserModelPrices     map[string]float64       `json:"user_model_prices"`
+		UserModelPriceRules []dto.UserModelPriceRule `json:"user_model_price_rules"`
 	}
 	err := common.DecodeJson(c.Request.Body, &request)
 	updatedUser := request.User
@@ -773,25 +951,44 @@ func UpdateUser(c *gin.Context) {
 		common.ApiErrorMsg(c, "user group is too long")
 		return
 	}
-	if request.UserGroupRatios != nil {
+	if (request.UserModelPrices != nil || request.UserModelPriceRules != nil) && myRole < common.RoleRootUser {
+		common.ApiErrorMsg(c, "only root users can set per-call model prices")
+		return
+	}
+	var normalizedUserModelPriceRules []dto.UserModelPriceRule
+	if request.UserModelPriceRules != nil {
+		normalizedRules, err := normalizeUserModelPriceRules(request.UserModelPriceRules, updatedUser.Group)
+		if err != nil {
+			common.ApiError(c, err)
+			return
+		}
+		normalizedUserModelPriceRules = normalizedRules
+	}
+	if request.UserGroupRatios != nil || request.UserModelPriceRules != nil || request.UserModelPrices != nil {
 		userSetting := originUser.GetSetting()
-		selectedGroups := make(map[string]bool)
-		for _, group := range service.ParseUserGroups(updatedUser.Group) {
-			selectedGroups[group] = true
+		if request.UserModelPriceRules != nil {
+			userSetting.UserModelPriceRules = normalizedUserModelPriceRules
+			userSetting.UserModelPrices = nil
 		}
-		for group, ratio := range request.UserGroupRatios {
-			if ratio < 0 || math.IsNaN(ratio) || math.IsInf(ratio, 0) {
-				common.ApiErrorMsg(c, "user group ratio must be a non-negative finite number")
-				return
+		if request.UserGroupRatios != nil {
+			selectedGroups := make(map[string]bool)
+			for _, group := range service.ParseUserGroups(updatedUser.Group) {
+				selectedGroups[group] = true
 			}
-			if !selectedGroups[group] || !service.GroupInUserUsableGroups(updatedUser.Group, group) {
-				delete(request.UserGroupRatios, group)
+			for group, ratio := range request.UserGroupRatios {
+				if ratio < 0 || math.IsNaN(ratio) || math.IsInf(ratio, 0) {
+					common.ApiErrorMsg(c, "user group ratio must be a non-negative finite number")
+					return
+				}
+				if !selectedGroups[group] || !service.GroupInUserUsableGroups(updatedUser.Group, group) {
+					delete(request.UserGroupRatios, group)
+				}
 			}
-		}
-		if len(request.UserGroupRatios) == 0 {
-			userSetting.UserGroupRatios = nil
-		} else {
-			userSetting.UserGroupRatios = request.UserGroupRatios
+			if len(request.UserGroupRatios) == 0 {
+				userSetting.UserGroupRatios = nil
+			} else {
+				userSetting.UserGroupRatios = request.UserGroupRatios
+			}
 		}
 		updatedUser.SetSetting(userSetting)
 	}
@@ -824,6 +1021,7 @@ func UpdateUser(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	_ = model.UpdateUserSettingCache(updatedUser.Id, updatedUser.Setting)
 	recordManageAuditFor(c, updatedUser.Id, "user.update", map[string]any{
 		"username": originUser.Username,
 		"id":       updatedUser.Id,

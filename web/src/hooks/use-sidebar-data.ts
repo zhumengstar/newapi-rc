@@ -27,6 +27,7 @@ import {
   LayoutDashboard,
   ListTodo,
   MessageSquare,
+  PanelsTopLeft,
   PlugZap,
   Radio,
   ServerCog,
@@ -92,6 +93,11 @@ export function useSidebarData(): SidebarData {
             title: t('Usage Logs'),
             url: '/usage-logs/common',
             icon: FileText,
+          },
+          {
+            title: t('Infinite Canvas'),
+            url: '/canvas',
+            icon: PanelsTopLeft,
           },
           {
             title: t('Audit Logs'),

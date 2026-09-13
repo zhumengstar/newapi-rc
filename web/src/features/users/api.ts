@@ -30,6 +30,7 @@ import type {
   ManageUserAction,
   ManageUserQuotaPayload,
   ApiResponse,
+  UserConsumptionStats,
 } from './types'
 
 // ============================================================================
@@ -164,6 +165,42 @@ export async function getGroups(): Promise<ApiResponse<string[]>> {
   return res.data
 }
 
+export interface GroupDetailMeta {
+  ratio: number
+  admin_ratio?: number
+  is_public?: boolean
+  desc?: string
+  models?: string[]
+}
+
+export interface GroupDetailsData {
+  groups: string[]
+  meta: Record<string, GroupDetailMeta>
+}
+
+/**
+ * Get group details including ratios and public status
+ */
+export async function getGroupDetails(): Promise<ApiResponse<GroupDetailsData>> {
+  const res = await api.get('/api/group/detail')
+  return res.data
+}
+
+export interface PerCallModelCatalogItem {
+  model: string
+  price: number
+  has_global_price: boolean
+  groups: string[]
+}
+
+/**
+ * Get per-call model catalog for user pricing rules
+ */
+export async function getPerCallModelPrices(): Promise<ApiResponse<PerCallModelCatalogItem[]>> {
+  const res = await api.get('/api/user/per_call_model_prices')
+  return res.data
+}
+
 /**
  * Get the permission catalog (resources, actions, and role baselines).
  * Source of truth lives in the backend authz package.
@@ -212,5 +249,15 @@ export async function adminUnbindCustomOAuth(
   const res = await api.delete(
     `/api/user/${userId}/oauth/bindings/${providerId}`
   )
+  return res.data
+}
+
+/**
+ * Get user consumption stats (recent daily, today, total, balance)
+ */
+export async function getUserConsumptionStats(): Promise<
+  ApiResponse<UserConsumptionStats>
+> {
+  const res = await api.get('/api/user/income_stats')
   return res.data
 }

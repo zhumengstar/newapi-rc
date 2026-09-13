@@ -175,9 +175,10 @@ export function ApiKeysMutateDrawer({
   )
   const globalAutoGroups = useMemo(() => {
     const available = new Set(availableAutoGroupNames)
-    return (autoGroupsData?.data?.groups || []).filter((group) =>
-      available.has(group)
-    )
+    const rawGroups = Array.isArray(autoGroupsData?.data?.groups)
+      ? autoGroupsData.data.groups
+      : []
+    return rawGroups.filter((group) => available.has(group))
   }, [autoGroupsData, availableAutoGroupNames])
   const globalAutoGroupOptions = useMemo(() => {
     const groupsByValue = new Map(groups.map((group) => [group.value, group]))

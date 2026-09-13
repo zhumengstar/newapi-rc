@@ -21,6 +21,7 @@ type WebAssets struct {
 
 func SetWebRouter(router *gin.Engine, assets WebAssets, pluginDispatcher gin.HandlerFunc) {
 	frontendFS := common.EmbedFolder(assets.BuildFS, "web/dist")
+	canvasIndex, _ := assets.BuildFS.ReadFile("web/dist/canvas-app/index.html")
 
 	router.NoRoute(
 		pluginDispatcher,
@@ -29,6 +30,22 @@ func SetWebRouter(router *gin.Engine, assets WebAssets, pluginDispatcher gin.Han
 		middleware.AccessTokenAudit(),
 		middleware.GlobalWebRateLimit(),
 		middleware.Cache(),
+		func(c *gin.Context) {
+			reqPath := c.Request.URL.Path
+			if reqPath == "/canvas-app" || reqPath == "/canvas-app/" {
+				if len(canvasIndex) > 0 {
+					c.Header("Cache-Control", "no-cache")
+					c.Data(http.StatusOK, "text/html; charset=utf-8", canvasIndex)
+					c.Abort()
+					return
+				}
+			}
+			if strings.HasSuffix(reqPath, ".js") || strings.HasSuffix(reqPath, ".mjs") {
+				c.Header("Content-Type", "application/javascript; charset=utf-8")
+			} else if strings.HasSuffix(reqPath, ".css") {
+				c.Header("Content-Type", "text/css; charset=utf-8")
+			}
+		},
 		static.Serve("/", frontendFS),
 		func(c *gin.Context) {
 			if strings.HasPrefix(c.Request.RequestURI, "/v1") || strings.HasPrefix(c.Request.RequestURI, "/api") || strings.HasPrefix(c.Request.RequestURI, "/assets") {

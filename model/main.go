@@ -337,6 +337,9 @@ func migrateDB() error {
 	if err := migrateOptionPrimaryKey(DB); err != nil {
 		common.SysError("failed to migrate options primary key: " + err.Error())
 	}
+	if err := migrateUserRegisterIP(DB); err != nil {
+		common.SysError("failed to migrate users register_ip column: " + err.Error())
+	}
 
 	err := DB.AutoMigrate(
 		&Channel{},
@@ -380,6 +383,7 @@ func migrateDB() error {
 		&UserGroupMembership{},
 		&CasbinRule{},
 		&AuthzRole{},
+		&UserConsumptionDailyStat{},
 	)
 	if err != nil {
 		return err
@@ -981,5 +985,16 @@ func PingDB() error {
 
 	lastPingTime = time.Now()
 	common.SysLog("Database pinged successfully")
+	return nil
+}
+
+func migrateUserRegisterIP(db *gorm.DB) error {
+	if db == nil {
+		return nil
+	}
+	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
+		_ = db.Exec("ALTER TABLE users ADD COLUMN IF NOT EXISTS register_ip VARCHAR(64);").Error
+		_ = db.Exec("CREATE INDEX IF NOT EXISTS idx_users_register_ip ON users(register_ip);").Error
+	}
 	return nil
 }

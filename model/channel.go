@@ -429,6 +429,42 @@ func GetChannelGroups() ([]string, error) {
 	return groups, nil
 }
 
+func GetGroupModelsMap() (map[string][]string, error) {
+	var channels []Channel
+	if err := DB.Model(&Channel{}).Select(commonGroupCol, "models").Find(&channels).Error; err != nil {
+		return nil, err
+	}
+
+	groupModels := make(map[string]map[string]struct{})
+	for i := range channels {
+		for _, group := range channels[i].GetGroups() {
+			if group == "" {
+				continue
+			}
+			if _, ok := groupModels[group]; !ok {
+				groupModels[group] = make(map[string]struct{})
+			}
+			for _, m := range strings.Split(channels[i].Models, ",") {
+				m = strings.TrimSpace(m)
+				if m != "" {
+					groupModels[group][m] = struct{}{}
+				}
+			}
+		}
+	}
+
+	res := make(map[string][]string, len(groupModels))
+	for g, mset := range groupModels {
+		list := make([]string, 0, len(mset))
+		for m := range mset {
+			list = append(list, m)
+		}
+		sort.Strings(list)
+		res[g] = list
+	}
+	return res, nil
+}
+
 // UpdateChannelGroupAdaptiveEnabled updates every channel that belongs to the
 // exact group. Group membership is stored as a comma-separated list, so use
 // the shared cross-database filter instead of a dialect-specific expression.

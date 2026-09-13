@@ -93,10 +93,19 @@ func WeChatAuth(c *gin.Context) {
 		}
 	} else {
 		if common.RegisterEnabled {
+			clientIP := c.ClientIP()
+			if err := model.CheckRegisterIPAvailable(clientIP); err != nil {
+				c.JSON(http.StatusOK, gin.H{
+					"success": false,
+					"message": "该 IP 注册账号数量已达上限（最多 2 个）",
+				})
+				return
+			}
 			user.Username = "wechat_" + strconv.Itoa(model.GetMaxUserId()+1)
 			user.DisplayName = "WeChat User"
 			user.Role = common.RoleCommonUser
 			user.Status = common.UserStatusEnabled
+			user.RegisterIP = clientIP
 
 			if err := user.Insert(0); err != nil {
 				c.JSON(http.StatusOK, gin.H{

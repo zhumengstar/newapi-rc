@@ -42,7 +42,7 @@ export function buildSearchParams(
   const baseParams: Record<string, unknown> = {
     ...(filters.startTime && { startTime: filters.startTime.getTime() }),
     ...(filters.endTime && { endTime: filters.endTime.getTime() }),
-    ...(filters.channel && { channel: filters.channel }),
+    ...(filters.channel?.trim() && { channel: filters.channel.trim() }),
   }
 
   switch (logCategory) {
@@ -50,13 +50,13 @@ export function buildSearchParams(
       const commonFilters = filters as CommonLogFilters
       return {
         ...baseParams,
-        ...(commonFilters.model && { model: commonFilters.model }),
-        ...(commonFilters.token && { token: commonFilters.token }),
-        ...(commonFilters.group && { group: commonFilters.group }),
-        ...(commonFilters.username && { username: commonFilters.username }),
-        ...(commonFilters.requestId && { requestId: commonFilters.requestId }),
-        ...(commonFilters.upstreamRequestId && {
-          upstreamRequestId: commonFilters.upstreamRequestId,
+        ...(commonFilters.model?.trim() && { model: commonFilters.model.trim() }),
+        ...(commonFilters.token?.trim() && { token: commonFilters.token.trim() }),
+        ...(commonFilters.group?.trim() && { group: commonFilters.group.trim() }),
+        ...(commonFilters.username?.trim() && { username: commonFilters.username.trim() }),
+        ...(commonFilters.requestId?.trim() && { requestId: commonFilters.requestId.trim() }),
+        ...(commonFilters.upstreamRequestId?.trim() && {
+          upstreamRequestId: commonFilters.upstreamRequestId.trim(),
         }),
       }
     }

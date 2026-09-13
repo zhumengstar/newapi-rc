@@ -61,6 +61,7 @@ import {
   CHANNEL_STATUS,
   CHANNEL_STATUS_OPTIONS,
   CHANNEL_TYPE_OPTIONS,
+  MODEL_FAMILY_ORDER,
 } from '../constants'
 import {
   channelsQueryKeys,
@@ -68,6 +69,7 @@ import {
   getChannelTableRowId,
   isTagAggregateRow,
   getChannelTypeLabel,
+  isDefaultGroup,
   sortGroupsByModelAndRatio,
 } from '../lib'
 import type { Channel, ChannelSortBy } from '../types'
@@ -89,6 +91,9 @@ const CHANNELS_STATUS_FILTER_STORAGE_KEY = 'channel-status-filter'
 const CHANNELS_TYPE_FILTER_STORAGE_KEY = 'channel-type-filter'
 const CHANNELS_GROUP_FILTER_STORAGE_KEY = 'channel-group-filter'
 const CHANNELS_GROUP_ORDER_STORAGE_KEY = 'channel-group-order'
+const CHANNELS_MODEL_FAMILY_FILTER_STORAGE_KEY = 'channel-model-family-filter'
+const CHANNELS_MODEL_TYPE_FILTER_STORAGE_KEY = 'channel-model-type-filter'
+const CHANNELS_BILLING_TYPE_FILTER_STORAGE_KEY = 'channel-billing-type-filter'
 
 function getStoredChannelArrayFilter(key: string): string[] | undefined {
   try {
@@ -186,6 +191,9 @@ export function ChannelsTable() {
   ])
 
   // URL state management
+  const routeSearch = route.useSearch()
+  const routeNavigate = route.useNavigate()
+
   const {
     globalFilter,
     onGlobalFilterChange,
@@ -195,8 +203,8 @@ export function ChannelsTable() {
     onPaginationChange,
     ensurePageInRange,
   } = useTableUrlState({
-    search: route.useSearch(),
-    navigate: route.useNavigate(),
+    search: routeSearch,
+    navigate: routeNavigate,
     pagination: {
       defaultPage: 1,
       defaultPageSize: isMobile ? 10 : DEFAULT_PAGE_SIZE,
@@ -219,10 +227,58 @@ export function ChannelsTable() {
         columnId: 'type',
         searchKey: 'type',
         type: 'array',
-        deserialize: (value) =>
-          value !== undefined
-            ? value
-            : getStoredChannelArrayFilter(CHANNELS_TYPE_FILTER_STORAGE_KEY),
+        deserialize: (value) => {
+          let rawValues: string[] | undefined = undefined
+          if (value !== undefined) {
+            rawValues = Array.isArray(value)
+              ? (value as string[])
+              : [String(value)]
+          } else {
+            const stored = getStoredChannelArrayFilter(
+              CHANNELS_TYPE_FILTER_STORAGE_KEY
+            )
+            if (stored && stored.length > 0) {
+              rawValues = stored
+            } else {
+              const legacyFamily = (routeSearch as Record<string, unknown>)
+                ?.model_family
+              if (legacyFamily) {
+                const familyList = Array.isArray(legacyFamily)
+                  ? legacyFamily
+                  : [legacyFamily]
+                rawValues = familyList.map((v) =>
+                  typeof v === 'string' &&
+                  !v.startsWith('family:') &&
+                  v !== 'all'
+                    ? `family:${v}`
+                    : String(v)
+                )
+              } else {
+                const storedFamily = getStoredChannelArrayFilter(
+                  CHANNELS_MODEL_FAMILY_FILTER_STORAGE_KEY
+                )
+                if (
+                  storedFamily &&
+                  storedFamily.length > 0 &&
+                  storedFamily[0] !== 'all'
+                ) {
+                  rawValues = storedFamily.map((v) => `family:${v}`)
+                }
+              }
+            }
+          }
+
+          if (!rawValues) return []
+
+          return rawValues.map((v) => {
+            const str = String(v)
+            if (str === 'all') return 'all'
+            if (/^\d+$/.test(str)) return `protocol:${str}`
+            if (!str.startsWith('family:') && !str.startsWith('protocol:'))
+              return `family:${str}`
+            return str
+          })
+        },
       },
       {
         columnId: 'group',
@@ -232,6 +288,28 @@ export function ChannelsTable() {
           value !== undefined
             ? value
             : getStoredChannelArrayFilter(CHANNELS_GROUP_FILTER_STORAGE_KEY),
+      },
+      {
+        columnId: 'model_type',
+        searchKey: 'model_type',
+        type: 'array',
+        deserialize: (value) =>
+          value !== undefined
+            ? value
+            : getStoredChannelArrayFilter(
+                CHANNELS_MODEL_TYPE_FILTER_STORAGE_KEY
+              ),
+      },
+      {
+        columnId: 'billing_type',
+        searchKey: 'billing_type',
+        type: 'array',
+        deserialize: (value) =>
+          value !== undefined
+            ? value
+            : getStoredChannelArrayFilter(
+                CHANNELS_BILLING_TYPE_FILTER_STORAGE_KEY
+              ),
       },
       { columnId: 'model', searchKey: 'model', type: 'string' },
     ],
@@ -263,6 +341,21 @@ export function ChannelsTable() {
           ? group.filter((value): value is string => typeof value === 'string')
           : []
       )
+      clearStoredChannelFilter(CHANNELS_MODEL_FAMILY_FILTER_STORAGE_KEY)
+      const modelType = next.find((f) => f.id === 'model_type')?.value
+      setStoredChannelArrayFilter(
+        CHANNELS_MODEL_TYPE_FILTER_STORAGE_KEY,
+        Array.isArray(modelType)
+          ? modelType.filter((value): value is string => typeof value === 'string')
+          : []
+      )
+      const billingType = next.find((f) => f.id === 'billing_type')?.value
+      setStoredChannelArrayFilter(
+        CHANNELS_BILLING_TYPE_FILTER_STORAGE_KEY,
+        Array.isArray(billingType)
+          ? billingType.filter((value): value is string => typeof value === 'string')
+          : []
+      )
       return next
     })
   }
@@ -276,6 +369,51 @@ export function ChannelsTable() {
   )
   const groupFilter =
     (columnFilters.find((f) => f.id === 'group')?.value as string[]) || []
+  const modelTypeFilter = useMemo(
+    () =>
+      (columnFilters.find((f) => f.id === 'model_type')?.value as string[]) ||
+      [],
+    [columnFilters]
+  )
+  const billingTypeFilter = useMemo(
+    () =>
+      (columnFilters.find((f) => f.id === 'billing_type')?.value as string[]) ||
+      [],
+    [columnFilters]
+  )
+
+  const { resolvedTypeFilter, resolvedModelFamilyFilter } = useMemo(() => {
+    const raw = typeFilter.find((v) => v !== 'all')
+    if (!raw) {
+      return {
+        resolvedTypeFilter: undefined,
+        resolvedModelFamilyFilter: undefined,
+      }
+    }
+    if (raw.startsWith('family:')) {
+      return {
+        resolvedTypeFilter: undefined,
+        resolvedModelFamilyFilter: raw.slice('family:'.length),
+      }
+    }
+    if (raw.startsWith('protocol:')) {
+      const parsed = Number(raw.slice('protocol:'.length))
+      return {
+        resolvedTypeFilter: Number.isFinite(parsed) ? parsed : undefined,
+        resolvedModelFamilyFilter: undefined,
+      }
+    }
+    if (/^\d+$/.test(raw)) {
+      return {
+        resolvedTypeFilter: Number(raw),
+        resolvedModelFamilyFilter: undefined,
+      }
+    }
+    return {
+      resolvedTypeFilter: undefined,
+      resolvedModelFamilyFilter: raw,
+    }
+  }, [typeFilter])
   const {
     value: modelFilter,
     inputValue: modelFilterInput,
@@ -345,7 +483,15 @@ export function ChannelsTable() {
       )
       const known = new Set(naturalOrder)
       const persisted = groupOrderOverride.filter((group) => known.has(group))
-      return [...persisted, ...naturalOrder.filter((group) => !persisted.includes(group))]
+      const combined = [
+        ...persisted,
+        ...naturalOrder.filter((group) => !persisted.includes(group)),
+      ]
+      const defaultGroup = combined.find((group) => isDefaultGroup(group))
+      if (defaultGroup && combined.indexOf(defaultGroup) !== 0) {
+        return [defaultGroup, ...combined.filter((group) => !isDefaultGroup(group))]
+      }
+      return combined
     },
     [groupModels, groupOptions, groupOrderOverride, groupRatio]
   )
@@ -404,9 +550,15 @@ export function ChannelsTable() {
         statusFilter.length > 0 && !statusFilter.includes('all')
           ? statusFilter[0]
           : undefined,
-      type:
-        typeFilter.length > 0 && !typeFilter.includes('all')
-          ? Number(typeFilter[0])
+      type: resolvedTypeFilter,
+      model_family: resolvedModelFamilyFilter,
+      model_type:
+        modelTypeFilter.length > 0 && !modelTypeFilter.includes('all')
+          ? modelTypeFilter[0]
+          : undefined,
+      billing_type:
+        billingTypeFilter.length > 0 && !billingTypeFilter.includes('all')
+          ? billingTypeFilter[0]
           : undefined,
       tag_mode: enableTagMode,
       id_sort: groupSort || groupOrderSort ? false : idSort,
@@ -430,9 +582,15 @@ export function ChannelsTable() {
               statusFilter.length > 0 && !statusFilter.includes('all')
                 ? statusFilter[0]
                 : undefined,
-            type:
-              typeFilter.length > 0 && !typeFilter.includes('all')
-                ? Number(typeFilter[0])
+            type: resolvedTypeFilter,
+            model_family: resolvedModelFamilyFilter,
+            model_type:
+              modelTypeFilter.length > 0 && !modelTypeFilter.includes('all')
+                ? modelTypeFilter[0]
+                : undefined,
+            billing_type:
+              billingTypeFilter.length > 0 && !billingTypeFilter.includes('all')
+                ? billingTypeFilter[0]
                 : undefined,
             tag_mode: enableTagMode,
             id_sort: groupSort || groupOrderSort ? false : idSort,
@@ -454,9 +612,15 @@ export function ChannelsTable() {
               statusFilter.length > 0 && !statusFilter.includes('all')
                 ? statusFilter[0]
                 : undefined,
-            type:
-              typeFilter.length > 0 && !typeFilter.includes('all')
-                ? Number(typeFilter[0])
+            type: resolvedTypeFilter,
+            model_family: resolvedModelFamilyFilter,
+            model_type:
+              modelTypeFilter.length > 0 && !modelTypeFilter.includes('all')
+                ? modelTypeFilter[0]
+                : undefined,
+            billing_type:
+              billingTypeFilter.length > 0 && !billingTypeFilter.includes('all')
+                ? billingTypeFilter[0]
                 : undefined,
             tag_mode: enableTagMode,
             id_sort: groupSort || groupOrderSort ? false : idSort,
@@ -491,6 +655,9 @@ export function ChannelsTable() {
 
   const totalCount = data?.data?.total || 0
   const typeCounts = data?.data?.type_counts
+  const modelFamilyCounts = data?.data?.model_family_counts
+  const modelTypeCounts = data?.data?.model_type_counts
+  const billingTypeCounts = data?.data?.billing_type_counts
 
   // Columns configuration
   const columns = useChannelsColumns({ enableSelection: batchMode })
@@ -540,7 +707,7 @@ export function ChannelsTable() {
     }
   }, [batchMode, table])
 
-  // Prepare filter options from existing channel types only.
+  // Prepare merged filter options (Model Family + Provider Protocol)
   const typeFilterOptions = useMemo(() => {
     const counts = typeCounts || {}
     const typeIds = Object.entries(counts)
@@ -564,18 +731,14 @@ export function ChannelsTable() {
         )
       })
 
-    const selectedType = typeFilter.find((value) => value !== 'all')
-    if (selectedType) {
-      const selectedTypeId = Number(selectedType)
-      const alreadyIncluded = typeIds.some(
-        (item) => item.type === selectedTypeId
-      )
-      if (selectedTypeId > 0 && !alreadyIncluded) {
-        typeIds.push({
-          type: selectedTypeId,
-          count: Number(counts[selectedType]) || 0,
-        })
-      }
+    if (
+      resolvedTypeFilter &&
+      !typeIds.some((item) => item.type === resolvedTypeFilter)
+    ) {
+      typeIds.push({
+        type: resolvedTypeFilter,
+        count: Number(counts[resolvedTypeFilter]) || 0,
+      })
     }
 
     const totalTypes = Object.values(counts).reduce(
@@ -583,22 +746,134 @@ export function ChannelsTable() {
       0
     )
 
+    // Model families
+    const fCounts = modelFamilyCounts || {}
+    const availableFamilies = MODEL_FAMILY_ORDER.filter(
+      (family) => (Number(fCounts[family]) || 0) > 0
+    ).map((family) => ({
+      label: family,
+      value: `family:${family}`,
+      count: Number(fCounts[family]) || 0,
+      group: t('Family'),
+    }))
+
+    const knownSet = new Set<string>(MODEL_FAMILY_ORDER)
+    for (const [key, count] of Object.entries(fCounts)) {
+      if (key !== 'all' && !knownSet.has(key) && (Number(count) || 0) > 0) {
+        availableFamilies.push({
+          label: key,
+          value: `family:${key}`,
+          count: Number(count) || 0,
+          group: t('Family'),
+        })
+      }
+    }
+
+    if (
+      resolvedModelFamilyFilter &&
+      !availableFamilies.some(
+        (item) => item.value === `family:${resolvedModelFamilyFilter}`
+      )
+    ) {
+      availableFamilies.push({
+        label: resolvedModelFamilyFilter,
+        value: `family:${resolvedModelFamilyFilter}`,
+        count: Number(fCounts[resolvedModelFamilyFilter]) || 0,
+        group: t('Family'),
+      })
+    }
+
+    // Provider protocols
+    const protocolOptions = typeIds.map((item) => ({
+      label: getChannelTypeLabel(item.type),
+      value: `protocol:${item.type}`,
+      count: item.count,
+      iconNode: <ChannelTypeLogo type={item.type} size={16} />,
+      group: t('Provider Protocol'),
+    }))
+
     return [
       {
-        label: 'All Types',
+        label: t('All Types'),
+        value: 'all',
+        count: totalTypes || totalCount,
+      },
+      ...availableFamilies,
+      ...protocolOptions,
+    ]
+  }, [
+    typeCounts,
+    modelFamilyCounts,
+    resolvedTypeFilter,
+    resolvedModelFamilyFilter,
+    totalCount,
+    t,
+  ])
+
+  const modelTypeFilterOptions = useMemo(() => {
+    const counts = modelTypeCounts || {}
+    const totalTypes =
+      typeof counts.all === 'number'
+        ? counts.all
+        : (Number(counts.Text) || 0) +
+          (Number(counts.Multimodal) || 0) +
+          (Number(counts.Image) || 0) +
+          (Number(counts.Video) || 0)
+
+    return [
+      {
+        label: t('All Types'),
         value: 'all',
         count: totalTypes,
       },
-      ...typeIds.map((item) => {
-        return {
-          label: getChannelTypeLabel(item.type),
-          value: String(item.type),
-          count: item.count,
-          iconNode: <ChannelTypeLogo type={item.type} size={16} />,
-        }
-      }),
+      {
+        label: t('Text'),
+        value: 'Text',
+        count: Number(counts.Text) || 0,
+      },
+      {
+        label: t('Multimodal'),
+        value: 'Multimodal',
+        count: Number(counts.Multimodal) || 0,
+      },
+      {
+        label: t('Image'),
+        value: 'Image',
+        count: Number(counts.Image) || 0,
+      },
+      {
+        label: t('Video'),
+        value: 'Video',
+        count: Number(counts.Video) || 0,
+      },
     ]
-  }, [typeCounts, typeFilter])
+  }, [modelTypeCounts, t])
+
+  const billingTypeFilterOptions = useMemo(() => {
+    const counts = billingTypeCounts || {}
+    const totalBilling =
+      typeof counts.all === 'number'
+        ? counts.all
+        : (Number(counts.PerToken) || 0) + (Number(counts.PerRequest) || 0)
+
+    return [
+      {
+        label: t('All Billing Types'),
+        value: 'all',
+        count: totalBilling,
+      },
+      {
+        label: t('Per Token'),
+        value: 'PerToken',
+        count: Number(counts.PerToken) || 0,
+      },
+      {
+        label: t('Per Request'),
+        value: 'PerRequest',
+        count: Number(counts.PerRequest) || 0,
+      },
+    ]
+  }, [billingTypeCounts, t])
 
   const sortedGroupNames = groupOrder
 
@@ -630,9 +905,13 @@ export function ChannelsTable() {
       return typeof ratio === 'number' && Number.isFinite(ratio) ? ratio : null
     }
 
+    const defaultGroup = sortedGroupNames.find((g) => isDefaultGroup(g))
+    const restGroups = sortedGroupNames.filter((g) => !isDefaultGroup(g))
+    const orderedGroups = defaultGroup ? [defaultGroup, ...restGroups] : restGroups
+
     return [
       { label: t('All Groups'), value: 'all' },
-      ...sortedGroupNames.map((group) => {
+      ...orderedGroups.map((group) => {
         const ratio = ratioForGroup(group)
         const label = sensitiveVisible ? group : '••••'
         return {
@@ -675,6 +954,12 @@ export function ChannelsTable() {
         searchDebounceMs: 500,
         onReset: () => {
           resetModelFilterInput()
+          clearStoredChannelFilter(CHANNELS_STATUS_FILTER_STORAGE_KEY)
+          clearStoredChannelFilter(CHANNELS_TYPE_FILTER_STORAGE_KEY)
+          clearStoredChannelFilter(CHANNELS_GROUP_FILTER_STORAGE_KEY)
+          clearStoredChannelFilter(CHANNELS_MODEL_FAMILY_FILTER_STORAGE_KEY)
+          clearStoredChannelFilter(CHANNELS_MODEL_TYPE_FILTER_STORAGE_KEY)
+          clearStoredChannelFilter(CHANNELS_BILLING_TYPE_FILTER_STORAGE_KEY)
         },
         additionalSearch: (
           <Input
@@ -700,8 +985,10 @@ export function ChannelsTable() {
             title: t('Type'),
             options: typeFilterOptions,
             singleSelect: true,
-            onClear: () =>
-              clearStoredChannelFilter(CHANNELS_TYPE_FILTER_STORAGE_KEY),
+            onClear: () => {
+              clearStoredChannelFilter(CHANNELS_TYPE_FILTER_STORAGE_KEY)
+              clearStoredChannelFilter(CHANNELS_MODEL_FAMILY_FILTER_STORAGE_KEY)
+            },
           },
           {
             columnId: 'group',
@@ -736,6 +1023,24 @@ export function ChannelsTable() {
             onOptionReorder: moveGroup,
             onClear: () =>
               clearStoredChannelFilter(CHANNELS_GROUP_FILTER_STORAGE_KEY),
+          },
+          {
+            columnId: 'model_type',
+            title: t('Model Type'),
+            options: modelTypeFilterOptions,
+            singleSelect: true,
+            onClear: () =>
+              clearStoredChannelFilter(CHANNELS_MODEL_TYPE_FILTER_STORAGE_KEY),
+          },
+          {
+            columnId: 'billing_type',
+            title: t('Billing Type'),
+            options: billingTypeFilterOptions,
+            singleSelect: true,
+            onClear: () =>
+              clearStoredChannelFilter(
+                CHANNELS_BILLING_TYPE_FILTER_STORAGE_KEY
+              ),
           },
         ],
         preActions: (

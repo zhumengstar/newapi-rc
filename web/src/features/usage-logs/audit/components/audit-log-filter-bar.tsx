@@ -223,6 +223,7 @@ export function AuditLogFilterBar(props: {
       searchLoading={props.isFetching}
       onSearch={props.onSearch}
       onReset={props.onReset}
+      showAutoRefresh={false}
     />
   )
 }

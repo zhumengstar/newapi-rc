@@ -203,6 +203,9 @@ export interface GetChannelsResponse {
     page: number
     page_size: number
     type_counts?: Record<string, number>
+    model_family_counts?: Record<string, number>
+    model_type_counts?: Record<string, number>
+    billing_type_counts?: Record<string, number>
   }
 }
 
@@ -213,6 +216,9 @@ export interface SearchChannelsResponse {
     items: Channel[]
     total: number
     type_counts?: Record<string, number>
+    model_family_counts?: Record<string, number>
+    model_type_counts?: Record<string, number>
+    billing_type_counts?: Record<string, number>
   }
 }
 
@@ -330,6 +336,9 @@ export interface GetChannelsParams {
   sort_by?: ChannelSortBy
   sort_order?: ChannelSortOrder
   group_order?: string
+  model_family?: string
+  model_type?: string
+  billing_type?: string
 }
 
 export interface SearchChannelsParams {
@@ -343,6 +352,9 @@ export interface SearchChannelsParams {
   sort_by?: ChannelSortBy
   sort_order?: ChannelSortOrder
   group_order?: string
+  model_family?: string
+  model_type?: string
+  billing_type?: string
   p?: number
   page_size?: number
 }

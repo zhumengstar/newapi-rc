@@ -122,7 +122,7 @@ afterEach(() => {
   }
 })
 
-it('loads personal groups and filters choices without submitting until Search', async () => {
+it('loads personal groups and automatically triggers search on selection', async () => {
   const router = await renderFilter()
   const input = screen.getByRole('combobox', { name: 'Group' })
   await userEvent.click(input)
@@ -133,8 +133,6 @@ it('loads personal groups and filters choices without submitting until Search', 
   ).not.toBeInTheDocument()
   await userEvent.click(screen.getByRole('option', { name: 'premium' }))
   expect(input).toHaveValue('premium')
-  expect(router.state.location.search).not.toHaveProperty('group')
-  await userEvent.click(screen.getByRole('button', { name: 'Search' }))
   await waitFor(() =>
     expect(router.state.location.search).toMatchObject({
       group: 'premium',
@@ -154,7 +152,7 @@ it('loads all groups in the administrator view', async () => {
   expect(api.get).not.toHaveBeenCalledWith('/api/user/self/groups')
 })
 
-it('confirms a keyboard choice before Enter submits the selected group', async () => {
+it('confirms a keyboard choice and automatically triggers search on selection', async () => {
   const router = await renderFilter()
   const input = screen.getByRole('combobox', { name: 'Group' })
   await userEvent.click(input)
@@ -162,8 +160,6 @@ it('confirms a keyboard choice before Enter submits the selected group', async (
   await userEvent.keyboard('{ArrowDown}{Enter}')
   expect(input).toHaveValue('default')
   expect(input).toHaveAttribute('aria-expanded', 'false')
-  expect(router.state.location.search).not.toHaveProperty('group')
-  await userEvent.keyboard('{Enter}')
   await waitFor(() =>
     expect(router.state.location.search).toMatchObject({ group: 'default' })
   )

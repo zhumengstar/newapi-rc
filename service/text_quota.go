@@ -533,6 +533,10 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 
 	}
 
+	if generatedImages, exists := ctx.Get("generated_images"); exists {
+		other.SetPublic("generated_images", generatedImages)
+	}
+
 	attachQuotaSaturation(ctx, relayInfo, other)
 
 	model.RecordConsumeLog(ctx, relayInfo.UserId, model.RecordConsumeLogParams{

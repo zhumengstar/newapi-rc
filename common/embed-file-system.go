@@ -3,11 +3,19 @@ package common
 import (
 	"embed"
 	"io/fs"
+	"mime"
 	"net/http"
 	"os"
 
 	"github.com/gin-contrib/static"
 )
+
+func init() {
+	_ = mime.AddExtensionType(".js", "application/javascript; charset=utf-8")
+	_ = mime.AddExtensionType(".mjs", "application/javascript; charset=utf-8")
+	_ = mime.AddExtensionType(".css", "text/css; charset=utf-8")
+	_ = mime.AddExtensionType(".svg", "image/svg+xml")
+}
 
 // Credit: https://github.com/gin-contrib/static/issues/19
 

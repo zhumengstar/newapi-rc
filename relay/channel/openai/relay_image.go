@@ -49,6 +49,10 @@ func OpenaiImageHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.
 
 	normalizeOpenAIUsage(&usageResp.Usage)
 	applyUsagePostProcessing(info, &usageResp.Usage, responseBody)
+	var imageResp dto.ImageResponse
+	if err := common.Unmarshal(responseBody, &imageResp); err == nil && len(imageResp.Data) > 0 {
+		service.RecordGeneratedImages(c, info, imageDataForRecording(c, imageResp.Data), &usageResp.Usage)
+	}
 	return &usageResp.Usage, nil
 }
 
@@ -236,6 +240,11 @@ func openaiImageJSONAsStreamHandler(c *gin.Context, info *relaycommon.RelayInfo,
 	normalizeOpenAIUsage(&usageResp.Usage)
 	applyUsagePostProcessing(info, &usageResp.Usage, responseBody)
 
+	var imageResp dto.ImageResponse
+	if err := common.Unmarshal(responseBody, &imageResp); err == nil && len(imageResp.Data) > 0 {
+		service.RecordGeneratedImages(c, info, imageDataForRecording(c, imageResp.Data), &usageResp.Usage)
+	}
+
 	imageCount := gjson.GetBytes(responseBody, "data.#").Int()
 	info.UpdateImageCount(imageCount)
 
@@ -315,3 +324,22 @@ func openaiImageJSONAsStreamHandler(c *gin.Context, info *relaycommon.RelayInfo,
 func writeOpenaiImageStreamDone(c *gin.Context) error {
 	return helper.StringData(c, "[DONE]")
 }
+
+func imageDataForRecording(c *gin.Context, images []dto.ImageData) []dto.ImageData {
+	recordable := make([]dto.ImageData, 0, len(images))
+	for _, image := range images {
+		switch {
+		case image.B64Json != "":
+			recordable = append(recordable, dto.ImageData{B64Json: image.B64Json})
+		case image.Url != "":
+			mimeType, data, err := service.GetImageFromUrl(image.Url)
+			if err != nil {
+				logger.LogError(c, "failed to download generated image: "+err.Error())
+				continue
+			}
+			recordable = append(recordable, dto.ImageData{B64Json: "data:" + mimeType + ";base64," + data})
+		}
+	}
+	return recordable
+}
+

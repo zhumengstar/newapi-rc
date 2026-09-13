@@ -250,6 +250,10 @@ func updateUserSettingCache(userId int, setting string) error {
 	return updateUserCacheField(userId, "Setting", setting)
 }
 
+func UpdateUserSettingCache(userId int, setting string) error {
+	return updateUserSettingCache(userId, setting)
+}
+
 // updateUserCacheField prevents individual cache refreshes from bypassing the
 // auth-version fence. It intentionally does nothing when the complete hash is
 // absent; the next GetUserCache call will repopulate it from the database.

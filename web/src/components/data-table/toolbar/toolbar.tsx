@@ -27,25 +27,15 @@ import { Input } from '@/components/ui/input'
 import { useDebounce, useMediaQuery } from '@/hooks'
 import { cn } from '@/lib/utils'
 
-import { DataTableFacetedFilter } from './faceted-filter'
+import { DataTableFacetedFilter, type FacetedFilterOption } from './faceted-filter'
 import { DataTableMobileFilterPanel } from './mobile-filter-panel'
 import { DataTableViewOptions } from './view-options'
 
 type FilterDef = {
   columnId: string
   title: string
-  options: {
-    label: string
-    value: string
-    icon?: React.ComponentType<{ className?: string }>
-    iconNode?: React.ReactNode
-    count?: number
-  }[]
-  renderOptionActions?: (option: {
-    label: string
-    value: string
-    count?: number
-  }) => React.ReactNode
+  options: FacetedFilterOption[]
+  renderOptionActions?: (option: FacetedFilterOption) => React.ReactNode
   singleSelect?: boolean
   onClear?: () => void
   onOptionReorder?: (sourceValue: string, targetValue: string) => void
@@ -260,6 +250,11 @@ export function DataTableToolbar<TData>(props: DataTableToolbarProps<TData>) {
     queueSearchValue(value)
   }
 
+  const [openFilterId, setOpenFilterId] = useState<string | null>(null)
+  const lastClosedFilterRef = React.useRef<{ id: string; time: number } | null>(
+    null
+  )
+
   const searchInput = (
     <Input
       placeholder={placeholder}
@@ -274,8 +269,29 @@ export function DataTableToolbar<TData>(props: DataTableToolbarProps<TData>) {
   const filterChips = React.useMemo(
     () =>
       filters.map((filter) => {
-        const column = props.table.getColumn(filter.columnId)
-        if (!column) return null
+        let column = props.table.getColumn(filter.columnId)
+        if (!column) {
+          column = {
+            id: filter.columnId,
+            getFilterValue: () =>
+              props.table
+                .getState()
+                .columnFilters.find((f) => f.id === filter.columnId)?.value,
+            setFilterValue: (val: unknown) => {
+              props.table.setColumnFilters((prev) => {
+                const filtered = prev.filter((f) => f.id !== filter.columnId)
+                if (
+                  val === undefined ||
+                  (Array.isArray(val) && val.length === 0)
+                ) {
+                  return filtered
+                }
+                return [...filtered, { id: filter.columnId, value: val }]
+              })
+            },
+            getFacetedUniqueValues: () => new Map(),
+          } as ReturnType<typeof props.table.getColumn>
+        }
         return (
           <DataTableFacetedFilter
             key={filter.columnId}
@@ -286,14 +302,38 @@ export function DataTableToolbar<TData>(props: DataTableToolbarProps<TData>) {
             onClear={filter.onClear}
             renderOptionActions={filter.renderOptionActions}
             onOptionReorder={filter.onOptionReorder}
+            open={openFilterId === filter.columnId}
+            onOpenChange={(nextOpen) => {
+              if (nextOpen) {
+                // 如果当前 filter 在 250ms 内刚刚触发过关闭（同一次点击手势在 pointerdown 关闭后紧接着派发的 click），
+                // 忽略随后的重新打开，确保点击能够正常隐藏！
+                if (
+                  lastClosedFilterRef.current &&
+                  lastClosedFilterRef.current.id === filter.columnId &&
+                  Date.now() - lastClosedFilterRef.current.time < 250
+                ) {
+                  return
+                }
+                setOpenFilterId(filter.columnId)
+              } else {
+                lastClosedFilterRef.current = {
+                  id: filter.columnId,
+                  time: Date.now(),
+                }
+                setOpenFilterId((prev) =>
+                  prev === filter.columnId ? null : prev
+                )
+              }
+            }}
           />
         )
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [props.filters, props.table]
+    [props.filters, openFilterId, props.table]
   )
 
   const handleReset = () => {
+    setOpenFilterId(null)
     setIsSearchComposing(false)
     setSearchDraft(null)
     props.table.resetColumnFilters()

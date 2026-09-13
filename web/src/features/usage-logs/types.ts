@@ -171,6 +171,13 @@ export interface LogOtherData {
   user_agent?: string
   request_path?: string
   request_conversion?: string[]
+  generated_images?: Array<{
+    url: string
+    size?: number
+    mime_type?: string
+    width?: number
+    height?: number
+  }>
   ws?: boolean
   audio?: boolean
   audio_input?: number
@@ -488,3 +495,10 @@ export interface UserInfo {
   aff_quota?: number
   remark?: string
 }
+
+export interface CurrentMinuteIncome {
+  quota: number
+  minute_quota: number
+  hour_quota: number
+}
+

@@ -4,12 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/types"
+	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/gin-gonic/gin"
 
@@ -78,6 +82,49 @@ type Log struct {
 	RequestId         string `json:"request_id,omitempty" gorm:"type:varchar(64);index:idx_logs_request_id;default:''"`
 	UpstreamRequestId string `json:"upstream_request_id,omitempty" gorm:"type:varchar(128);index:idx_logs_upstream_request_id;default:''"`
 	Other             string `json:"other"`
+}
+
+const maxListRequestBodyPreviewBytes = 8 << 10
+
+func compactLogsForList(logs []*Log) {
+	for _, log := range logs {
+		compactLogOtherForList(log)
+	}
+}
+
+func compactLogOtherForList(log *Log) {
+	if log == nil || log.Other == "" || len(log.Other) <= maxListRequestBodyPreviewBytes {
+		return
+	}
+	var other map[string]interface{}
+	if err := common.UnmarshalJsonStr(log.Other, &other); err != nil || other == nil {
+		return
+	}
+	requestBody, ok := other["request_body"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	body, exists := requestBody["body"]
+	if !exists {
+		return
+	}
+	bodyPreview := fmt.Sprintf("%v", body)
+	if len(bodyPreview) <= maxListRequestBodyPreviewBytes {
+		return
+	}
+	requestBody["body_preview"] = truncateLoggedLogListString(bodyPreview, maxListRequestBodyPreviewBytes)
+	requestBody["body_omitted"] = true
+	requestBody["body_omitted_reason"] = "large request body is omitted from list response"
+	delete(requestBody, "body")
+	other["request_body"] = requestBody
+	log.Other = common.MapToJsonStr(other)
+}
+
+func truncateLoggedLogListString(value string, limit int) string {
+	if limit <= 0 || len(value) <= limit {
+		return value
+	}
+	return value[:limit] + "...(truncated)"
 }
 
 // don't use iota, avoid change log type value
@@ -496,21 +543,37 @@ func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName
 	if group != "" {
 		tx = tx.Where("logs."+logGroupCol+" = ?", group)
 	}
-	err = tx.Model(&Log{}).Count(&total).Error
-	if err != nil {
-		return nil, 0, err
-	}
 	order := "logs.created_at desc, logs.id desc"
 	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
 		order = clickHouseLogOrder("logs.")
 	}
-	err = tx.Order(order).Limit(num).Offset(startIdx).Find(&logs).Error
-	if err != nil {
+	countKey := buildLogCountCacheKey(
+		"all",
+		strconv.Itoa(logType), strconv.FormatInt(startTimestamp, 10), strconv.FormatInt(endTimestamp, 10),
+		modelName, username, tokenName, strconv.Itoa(channel), group, requestId, upstreamRequestId,
+	)
+	countTx := tx.Session(&gorm.Session{})
+	listTx := tx.Session(&gorm.Session{})
+	queryGroup := new(errgroup.Group)
+	queryGroup.Go(func() error {
+		var countErr error
+		total, countErr = getCachedLogCount(countKey, func() (int64, error) {
+			var count int64
+			countErr := countTx.Model(&Log{}).Count(&count).Error
+			return count, countErr
+		})
+		return countErr
+	})
+	queryGroup.Go(func() error {
+		return listTx.Order(order).Limit(num).Offset(startIdx).Find(&logs).Error
+	})
+	if err = queryGroup.Wait(); err != nil {
 		return nil, 0, err
 	}
 	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
 		assignDisplayLogIds(logs, startIdx)
 	}
+	compactLogsForList(logs)
 
 	channelIds := types.NewSet[int]()
 	for _, log := range logs {
@@ -586,22 +649,37 @@ func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int
 	if group != "" {
 		tx = tx.Where("logs."+logGroupCol+" = ?", group)
 	}
-	err = tx.Model(&Log{}).Limit(logSearchCountLimit).Count(&total).Error
-	if err != nil {
-		common.SysError("failed to count user logs: " + err.Error())
-		return nil, 0, errors.New("查询日志失败")
-	}
 	order := "logs.id desc"
 	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
 		order = clickHouseLogOrder("logs.")
 	}
-	err = tx.Order(order).Limit(num).Offset(startIdx).Find(&logs).Error
-	if err != nil {
+	countKey := buildLogCountCacheKey(
+		"user", strconv.Itoa(userId), strconv.Itoa(logType),
+		strconv.FormatInt(startTimestamp, 10), strconv.FormatInt(endTimestamp, 10),
+		modelName, tokenName, group, requestId, upstreamRequestId,
+	)
+	countTx := tx.Session(&gorm.Session{})
+	listTx := tx.Session(&gorm.Session{})
+	queryGroup := new(errgroup.Group)
+	queryGroup.Go(func() error {
+		var countErr error
+		total, countErr = getCachedLogCount(countKey, func() (int64, error) {
+			var count int64
+			countErr := countTx.Model(&Log{}).Limit(logSearchCountLimit).Count(&count).Error
+			return count, countErr
+		})
+		return countErr
+	})
+	queryGroup.Go(func() error {
+		return listTx.Order(order).Limit(num).Offset(startIdx).Find(&logs).Error
+	})
+	if err = queryGroup.Wait(); err != nil {
 		common.SysError("failed to search user logs: " + err.Error())
 		return nil, 0, errors.New("查询日志失败")
 	}
 
 	formatUserLogs(logs, startIdx)
+	compactLogsForList(logs)
 	return logs, total, err
 }
 
@@ -737,3 +815,98 @@ func DeleteOldLogBatch(ctx context.Context, targetTimestamp int64, limit int) (i
 	}
 	return result.RowsAffected, nil
 }
+
+type RecentIncome struct {
+	MinuteQuota int64 `json:"minute_quota" gorm:"column:minute_quota"`
+	HourQuota   int64 `json:"hour_quota" gorm:"column:hour_quota"`
+}
+
+var (
+	recentIncomeCacheVal RecentIncome
+	recentIncomeCacheExp time.Time
+	recentIncomeCacheMu  sync.RWMutex
+	recentIncomeGroup    singleflight.Group
+)
+
+func SumRecentIncome() (RecentIncome, error) {
+	var income RecentIncome
+	now := time.Now().Unix()
+
+	var userIDs []int
+	err := DB.Unscoped().Model(&User{}).Where("role < ?", common.RoleAdminUser).Pluck("id", &userIDs).Error
+	if err != nil {
+		return income, err
+	}
+	if len(userIDs) == 0 {
+		return income, nil
+	}
+
+	if err := LOG_DB.Model(&Log{}).
+		Select(
+			"COALESCE(SUM(CASE WHEN created_at >= ? AND created_at <= ? THEN quota ELSE 0 END), 0) AS minute_quota, "+
+				"COALESCE(SUM(CASE WHEN created_at >= ? AND created_at <= ? THEN quota ELSE 0 END), 0) AS hour_quota",
+			now-60, now, now-3600, now,
+		).
+		Where("type = ? AND created_at >= ? AND created_at <= ? AND user_id IN ?", LogTypeConsume, now-3600, now, userIDs).
+		Scan(&income).Error; err != nil {
+		return income, err
+	}
+	return income, nil
+}
+
+func GetCachedRecentIncome() (RecentIncome, error) {
+	now := time.Now()
+	recentIncomeCacheMu.RLock()
+	if now.Before(recentIncomeCacheExp) {
+		val := recentIncomeCacheVal
+		recentIncomeCacheMu.RUnlock()
+		return val, nil
+	}
+	recentIncomeCacheMu.RUnlock()
+
+	val, err, _ := recentIncomeGroup.Do("recent_income", func() (interface{}, error) {
+		now := time.Now()
+		recentIncomeCacheMu.RLock()
+		if now.Before(recentIncomeCacheExp) {
+			v := recentIncomeCacheVal
+			recentIncomeCacheMu.RUnlock()
+			return v, nil
+		}
+		recentIncomeCacheMu.RUnlock()
+
+		income, err := SumRecentIncome()
+		if err != nil {
+			return RecentIncome{}, err
+		}
+
+		recentIncomeCacheMu.Lock()
+		recentIncomeCacheVal = income
+		recentIncomeCacheExp = now.Add(3 * time.Second)
+		recentIncomeCacheMu.Unlock()
+		return income, nil
+	})
+
+	if err != nil {
+		return RecentIncome{}, err
+	}
+	return val.(RecentIncome), nil
+}
+
+func CanAccessGeneratedImageAsset(userId int, role int, date string, filename string) bool {
+	if strings.TrimSpace(filename) == "" {
+		return false
+	}
+	if role >= common.RoleAdminUser {
+		return true
+	}
+	var count int64
+	err := LOG_DB.Model(&Log{}).
+		Where("user_id = ? AND (other LIKE ? OR other LIKE ?)", userId, "%"+filename+"%", "%"+date+"/"+filename+"%").
+		Count(&count).Error
+	if err != nil {
+		common.SysLog("failed to check generated image asset access: " + err.Error())
+		return false
+	}
+	return count > 0
+}
+

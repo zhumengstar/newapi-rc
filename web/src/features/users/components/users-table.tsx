@@ -53,6 +53,8 @@ const USER_SORTABLE_COLUMNS = new Set<UserSortBy>([
   'group',
   'created_at',
   'last_login_at',
+  'today_consumed_quota',
+  'total_consumed_quota',
 ])
 
 function isDisabledUserRow(user: User) {
@@ -64,7 +66,9 @@ export function UsersTable() {
   const columns = useUsersColumns()
   const { refreshTrigger } = useUsers()
   const isMobile = useMediaQuery('(max-width: 640px)')
-  const [sorting, setSorting] = useState<SortingState>([])
+  const [sorting, setSorting] = useState<SortingState>([
+    { id: 'today_consumed_quota', desc: true },
+  ])
 
   const {
     globalFilter,

@@ -41,6 +41,7 @@ import { cn } from '@/lib/utils'
 export type Option = {
   label: string
   value: string
+  description?: React.ReactNode
 }
 
 interface MultiSelectProps {
@@ -135,6 +136,16 @@ export function MultiSelect(props: MultiSelectProps) {
     const map = new Map<string, string>()
     for (const option of props.options) {
       map.set(option.value, option.label)
+    }
+    return map
+  }, [props.options])
+
+  const descriptionMap = React.useMemo(() => {
+    const map = new Map<string, React.ReactNode>()
+    for (const option of props.options) {
+      if (option.description !== undefined) {
+        map.set(option.value, option.description)
+      }
     }
     return map
   }, [props.options])
@@ -396,6 +407,13 @@ export function MultiSelect(props: MultiSelectProps) {
                           : t('Add "{{value}}"', { value: item })}
                       </span>
                     </>
+                  ) : descriptionMap.has(item) ? (
+                    <div className='flex items-center justify-between gap-2 w-full min-w-0'>
+                      <span className='truncate'>{label}</span>
+                      <span className='shrink-0 text-xs text-muted-foreground'>
+                        {descriptionMap.get(item)}
+                      </span>
+                    </div>
                   ) : (
                     <span className='truncate'>{label}</span>
                   )}

@@ -29,6 +29,7 @@ import type {
   GetTaskLogsParams,
   TaskArtifactsResponse,
   UserInfo,
+  CurrentMinuteIncome,
 } from './types'
 
 // ============================================================================
@@ -90,6 +91,15 @@ export async function getUserInfo(
   userId: number
 ): Promise<{ success: boolean; message?: string; data?: UserInfo }> {
   const res = await api.get(`/api/user/${userId}`)
+  return res.data
+}
+
+export async function getCurrentMinuteIncome(): Promise<{
+  success: boolean
+  message?: string
+  data?: CurrentMinuteIncome
+}> {
+  const res = await api.get('/api/log/current_minute_income')
   return res.data
 }
 

@@ -26,6 +26,7 @@ import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Combobox } from '@/components/ui/combobox'
+import { cn } from '@/lib/utils'
 import {
   Select,
   SelectContent,
@@ -211,14 +212,17 @@ export function CommonLogsFilterBar<TData>(
   )
 
   const handleApply = useCallback(
-    (nextFilters: CommonLogFilters = filters) => {
+    (
+      nextFilters: CommonLogFilters = filters,
+      nextLogType: LogTypeValue = logType
+    ) => {
       const filterParams = buildSearchParams(nextFilters, 'common')
       navigate({
         to: '/usage-logs/$section',
         params: { section: 'common' },
         search: {
           ...filterParams,
-          type: [logType],
+          type: [nextLogType],
           page: 1,
         },
       })
@@ -230,14 +234,32 @@ export function CommonLogsFilterBar<TData>(
 
   const handleReset = useCallback(() => {
     const { start, end } = getDefaultTimeRange()
-    const resetFilters: CommonLogFilters = { startTime: start, endTime: end }
+    const resetFilters: CommonLogFilters = {
+      startTime: start,
+      endTime: end,
+      channel: undefined,
+      model: undefined,
+      token: undefined,
+      group: undefined,
+      username: undefined,
+      requestId: undefined,
+      upstreamRequestId: undefined,
+    }
     const resetSearch = {
-      type: [LOG_TYPE_ALL_VALUE],
-      startTime: start.getTime(),
-      endTime: end.getTime(),
+      page: 1,
+      type: undefined,
+      startTime: undefined,
+      endTime: undefined,
+      channel: undefined,
+      model: undefined,
+      token: undefined,
+      group: undefined,
+      username: undefined,
+      requestId: undefined,
+      upstreamRequestId: undefined,
     }
     setDraft({
-      sourceKey: buildSearchSourceKey(resetSearch),
+      sourceKey: buildSearchSourceKey({}),
       filters: resetFilters,
       logType: LOG_TYPE_ALL_VALUE,
     })
@@ -245,10 +267,7 @@ export function CommonLogsFilterBar<TData>(
     navigate({
       to: '/usage-logs/$section',
       params: { section: 'common' },
-      search: {
-        page: 1,
-        ...resetSearch,
-      },
+      search: resetSearch,
     })
     queryClient.invalidateQueries({ queryKey: ['logs'] })
     queryClient.invalidateQueries({ queryKey: ['usage-logs-stats'] })
@@ -269,8 +288,23 @@ export function CommonLogsFilterBar<TData>(
     !!filters.upstreamRequestId
 
   const hasTypeFilter = logType !== LOG_TYPE_ALL_VALUE
+  const isTimeCustom = useMemo(() => {
+    if (searchParams.startTime != null || searchParams.endTime != null) return true
+    const { start, end } = getDefaultTimeRange()
+    if (filters.startTime && Math.abs(filters.startTime.getTime() - start.getTime()) > 60 * 1000) {
+      return true
+    }
+    if (filters.endTime && Math.abs(filters.endTime.getTime() - end.getTime()) > 60 * 1000) {
+      return true
+    }
+    return false
+  }, [searchParams.startTime, searchParams.endTime, filters.startTime, filters.endTime])
   const hasAdditionalFilters =
-    !!filters.model || !!filters.group || hasTypeFilter || hasExpandedFilters
+    !!filters.model ||
+    !!filters.group ||
+    hasTypeFilter ||
+    hasExpandedFilters ||
+    isTimeCustom
 
   const expandedFilterCount = [
     filters.token,
@@ -319,22 +353,20 @@ export function CommonLogsFilterBar<TData>(
   )
 
   const dateRangeFilter = (
-    <LogsFilterField wide>
+    <LogsFilterField wide className='shrink-0'>
       <CompactDateTimeRangePicker
         start={filters.startTime}
         end={filters.endTime}
         onChange={({ start, end }) => {
           handleChange('startTime', start)
           handleChange('endTime', end)
-          if (isMobile) {
-            handleApply({ ...filters, startTime: start, endTime: end })
-          }
+          handleApply({ ...filters, startTime: start, endTime: end }, logType)
         }}
       />
     </LogsFilterField>
   )
   const modelFilter = (
-    <LogsFilterField>
+    <LogsFilterField flex className='min-w-[100px]'>
       <LogsFilterInput
         placeholder={t('Model Name')}
         value={filters.model || ''}
@@ -344,7 +376,7 @@ export function CommonLogsFilterBar<TData>(
     </LogsFilterField>
   )
   const groupFilter = (
-    <LogsFilterField className={sensitiveInputClass}>
+    <LogsFilterField flex className={cn('min-w-[85px]', sensitiveInputClass)}>
       <Combobox
         options={groupOptions}
         allowCustomValue
@@ -353,13 +385,17 @@ export function CommonLogsFilterBar<TData>(
         placeholder={t('Group')}
         className='h-8 min-w-0 text-sm leading-5'
         value={filters.group || ''}
-        onValueChange={(value) => handleChange('group', value ?? '')}
+        onValueChange={(value) => {
+          const groupValue = value || undefined
+          handleChange('group', groupValue)
+          handleApply({ ...filters, group: groupValue }, logType)
+        }}
         onKeyDown={handleKeyDown}
       />
     </LogsFilterField>
   )
   const typeFilter = (
-    <LogsFilterField>
+    <LogsFilterField flex className='min-w-[85px]'>
       <Select
         items={logTypeItems}
         value={logType}
@@ -377,6 +413,7 @@ export function CommonLogsFilterBar<TData>(
               logType: nextLogType,
             }
           })
+          handleApply(filters, nextLogType)
         }}
       >
         <SelectTrigger
@@ -431,9 +468,9 @@ export function CommonLogsFilterBar<TData>(
       </Select>
     </LogsFilterField>
   )
-  const advancedFilters = (
+  const expandedFilters = (
     <>
-      <LogsFilterField>
+      <LogsFilterField flex className={cn('min-w-[85px]', sensitiveInputClass)}>
         <LogsFilterInput
           placeholder={t('Token Name')}
           className={sensitiveInputClass}
@@ -443,7 +480,7 @@ export function CommonLogsFilterBar<TData>(
         />
       </LogsFilterField>
       {isAdmin && (
-        <LogsFilterField>
+        <LogsFilterField flex className={cn('min-w-[80px]', sensitiveInputClass)}>
           <LogsFilterInput
             placeholder={t('Username')}
             className={sensitiveInputClass}
@@ -454,7 +491,7 @@ export function CommonLogsFilterBar<TData>(
         </LogsFilterField>
       )}
       {isAdmin && (
-        <LogsFilterField>
+        <LogsFilterField flex className='min-w-[75px]'>
           <LogsFilterInput
             placeholder={t('Channel ID')}
             value={filters.channel || ''}
@@ -463,7 +500,7 @@ export function CommonLogsFilterBar<TData>(
           />
         </LogsFilterField>
       )}
-      <LogsFilterField>
+      <LogsFilterField flex className='min-w-[80px]'>
         <LogsFilterInput
           placeholder={t('Request ID')}
           value={filters.requestId || ''}
@@ -471,7 +508,7 @@ export function CommonLogsFilterBar<TData>(
           onKeyDown={handleKeyDown}
         />
       </LogsFilterField>
-      <LogsFilterField>
+      <LogsFilterField flex className='min-w-[90px]'>
         <LogsFilterInput
           placeholder={t('Upstream Request ID')}
           value={filters.upstreamRequestId || ''}
@@ -494,24 +531,22 @@ export function CommonLogsFilterBar<TData>(
           {modelFilter}
           {groupFilter}
           {typeFilter}
+          {expandedFilters}
         </>
       }
-      advancedFilters={advancedFilters}
       mobilePinnedFilters={dateRangeFilter}
       mobileFilters={
         <>
           {modelFilter}
           {groupFilter}
           {typeFilter}
-          {advancedFilters}
+          {expandedFilters}
         </>
       }
       mobileFilterCount={
         [filters.model, filters.group, hasTypeFilter].filter(Boolean).length +
         expandedFilterCount
       }
-      hasAdvancedActiveFilters={hasExpandedFilters}
-      advancedFilterCount={expandedFilterCount}
       hasActiveFilters={hasAdditionalFilters}
       onSearch={() => handleApply()}
       searchLoading={fetchingLogs > 0}

@@ -64,68 +64,104 @@ func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInf
 }
 
 func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.ImageRequest) (any, error) {
-	if !strings.HasPrefix(info.UpstreamModelName, "imagen") {
-		return nil, errors.New("not supported model for image generation, only imagen models are supported")
-	}
-
-	// convert size to aspect ratio but allow user to specify aspect ratio
-	aspectRatio := "1:1" // default aspect ratio
-	size := strings.TrimSpace(request.Size)
-	if size != "" {
-		if strings.Contains(size, ":") {
-			aspectRatio = size
-		} else {
-			switch size {
-			case "256x256", "512x512", "1024x1024":
-				aspectRatio = "1:1"
-			case "1536x1024":
-				aspectRatio = "3:2"
-			case "1024x1536":
-				aspectRatio = "2:3"
-			case "1024x1792":
-				aspectRatio = "9:16"
-			case "1792x1024":
-				aspectRatio = "16:9"
+	if strings.HasPrefix(info.UpstreamModelName, "imagen") {
+		// convert size to aspect ratio but allow user to specify aspect ratio
+		aspectRatio := "1:1" // default aspect ratio
+		size := strings.TrimSpace(request.Size)
+		if size != "" {
+			if strings.Contains(size, ":") {
+				aspectRatio = size
+			} else {
+				switch size {
+				case "256x256", "512x512", "1024x1024":
+					aspectRatio = "1:1"
+				case "1536x1024":
+					aspectRatio = "3:2"
+				case "1024x1536":
+					aspectRatio = "2:3"
+				case "1024x1792":
+					aspectRatio = "9:16"
+				case "1792x1024":
+					aspectRatio = "16:9"
+				}
 			}
 		}
+
+		// build gemini imagen request
+		geminiRequest := dto.GeminiImageRequest{
+			Instances: []dto.GeminiImageInstance{
+				{
+					Prompt: request.Prompt,
+				},
+			},
+			Parameters: dto.GeminiImageParameters{
+				SampleCount:      int(lo.FromPtrOr(request.N, uint(1))),
+				AspectRatio:      aspectRatio,
+				PersonGeneration: "allow_adult", // default allow adult
+			},
+		}
+
+		// Set imageSize when quality parameter is specified
+		// Map quality parameter to imageSize (only supported by Standard and Ultra models)
+		// quality values: auto, high, medium, low (for gpt-image-1), hd, standard (for dall-e-3)
+		// imageSize values: 1K (default), 2K
+		// https://ai.google.dev/gemini-api/docs/imagen
+		// https://platform.openai.com/docs/api-reference/images/create
+		if request.Quality != "" {
+			imageSize := "1K" // default
+			switch request.Quality {
+			case "hd", "high":
+				imageSize = "2K"
+			case "2K":
+				imageSize = "2K"
+			case "standard", "medium", "low", "auto", "1K":
+				imageSize = "1K"
+			default:
+				// unknown quality value, default to 1K
+				imageSize = "1K"
+			}
+			geminiRequest.Parameters.ImageSize = imageSize
+		}
+
+		return geminiRequest, nil
 	}
 
-	// build gemini imagen request
-	geminiRequest := dto.GeminiImageRequest{
-		Instances: []dto.GeminiImageInstance{
+	// For Gemini multimodal generation models (gemini-3-pro-image-preview, gemini-3.1-flash-image-preview, gemini-2.0-flash-exp, etc.)
+	prompt := request.Prompt
+	var specs []string
+	if request.Size != "" && request.Size != "auto" {
+		specs = append(specs, fmt.Sprintf("resolution %s", request.Size))
+		if strings.Contains(request.Size, "3840") || strings.Contains(request.Size, "2160") {
+			specs = append(specs, "4K UHD ultra-high definition")
+		}
+		if strings.Contains(request.Size, "16:9") || request.Size == "1792x1024" || request.Size == "3840x2160" {
+			specs = append(specs, "16:9 aspect ratio")
+		} else if strings.Contains(request.Size, "9:16") || request.Size == "1024x1792" || request.Size == "2160x3840" {
+			specs = append(specs, "9:16 aspect ratio")
+		}
+	}
+	if request.Quality == "high" || request.Quality == "hd" || request.Quality == "4k" {
+		specs = append(specs, "masterpiece, ultra-detailed, high fidelity")
+	}
+	if len(specs) > 0 {
+		prompt = fmt.Sprintf("%s [Specification: %s]", prompt, strings.Join(specs, ", "))
+	}
+
+	geminiRequest := dto.GeminiChatRequest{
+		Contents: []dto.GeminiChatContent{
 			{
-				Prompt: request.Prompt,
+				Role: "user",
+				Parts: []dto.GeminiPart{
+					{
+						Text: prompt,
+					},
+				},
 			},
 		},
-		Parameters: dto.GeminiImageParameters{
-			SampleCount:      int(lo.FromPtrOr(request.N, uint(1))),
-			AspectRatio:      aspectRatio,
-			PersonGeneration: "allow_adult", // default allow adult
+		GenerationConfig: dto.GeminiChatGenerationConfig{
+			ResponseModalities: []string{"TEXT", "IMAGE"},
 		},
 	}
-
-	// Set imageSize when quality parameter is specified
-	// Map quality parameter to imageSize (only supported by Standard and Ultra models)
-	// quality values: auto, high, medium, low (for gpt-image-1), hd, standard (for dall-e-3)
-	// imageSize values: 1K (default), 2K
-	// https://ai.google.dev/gemini-api/docs/imagen
-	// https://platform.openai.com/docs/api-reference/images/create
-	if request.Quality != "" {
-		imageSize := "1K" // default
-		switch request.Quality {
-		case "hd", "high":
-			imageSize = "2K"
-		case "2K":
-			imageSize = "2K"
-		case "standard", "medium", "low", "auto", "1K":
-			imageSize = "1K"
-		default:
-			// unknown quality value, default to 1K
-			imageSize = "1K"
-		}
-		geminiRequest.Parameters.ImageSize = imageSize
-	}
-
 	return geminiRequest, nil
 }
 
@@ -139,6 +175,10 @@ func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 
 	if strings.HasPrefix(info.UpstreamModelName, "imagen") {
 		return fmt.Sprintf("%s/%s/models/%s:predict", info.ChannelBaseUrl, version, info.UpstreamModelName), nil
+	}
+
+	if info.RelayMode == constant.RelayModeImagesGenerations || info.RelayMode == constant.RelayModeImagesEdits {
+		return fmt.Sprintf("%s/%s/models/%s:generateContent", info.ChannelBaseUrl, version, info.UpstreamModelName), nil
 	}
 
 	if strings.HasPrefix(info.UpstreamModelName, "text-embedding") ||

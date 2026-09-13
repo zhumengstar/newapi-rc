@@ -110,6 +110,52 @@ func GetAllUserTokens(userId int, startIdx int, num int) ([]*Token, error) {
 	return tokens, err
 }
 
+func GetUsableTokenNamesByUserId(userId int) ([]string, error) {
+	if userId == 0 {
+		return nil, errors.New("userId 为空！")
+	}
+	rawNames := make([]string, 0)
+	err := DB.Model(&Token{}).
+		Where("user_id = ? AND status = ? AND name <> ?", userId, common.TokenStatusEnabled, "").
+		Where("expired_time = ? OR expired_time > ?", -1, common.GetTimestamp()).
+		Where("unlimited_quota = ? OR remain_quota > ?", true, 0).
+		Order("id desc").
+		Pluck("name", &rawNames).Error
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(rawNames))
+	seen := make(map[string]bool, len(rawNames))
+	for _, name := range rawNames {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+	return names, err
+}
+
+func GetUsableTokenByName(userId int, name string) (*Token, error) {
+	if userId == 0 {
+		return nil, errors.New("userId 为空！")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, errors.New("令牌名称为空！")
+	}
+	var token Token
+	err := DB.Where("user_id = ? AND name = ? AND status = ?", userId, name, common.TokenStatusEnabled).
+		Where("expired_time = ? OR expired_time > ?", -1, common.GetTimestamp()).
+		Where("unlimited_quota = ? OR remain_quota > ?", true, 0).
+		Order("id desc").
+		First(&token).Error
+	if err != nil {
+		return nil, err
+	}
+	return &token, nil
+}
+
 // sanitizeLikePattern 校验并清洗用户输入的 LIKE 搜索模式。
 // 规则：
 //  1. 转义 ! 和 _（使用 ! 作为 ESCAPE 字符，兼容 MySQL/PostgreSQL/SQLite）

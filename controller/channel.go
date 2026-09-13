@@ -125,6 +125,307 @@ func GetChannelDefaultBaseURLs(c *gin.Context) {
 	common.ApiSuccess(c, baseURLs)
 }
 
+var channelModelFamilyTerms = map[string][]string{
+	"OpenAI":    {"gpt", "chatgpt", "o1-", "o3-", "o4-", "dall-e", "sora", "codex"},
+	"Claude":    {"claude"},
+	"Gemini":    {"gemini", "gemma", "imagen", "veo", "nano-banana", "nano banana"},
+	"Grok":      {"grok"},
+	"DeepSeek":  {"deepseek"},
+	"Qwen":      {"qwen", "qwq"},
+	"ByteDance": {"doubao", "seedream", "seedance"},
+	"Zhipu":     {"glm", "cogview", "cogvideo"},
+	"Kimi":      {"kimi", "moonshot"},
+	"MiniMax":   {"minimax"},
+	"Mistral":   {"mistral", "codestral", "ministral", "pixtral"},
+	"Meta":      {"llama", "meta-llama"},
+	"Cohere":    {"command", "c4ai"},
+	"Baidu":     {"ernie", "wenxin"},
+	"Hunyuan":   {"hunyuan"},
+}
+
+func getChannelModelFamily(modelName string) string {
+	name := strings.ToLower(strings.TrimSpace(modelName))
+	if name == "o1" || name == "o3" || name == "o4" {
+		return "OpenAI"
+	}
+	for family, terms := range channelModelFamilyTerms {
+		for _, term := range terms {
+			if strings.HasPrefix(name, term) {
+				return family
+			}
+		}
+	}
+	return "Other"
+}
+
+func getChannelModelFamilies(models string) map[string]struct{} {
+	families := make(map[string]struct{})
+	for _, modelName := range strings.Split(strings.Trim(models, ","), ",") {
+		if strings.TrimSpace(modelName) != "" {
+			families[getChannelModelFamily(modelName)] = struct{}{}
+		}
+	}
+	return families
+}
+
+func applyChannelModelFamilyFilter(query *gorm.DB, family string) *gorm.DB {
+	if family == "" || family == "all" {
+		return query
+	}
+	models := make([]string, 0)
+	for _, modelName := range model.GetEnabledModels() {
+		if getChannelModelFamily(modelName) == family {
+			models = append(models, modelName)
+		}
+	}
+	if len(models) == 0 {
+		return query.Where("1 = 0")
+	}
+	subQuery := model.DB.Model(&model.Ability{}).
+		Select("channel_id").
+		Where("enabled = ? AND model IN ?", true, models)
+	return query.Where("id IN (?)", subQuery)
+}
+
+const (
+	channelModelTypeText       = "Text"
+	channelModelTypeMultimodal = "Multimodal"
+	channelModelTypeImage      = "Image"
+	channelModelTypeVideo      = "Video"
+
+	channelBillingTypePerRequest = "PerRequest"
+	channelBillingTypePerToken   = "PerToken"
+)
+
+func getChannelModelType(modelName string) string {
+	name := strings.ToLower(strings.TrimSpace(modelName))
+	videoTerms := []string{"video", "veo", "sora", "seedance", "kling", "hailuo", "wan2", "cogvideo"}
+	for _, term := range videoTerms {
+		if strings.Contains(name, term) {
+			return channelModelTypeVideo
+		}
+	}
+	imageTerms := []string{"image", "imagen", "dall-e", "seedream", "flux", "banana", "cogview", "midjourney", "mj_", "sd-", "sd_", "stable-diffusion"}
+	for _, term := range imageTerms {
+		if strings.Contains(name, term) {
+			return channelModelTypeImage
+		}
+	}
+	multimodalTerms := []string{
+		"vision", "multimodal", "vl", "omni", "4o",
+		"gemini", "claude-3", "gpt-4-turbo",
+		"glm-4v", "internvl", "minicpm-v",
+	}
+	for _, term := range multimodalTerms {
+		if strings.Contains(name, term) {
+			return channelModelTypeMultimodal
+		}
+	}
+	return channelModelTypeText
+}
+
+func getChannelPricingMap() map[string]model.Pricing {
+	pricing := make(map[string]model.Pricing)
+	for _, item := range model.GetPricing() {
+		pricing[item.ModelName] = item
+	}
+	return pricing
+}
+
+func getChannelModelTypes(models string) map[string]struct{} {
+	types := make(map[string]struct{})
+	for _, modelName := range strings.Split(strings.Trim(models, ","), ",") {
+		modelName = strings.TrimSpace(modelName)
+		if modelName != "" {
+			types[getChannelModelType(modelName)] = struct{}{}
+		}
+	}
+	return types
+}
+
+func applyChannelModelTypeFilter(query *gorm.DB, modelType string) *gorm.DB {
+	if modelType == "" || modelType == "all" {
+		return query
+	}
+	models := make([]string, 0)
+	for _, modelName := range model.GetEnabledModels() {
+		if getChannelModelType(modelName) == modelType {
+			models = append(models, modelName)
+		}
+	}
+	if len(models) == 0 {
+		return query.Where("1 = 0")
+	}
+	subQuery := model.DB.Model(&model.Ability{}).
+		Select("channel_id").
+		Where("enabled = ? AND model IN ?", true, models)
+	return query.Where("id IN (?)", subQuery)
+}
+
+func getChannelBillingType(modelName string, pricing map[string]model.Pricing) string {
+	if item, ok := pricing[modelName]; ok && item.QuotaType == 1 {
+		return channelBillingTypePerRequest
+	}
+	return channelBillingTypePerToken
+}
+
+func getChannelBillingTypes(models string, pricing map[string]model.Pricing) map[string]struct{} {
+	types := make(map[string]struct{})
+	for _, modelName := range strings.Split(strings.Trim(models, ","), ",") {
+		modelName = strings.TrimSpace(modelName)
+		if modelName != "" {
+			types[getChannelBillingType(modelName, pricing)] = struct{}{}
+		}
+	}
+	return types
+}
+
+func applyChannelBillingTypeFilter(query *gorm.DB, billingType string) *gorm.DB {
+	if billingType == "" || billingType == "all" {
+		return query
+	}
+	pricing := getChannelPricingMap()
+	models := make([]string, 0)
+	for _, modelName := range model.GetEnabledModels() {
+		if getChannelBillingType(modelName, pricing) == billingType {
+			models = append(models, modelName)
+		}
+	}
+	if len(models) == 0 {
+		return query.Where("1 = 0")
+	}
+	subQuery := model.DB.Model(&model.Ability{}).
+		Select("channel_id").
+		Where("enabled = ? AND model IN ?", true, models)
+	return query.Where("id IN (?)", subQuery)
+}
+
+func getChannelModelFamilyCounts(query *gorm.DB) (map[string]int64, error) {
+	var rows []struct {
+		Models string
+	}
+	if err := query.Select("models").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	counts := make(map[string]int64)
+	counts["all"] = int64(len(rows))
+	for _, row := range rows {
+		for family := range getChannelModelFamilies(row.Models) {
+			counts[family]++
+		}
+	}
+	return counts, nil
+}
+
+func getChannelModelTypeCounts(query *gorm.DB) (map[string]int64, error) {
+	var rows []struct {
+		Models string
+	}
+	if err := query.Select("models").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	counts := make(map[string]int64)
+	counts["all"] = int64(len(rows))
+	for _, row := range rows {
+		for modelType := range getChannelModelTypes(row.Models) {
+			counts[modelType]++
+		}
+	}
+	return counts, nil
+}
+
+func getChannelBillingTypeCounts(query *gorm.DB) (map[string]int64, error) {
+	var rows []struct {
+		Models string
+	}
+	if err := query.Select("models").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	pricing := getChannelPricingMap()
+	counts := make(map[string]int64)
+	counts["all"] = int64(len(rows))
+	for _, row := range rows {
+		for billingType := range getChannelBillingTypes(row.Models, pricing) {
+			counts[billingType]++
+		}
+	}
+	return counts, nil
+}
+
+func countChannelModelFamilies(channels []*model.Channel) map[string]int64 {
+	counts := make(map[string]int64)
+	counts["all"] = int64(len(channels))
+	for _, channel := range channels {
+		for family := range getChannelModelFamilies(channel.Models) {
+			counts[family]++
+		}
+	}
+	return counts
+}
+
+func countChannelModelTypes(channels []*model.Channel) map[string]int64 {
+	counts := make(map[string]int64)
+	counts["all"] = int64(len(channels))
+	for _, channel := range channels {
+		for modelType := range getChannelModelTypes(channel.Models) {
+			counts[modelType]++
+		}
+	}
+	return counts
+}
+
+func countChannelBillingTypes(channels []*model.Channel) map[string]int64 {
+	pricing := getChannelPricingMap()
+	counts := make(map[string]int64)
+	counts["all"] = int64(len(channels))
+	for _, channel := range channels {
+		for billingType := range getChannelBillingTypes(channel.Models, pricing) {
+			counts[billingType]++
+		}
+	}
+	return counts
+}
+
+func filterChannelsByModelFamily(channels []*model.Channel, family string) []*model.Channel {
+	if family == "" || family == "all" {
+		return channels
+	}
+	filtered := make([]*model.Channel, 0, len(channels))
+	for _, channel := range channels {
+		if _, ok := getChannelModelFamilies(channel.Models)[family]; ok {
+			filtered = append(filtered, channel)
+		}
+	}
+	return filtered
+}
+
+func filterChannelsByModelType(channels []*model.Channel, modelType string) []*model.Channel {
+	if modelType == "" || modelType == "all" {
+		return channels
+	}
+	filtered := make([]*model.Channel, 0, len(channels))
+	for _, channel := range channels {
+		if _, ok := getChannelModelTypes(channel.Models)[modelType]; ok {
+			filtered = append(filtered, channel)
+		}
+	}
+	return filtered
+}
+
+func filterChannelsByBillingType(channels []*model.Channel, billingType string) []*model.Channel {
+	if billingType == "" || billingType == "all" {
+		return channels
+	}
+	pricing := getChannelPricingMap()
+	filtered := make([]*model.Channel, 0, len(channels))
+	for _, channel := range channels {
+		if _, ok := getChannelBillingTypes(channel.Models, pricing)[billingType]; ok {
+			filtered = append(filtered, channel)
+		}
+	}
+	return filtered
+}
+
 func GetAllChannels(c *gin.Context) {
 	pageInfo := common.GetPageQuery(c)
 	channelData := make([]*model.Channel, 0)
@@ -143,17 +444,26 @@ func GetAllChannels(c *gin.Context) {
 			typeFilter = t
 		}
 	}
+	modelFamily := c.DefaultQuery("model_family", "all")
+	modelType := c.DefaultQuery("model_type", "all")
+	billingType := c.DefaultQuery("billing_type", "all")
+	buildFilteredQuery := func(typeValue int) *gorm.DB {
+		query := buildChannelListQuery(groupFilter, statusFilter, typeValue)
+		query = applyChannelModelFamilyFilter(query, modelFamily)
+		query = applyChannelModelTypeFilter(query, modelType)
+		return applyChannelBillingTypeFilter(query, billingType)
+	}
 
 	var total int64
 
 	if enableTagMode {
-		tags, err := model.GetPaginatedChannelTags(buildChannelListQuery(groupFilter, statusFilter, typeFilter), pageInfo.GetStartIdx(), pageInfo.GetPageSize())
+		tags, err := model.GetPaginatedChannelTags(buildFilteredQuery(typeFilter), pageInfo.GetStartIdx(), pageInfo.GetPageSize())
 		if err != nil {
 			common.SysError("failed to get paginated tags: " + err.Error())
 			c.JSON(http.StatusOK, gin.H{"success": false, "message": "获取标签失败，请稍后重试"})
 			return
 		}
-		total, err = model.CountChannelTags(buildChannelListQuery(groupFilter, statusFilter, typeFilter))
+		total, err = model.CountChannelTags(buildFilteredQuery(typeFilter))
 		if err != nil {
 			common.SysError("failed to count tags: " + err.Error())
 			c.JSON(http.StatusOK, gin.H{"success": false, "message": "获取标签数量失败，请稍后重试"})
@@ -164,7 +474,7 @@ func GetAllChannels(c *gin.Context) {
 				continue
 			}
 			var tagChannels []*model.Channel
-			err := sortOptions.Apply(buildChannelListQuery(groupFilter, statusFilter, typeFilter).Where("tag = ?", *tag)).
+			err := sortOptions.Apply(buildFilteredQuery(typeFilter).Where("tag = ?", *tag)).
 				Omit("key").
 				Find(&tagChannels).Error
 			if err != nil {
@@ -175,13 +485,13 @@ func GetAllChannels(c *gin.Context) {
 			channelData = append(channelData, tagChannels...)
 		}
 	} else {
-		if err := buildChannelListQuery(groupFilter, statusFilter, typeFilter).Count(&total).Error; err != nil {
+		if err := buildFilteredQuery(typeFilter).Count(&total).Error; err != nil {
 			common.SysError("failed to count channels: " + err.Error())
 			c.JSON(http.StatusOK, gin.H{"success": false, "message": "获取渠道数量失败，请稍后重试"})
 			return
 		}
 
-		err := sortOptions.Apply(buildChannelListQuery(groupFilter, statusFilter, typeFilter)).
+		err := sortOptions.Apply(buildFilteredQuery(typeFilter)).
 			Limit(pageInfo.GetPageSize()).
 			Offset(pageInfo.GetStartIdx()).
 			Omit("key").
@@ -198,12 +508,14 @@ func GetAllChannels(c *gin.Context) {
 		applyCachedChannelSiteType(datum)
 	}
 
-	countQuery := buildChannelListQuery(groupFilter, statusFilter, -1)
+	typeCountQuery := buildChannelListQuery(groupFilter, statusFilter, -1)
+	typeCountQuery = applyChannelModelTypeFilter(typeCountQuery, modelType)
+	typeCountQuery = applyChannelBillingTypeFilter(typeCountQuery, billingType)
 	var results []struct {
 		Type  int64
 		Count int64
 	}
-	if err := countQuery.Select("type, count(*) as count").Group("type").Find(&results).Error; err != nil {
+	if err := typeCountQuery.Select("type, count(*) as count").Group("type").Find(&results).Error; err != nil {
 		common.SysError("failed to count channel types: " + err.Error())
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "获取渠道类型统计失败，请稍后重试"})
 		return
@@ -212,12 +524,42 @@ func GetAllChannels(c *gin.Context) {
 	for _, r := range results {
 		typeCounts[r.Type] = r.Count
 	}
+	familyCountQuery := buildChannelListQuery(groupFilter, statusFilter, -1)
+	familyCountQuery = applyChannelModelTypeFilter(familyCountQuery, modelType)
+	familyCountQuery = applyChannelBillingTypeFilter(familyCountQuery, billingType)
+	familyCounts, err := getChannelModelFamilyCounts(familyCountQuery)
+	if err != nil {
+		common.SysError("failed to count channel model families: " + err.Error())
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "获取模型家族统计失败，请稍后重试"})
+		return
+	}
+	modelTypeCountQuery := buildChannelListQuery(groupFilter, statusFilter, typeFilter)
+	modelTypeCountQuery = applyChannelModelFamilyFilter(modelTypeCountQuery, modelFamily)
+	modelTypeCountQuery = applyChannelBillingTypeFilter(modelTypeCountQuery, billingType)
+	modelTypeCounts, err := getChannelModelTypeCounts(modelTypeCountQuery)
+	if err != nil {
+		common.SysError("failed to count channel model types: " + err.Error())
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "获取模型类型统计失败，请稍后重试"})
+		return
+	}
+	billingTypeCountQuery := buildChannelListQuery(groupFilter, statusFilter, typeFilter)
+	billingTypeCountQuery = applyChannelModelFamilyFilter(billingTypeCountQuery, modelFamily)
+	billingTypeCountQuery = applyChannelModelTypeFilter(billingTypeCountQuery, modelType)
+	billingTypeCounts, err := getChannelBillingTypeCounts(billingTypeCountQuery)
+	if err != nil {
+		common.SysError("failed to count channel billing types: " + err.Error())
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "获取计费类型统计失败，请稍后重试"})
+		return
+	}
 	common.ApiSuccess(c, gin.H{
-		"items":       channelData,
-		"total":       total,
-		"page":        pageInfo.GetPage(),
-		"page_size":   pageInfo.GetPageSize(),
-		"type_counts": typeCounts,
+		"items":               channelData,
+		"total":               total,
+		"page":                pageInfo.GetPage(),
+		"page_size":           pageInfo.GetPageSize(),
+		"type_counts":         typeCounts,
+		"model_family_counts": familyCounts,
+		"model_type_counts":   modelTypeCounts,
+		"billing_type_counts": billingTypeCounts,
 	})
 	return
 }
@@ -362,11 +704,39 @@ func SearchChannels(c *gin.Context) {
 		channelData = filtered
 	}
 
+	modelFamily := c.DefaultQuery("model_family", "all")
+	modelType := c.DefaultQuery("model_type", "all")
+	billingType := c.DefaultQuery("billing_type", "all")
+	modelFamilyCounts := countChannelModelFamilies(
+		filterChannelsByBillingType(
+			filterChannelsByModelType(channelData, modelType),
+			billingType,
+		),
+	)
 	// calculate type counts for search results
 	typeCounts := make(map[int64]int64)
-	for _, channel := range channelData {
+	baseChannelsForType := filterChannelsByBillingType(
+		filterChannelsByModelType(channelData, modelType),
+		billingType,
+	)
+	for _, channel := range baseChannelsForType {
 		typeCounts[int64(channel.Type)]++
 	}
+	modelTypeCounts := countChannelModelTypes(
+		filterChannelsByBillingType(
+			filterChannelsByModelFamily(channelData, modelFamily),
+			billingType,
+		),
+	)
+	billingTypeCounts := countChannelBillingTypes(
+		filterChannelsByModelType(
+			filterChannelsByModelFamily(channelData, modelFamily),
+			modelType,
+		),
+	)
+	channelData = filterChannelsByModelFamily(channelData, modelFamily)
+	channelData = filterChannelsByModelType(channelData, modelType)
+	channelData = filterChannelsByBillingType(channelData, billingType)
 
 	typeParam := c.Query("type")
 	typeFilter := -1
@@ -410,9 +780,12 @@ func SearchChannels(c *gin.Context) {
 		"success": true,
 		"message": "",
 		"data": gin.H{
-			"items":       pagedData,
-			"total":       total,
-			"type_counts": typeCounts,
+			"items":               pagedData,
+			"total":               total,
+			"type_counts":         typeCounts,
+			"model_family_counts": modelFamilyCounts,
+			"model_type_counts":   modelTypeCounts,
+			"billing_type_counts": billingTypeCounts,
 		},
 	})
 	return

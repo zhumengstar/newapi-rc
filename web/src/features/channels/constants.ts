@@ -557,3 +557,23 @@ export const CHANNEL_TYPE_WARNINGS: Record<number, string> = {
   8: 'If connecting to upstream One API or New API relay projects, use OpenAI type instead unless you know what you are doing',
   37: 'Dify channels only support chatflow and agent, and agent does not support images',
 }
+
+export const MODEL_FAMILY_ORDER = [
+  'OpenAI',
+  'Claude',
+  'Gemini',
+  'Grok',
+  'DeepSeek',
+  'Qwen',
+  'ByteDance',
+  'Zhipu',
+  'Kimi',
+  'MiniMax',
+  'Mistral',
+  'Meta',
+  'Cohere',
+  'Baidu',
+  'Hunyuan',
+  'Other',
+] as const
+

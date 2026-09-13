@@ -327,6 +327,10 @@ func handleOAuthLogin(c *gin.Context, provider oauth.Provider, oauthUser *oauth.
 			common.ApiErrorI18n(c, i18n.MsgUserEmailAlreadyTaken)
 			return
 		}
+		if errors.Is(err, model.ErrIPRegisterLimitReached) {
+			common.ApiErrorI18n(c, i18n.MsgUserIPRegisterLimitReached)
+			return
+		}
 		switch err.(type) {
 		case *OAuthUserDeletedError:
 			common.ApiErrorI18n(c, i18n.MsgOAuthUserDeleted)
@@ -452,6 +456,12 @@ func findOrCreateOAuthUser(c *gin.Context, provider oauth.Provider, oauthUser *o
 	if !common.RegisterEnabled {
 		return nil, &OAuthRegistrationDisabledError{}
 	}
+
+	clientIP := c.ClientIP()
+	if err := model.CheckRegisterIPAvailable(clientIP); err != nil {
+		return nil, err
+	}
+	user.RegisterIP = clientIP
 
 	// Set up new user
 	user.Username = provider.GetProviderPrefix() + strconv.Itoa(model.GetMaxUserId()+1)
