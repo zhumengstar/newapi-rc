@@ -169,6 +169,10 @@ func main() {
 
 	// Initialize HTTP server
 	server := gin.New()
+	server.Use(middleware.CORS())
+	server.OPTIONS("/*path", middleware.CORS(), func(c *gin.Context) {
+		c.Status(http.StatusNoContent)
+	})
 	if err := middleware.ConfigureTrustedProxies(server); err != nil {
 		common.FatalLog("failed to configure trusted proxies: " + err.Error())
 		return

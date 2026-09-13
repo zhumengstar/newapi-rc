@@ -31,6 +31,11 @@ func SetWebRouter(router *gin.Engine, assets WebAssets, pluginDispatcher gin.Han
 		middleware.GlobalWebRateLimit(),
 		middleware.Cache(),
 		func(c *gin.Context) {
+			if c.Request.Method == http.MethodOptions {
+				c.Status(http.StatusNoContent)
+				c.Abort()
+				return
+			}
 			reqPath := c.Request.URL.Path
 			if reqPath == "/canvas-app" || reqPath == "/canvas-app/" {
 				if len(canvasIndex) > 0 {
@@ -48,6 +53,11 @@ func SetWebRouter(router *gin.Engine, assets WebAssets, pluginDispatcher gin.Han
 		},
 		static.Serve("/", frontendFS),
 		func(c *gin.Context) {
+			if c.Request.Method == http.MethodOptions {
+				c.Status(http.StatusNoContent)
+				c.Abort()
+				return
+			}
 			if strings.HasPrefix(c.Request.RequestURI, "/v1") || strings.HasPrefix(c.Request.RequestURI, "/api") || strings.HasPrefix(c.Request.RequestURI, "/assets") {
 				controller.RelayNotFound(c)
 				return

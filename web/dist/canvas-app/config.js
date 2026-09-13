@@ -1,0 +1,4 @@
+window.__RUNTIME_CONFIG__ = {
+  ANALYTICS_GA4_ID: "",
+  ANALYTICS_BAIDU_ID: ""
+};
