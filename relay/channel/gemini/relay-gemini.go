@@ -43,14 +43,23 @@ func attachEstimatedGeminiBillingUsage(usage *dto.Usage) *dto.Usage {
 // final chunk that carries candidatesTokenCount, leaving prompt-only metadata; without
 // this patch the output side would settle at zero quota.
 func patchGeminiZeroCompletionUsage(c *gin.Context, info *relaycommon.RelayInfo, usage *dto.Usage, responseText string, imageCount int) {
-	if usage == nil || usage.CompletionTokens > 0 {
+	if usage == nil {
+		return
+	}
+	needPatch := usage.CompletionTokens == 0
+	if !needPatch && usage.CompletionTokens == 1 && len(strings.TrimSpace(responseText)) > 10 {
+		needPatch = true
+	}
+	if !needPatch {
 		return
 	}
 	if responseText == "" && imageCount == 0 {
 		return
 	}
 	estimated := service.ResponseText2Usage(c, responseText, info.UpstreamModelName, usage.PromptTokens)
-	usage.CompletionTokens = estimated.CompletionTokens
+	if estimated.CompletionTokens > usage.CompletionTokens {
+		usage.CompletionTokens = estimated.CompletionTokens
+	}
 	if imageCount != 0 && usage.CompletionTokens == 0 {
 		usage.CompletionTokens = imageCount * 1400
 	}
@@ -73,6 +82,17 @@ func geminiResponseUsageText(response *dto.GeminiChatResponse) string {
 		for _, part := range candidate.Content.Parts {
 			if part.Text != "" {
 				text.WriteString(part.Text)
+			}
+			if part.FunctionCall != nil {
+				text.WriteString(part.FunctionCall.FunctionName)
+				if part.FunctionCall.Arguments != nil {
+					if argsBytes, err := common.Marshal(part.FunctionCall.Arguments); err == nil {
+						text.Write(argsBytes)
+					}
+				}
+			}
+			if part.ExecutableCode != nil {
+				text.WriteString(part.ExecutableCode.Code)
 			}
 		}
 	}
@@ -181,13 +201,33 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		}
 
 		if len(geminiResponse.Candidates) == 0 && geminiResponse.PromptFeedback != nil && geminiResponse.PromptFeedback.BlockReason != nil {
-			common.SetContextKey(c, constant.ContextKeyAdminRejectReason, fmt.Sprintf("gemini_block_reason=%s", *geminiResponse.PromptFeedback.BlockReason))
+			blockReason := *geminiResponse.PromptFeedback.BlockReason
+			common.SetContextKey(c, constant.ContextKeyAdminRejectReason, fmt.Sprintf("gemini_block_reason=%s", blockReason))
+			refusalText := fmt.Sprintf("抱歉，由于触发了 Google Gemini 内容安全审查策略 (%s)，请求已被拦截，无法生成回答。请调整您的提示词后重试。", blockReason)
+			safetyReason := "SAFETY"
+			syntheticResp := &dto.GeminiChatResponse{
+				Candidates: []dto.GeminiChatCandidate{
+					{
+						Content: dto.GeminiChatContent{
+							Role: "model",
+							Parts: []dto.GeminiPart{
+								{Text: refusalText},
+							},
+						},
+						FinishReason: &safetyReason,
+					},
+				},
+				PromptFeedback: geminiResponse.PromptFeedback,
+			}
+			callback(data, syntheticResp)
+			sr.Stop(nil)
+			return
 		}
 
 		markGeminiGoogleSearchCall(c, &geminiResponse)
 		countGeminiBillableFunctionCalls(info, &geminiResponse)
 
-		// 统计图片数量
+		// 统计图片数量与输出文本
 		for _, candidate := range geminiResponse.Candidates {
 			for _, part := range candidate.Content.Parts {
 				if part.InlineData != nil && part.InlineData.MimeType != "" {
@@ -195,6 +235,17 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 				}
 				if part.Text != "" {
 					responseText.WriteString(part.Text)
+				}
+				if part.FunctionCall != nil {
+					responseText.WriteString(part.FunctionCall.FunctionName)
+					if part.FunctionCall.Arguments != nil {
+						if argsBytes, err := common.Marshal(part.FunctionCall.Arguments); err == nil {
+							responseText.Write(argsBytes)
+						}
+					}
+				}
+				if part.ExecutableCode != nil {
+					responseText.WriteString(part.ExecutableCode.Code)
 				}
 			}
 		}
@@ -373,43 +424,60 @@ func GeminiChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.R
 	markGeminiGoogleSearchCall(c, &geminiResponse)
 	countGeminiBillableFunctionCalls(info, &geminiResponse)
 	if len(geminiResponse.Candidates) == 0 {
-		usage := buildUsageFromGeminiResponse(c, info, &geminiResponse)
-
-		var newAPIError *types.NewAPIError
 		if geminiResponse.PromptFeedback != nil && geminiResponse.PromptFeedback.BlockReason != nil {
-			common.SetContextKey(c, constant.ContextKeyAdminRejectReason, fmt.Sprintf("gemini_block_reason=%s", *geminiResponse.PromptFeedback.BlockReason))
-			newAPIError = types.NewOpenAIError(
-				errors.New("request blocked by Gemini API: "+*geminiResponse.PromptFeedback.BlockReason),
-				types.ErrorCodePromptBlocked,
-				http.StatusBadRequest,
-			)
+			blockReason := *geminiResponse.PromptFeedback.BlockReason
+			common.SetContextKey(c, constant.ContextKeyAdminRejectReason, fmt.Sprintf("gemini_block_reason=%s", blockReason))
+			refusalText := fmt.Sprintf("抱歉，由于触发了 Google Gemini 内容安全审查策略 (%s)，请求已被拦截，无法生成回答。请调整您的提示词后重试。", blockReason)
+			safetyReason := "SAFETY"
+			geminiResponse.Candidates = []dto.GeminiChatCandidate{
+				{
+					Content: dto.GeminiChatContent{
+						Role: "model",
+						Parts: []dto.GeminiPart{
+							{Text: refusalText},
+						},
+					},
+					FinishReason: &safetyReason,
+				},
+			}
 		} else {
 			common.SetContextKey(c, constant.ContextKeyAdminRejectReason, "gemini_empty_candidates")
-			newAPIError = types.NewOpenAIError(
+			newAPIError := types.NewOpenAIError(
 				errors.New("empty response from Gemini API"),
 				types.ErrorCodeEmptyResponse,
 				http.StatusInternalServerError,
 			)
-		}
 
-		service.ResetStatusCode(newAPIError, c.GetString("status_code_mapping"))
+			service.ResetStatusCode(newAPIError, c.GetString("status_code_mapping"))
 
-		switch info.RelayFormat {
-		case types.RelayFormatClaude:
-			c.JSON(newAPIError.StatusCode, gin.H{
-				"type":  "error",
-				"error": newAPIError.ToClaudeError(),
-			})
-		default:
-			c.JSON(newAPIError.StatusCode, gin.H{
-				"error": newAPIError.ToOpenAIError(),
-			})
+			switch info.RelayFormat {
+			case types.RelayFormatClaude:
+				c.JSON(newAPIError.StatusCode, gin.H{
+					"type":  "error",
+					"error": newAPIError.ToClaudeError(),
+				})
+			default:
+				c.JSON(newAPIError.StatusCode, gin.H{
+					"error": newAPIError.ToOpenAIError(),
+				})
+			}
+			return nil, newAPIError
 		}
-		return &usage, nil
 	}
 	fullTextResponse := responseGeminiChat2OpenAI(c, &geminiResponse)
 	fullTextResponse.Model = info.UpstreamModelName
 	usage := buildUsageFromGeminiResponse(c, info, &geminiResponse)
+	if strings.Contains(common.GetContextKeyString(c, constant.ContextKeyAdminRejectReason), "gemini_block_reason=") {
+		usage.CompletionTokens = 0
+		usage.TotalTokens = usage.PromptTokens
+	}
+
+	if usage.CompletionTokens == 0 {
+		logger.LogWarn(c, fmt.Sprintf("GEMINI_ZERO_TOKEN_DEBUG: req_id=%s, model=%s, candidates_count=%d, has_usage=%v, prompt_tok=%d, cand_tok=%d, body=%s",
+			c.GetString(common.RequestIdKey), info.UpstreamModelName, len(geminiResponse.Candidates),
+			geminiResponse.HasUsageMetadata, geminiResponse.UsageMetadata.PromptTokenCount, geminiResponse.UsageMetadata.CandidatesTokenCount,
+			string(responseBody)))
+	}
 
 	fullTextResponse.Usage = usage
 

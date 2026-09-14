@@ -639,3 +639,98 @@ func TestGeminiStreamHandlerEmptyUsageMetadataBuildsEstimatedBillingUsage(t *tes
 	require.Equal(t, usage.CompletionTokens, usage.BillingUsage.GeminiUsageMetadata.CandidatesTokenCount)
 	require.True(t, common.GetContextKeyBool(c, constant.ContextKeyLocalCountTokens))
 }
+
+func TestGeminiChatHandler_ProhibitedContent_GracefulRefusal(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	info := &relaycommon.RelayInfo{
+		RelayFormat:     types.RelayFormatOpenAI,
+		OriginModelName: "gemini-3-flash",
+		ChannelMeta: &relaycommon.ChannelMeta{
+			UpstreamModelName: "gemini-3-flash",
+		},
+	}
+
+	respBody := `{"candidates":[],"promptFeedback":{"blockReason":"PROHIBITED_CONTENT","safetyRatings":[{"category":"HARM_CATEGORY_HARASSMENT","probability":"HIGH"}]}}`
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(bytes.NewReader([]byte(respBody))),
+	}
+
+	usage, newApiErr := GeminiChatHandler(c, info, resp)
+	require.Nil(t, newApiErr)
+	require.NotNil(t, usage)
+	require.Equal(t, 0, usage.CompletionTokens)
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Contains(t, w.Body.String(), "PROHIBITED_CONTENT")
+	require.Contains(t, w.Body.String(), "content_filter")
+	require.Equal(t, "gemini_block_reason=PROHIBITED_CONTENT", common.GetContextKeyString(c, constant.ContextKeyAdminRejectReason))
+}
+
+func TestGeminiTextGenerationHandler_ProhibitedContent_NativePreserve(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-3-flash:generateContent", nil)
+
+	info := &relaycommon.RelayInfo{
+		OriginModelName: "gemini-3-flash",
+		ChannelMeta: &relaycommon.ChannelMeta{
+			UpstreamModelName: "gemini-3-flash",
+		},
+	}
+
+	respBody := `{"candidates":[],"promptFeedback":{"blockReason":"PROHIBITED_CONTENT"}}`
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(bytes.NewReader([]byte(respBody))),
+	}
+
+	usage, newApiErr := GeminiTextGenerationHandler(c, info, resp)
+	require.Nil(t, newApiErr)
+	require.Nil(t, usage)
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Contains(t, w.Body.String(), "PROHIBITED_CONTENT")
+	require.Equal(t, "gemini_block_reason=PROHIBITED_CONTENT", common.GetContextKeyString(c, constant.ContextKeyAdminRejectReason))
+}
+
+func TestGeminiStreamHandler_ProhibitedContent_GracefulStream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	oldStreamingTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 300
+	t.Cleanup(func() {
+		constant.StreamingTimeout = oldStreamingTimeout
+	})
+
+	info := &relaycommon.RelayInfo{
+		OriginModelName: "gemini-3-flash",
+		ChannelMeta: &relaycommon.ChannelMeta{
+			UpstreamModelName: "gemini-3-flash",
+		},
+	}
+
+	streamBody := []byte("data: {\"candidates\":[],\"promptFeedback\":{\"blockReason\":\"PROHIBITED_CONTENT\"}}\n")
+	resp := &http.Response{
+		Body: io.NopCloser(bytes.NewReader(streamBody)),
+	}
+
+	called := false
+	usage, newApiErr := geminiStreamHandler(c, info, resp, func(data string, r *dto.GeminiChatResponse) bool {
+		called = true
+		require.Len(t, r.Candidates, 1)
+		require.Contains(t, r.Candidates[0].Content.Parts[0].Text, "PROHIBITED_CONTENT")
+		require.Equal(t, "SAFETY", *r.Candidates[0].FinishReason)
+		return true
+	})
+	require.Nil(t, newApiErr)
+	require.NotNil(t, usage)
+	require.True(t, called)
+	require.Equal(t, "gemini_block_reason=PROHIBITED_CONTENT", common.GetContextKeyString(c, constant.ContextKeyAdminRejectReason))
+}

@@ -36,12 +36,25 @@ func GeminiTextGenerationHandler(c *gin.Context, info *relaycommon.RelayInfo, re
 	}
 	countGeminiBillableFunctionCalls(info, &geminiResponse)
 
-	if len(geminiResponse.Candidates) == 0 && geminiResponse.PromptFeedback != nil && geminiResponse.PromptFeedback.BlockReason != nil {
-		common.SetContextKey(c, constant.ContextKeyAdminRejectReason, fmt.Sprintf("gemini_block_reason=%s", *geminiResponse.PromptFeedback.BlockReason))
+	if len(geminiResponse.Candidates) == 0 {
+		blockReason := "unknown"
+		if geminiResponse.PromptFeedback != nil && geminiResponse.PromptFeedback.BlockReason != nil {
+			blockReason = *geminiResponse.PromptFeedback.BlockReason
+		}
+		common.SetContextKey(c, constant.ContextKeyAdminRejectReason, fmt.Sprintf("gemini_block_reason=%s", blockReason))
+		service.IOCopyBytesGracefully(c, resp, responseBody)
+		return nil, nil
 	}
 
 	// 计算使用量（优先上游 UsageMetadata，缺失时本地估算并保留 Gemini 计费语义）
 	usage := buildUsageFromGeminiResponse(c, info, &geminiResponse)
+
+	if usage.CompletionTokens == 0 {
+		logger.LogWarn(c, fmt.Sprintf("GEMINI_NATIVE_ZERO_TOKEN_DEBUG: req_id=%s, model=%s, candidates_count=%d, has_usage=%v, prompt_tok=%d, cand_tok=%d, body=%s",
+			c.GetString(common.RequestIdKey), info.UpstreamModelName, len(geminiResponse.Candidates),
+			geminiResponse.HasUsageMetadata, geminiResponse.UsageMetadata.PromptTokenCount, geminiResponse.UsageMetadata.CandidatesTokenCount,
+			string(responseBody)))
+	}
 
 	service.IOCopyBytesGracefully(c, resp, responseBody)
 
