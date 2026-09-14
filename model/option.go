@@ -589,8 +589,8 @@ func updateOptionMap(key string, value string) (err error) {
 		if common.RetryTimes < 0 {
 			common.RetryTimes = 0
 		}
-		if common.RetryTimes > 2 {
-			common.RetryTimes = 2
+		if common.RetryTimes > 10 {
+			common.RetryTimes = 10
 		}
 	case "DataExportInterval":
 		common.DataExportInterval, _ = strconv.Atoi(value)
