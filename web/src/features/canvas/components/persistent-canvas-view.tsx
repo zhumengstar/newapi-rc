@@ -26,8 +26,8 @@ import { createApiKey, fetchTokenKey, getApiKeys } from '@/features/keys/api'
 import type { ApiKey } from '@/features/keys/types'
 import { cn } from '@/lib/utils'
 
-const CANVAS_EMBED_PATH = '/canvas-app/'
-const CANVAS_STANDALONE_URL = '/canvas-app/'
+const CANVAS_EMBED_PATH = '/canvas-app/canvas'
+const CANVAS_STANDALONE_URL = '/canvas-app/canvas'
 const SELECTED_TOKEN_ID_KEY = 'infinite-canvas:selected-token-id'
 const BANNER_DISMISSED_KEY = 'infinite-canvas:banner-dismissed'
 
@@ -593,7 +593,7 @@ export function PersistentCanvasView({ isVisible }: PersistentCanvasViewProps) {
                 }
               }}
               title={t('Infinite Canvas')}
-              className='h-full w-full border-0'
+              className='absolute inset-0 h-full w-full border-0'
               allow='clipboard-read; clipboard-write'
             />
           )}
