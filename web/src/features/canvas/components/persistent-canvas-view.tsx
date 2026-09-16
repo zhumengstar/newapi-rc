@@ -7,6 +7,7 @@ import {
   Layers,
   Loader2,
   RefreshCw,
+  RotateCw,
   Search,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -58,6 +59,7 @@ export function PersistentCanvasView({ isVisible }: PersistentCanvasViewProps) {
   })
   const [activeFullKey, setActiveFullKey] = useState<string>('')
   const [initialIframeUrl, setInitialIframeUrl] = useState<string>('')
+  const [iframeKey, setIframeKey] = useState<number>(0)
   const [loading, setLoading] = useState(true)
   const [reloading, setReloading] = useState(false)
   const [groupSearch, setGroupSearch] = useState('')
@@ -346,11 +348,20 @@ export function PersistentCanvasView({ isVisible }: PersistentCanvasViewProps) {
       const formattedKey = fullKey.startsWith('sk-') ? fullKey : `sk-${fullKey}`
       setActiveFullKey(formattedKey)
       sendConfigToIframe(formattedKey, groupOpt.label)
+      setIframeKey((k) => k + 1)
       toast.success(t(`已切换至 ${groupOpt.label}`))
       setTimeout(() => setReloading(false), 400)
     },
     [sendConfigToIframe, t]
   )
+
+  // 强制刷新 iframe 画布实例
+  const handleReloadIframe = useCallback(() => {
+    setReloading(true)
+    setIframeKey((k) => k + 1)
+    toast.success(t('正在重新加载无限画布...'))
+    setTimeout(() => setReloading(false), 500)
+  }, [t])
 
   // 重新注入操作
   const handleReinject = useCallback(() => {
@@ -358,6 +369,8 @@ export function PersistentCanvasView({ isVisible }: PersistentCanvasViewProps) {
     if (activeFullKey) {
       sendConfigToIframe(activeFullKey, currentGroup?.label)
       toast.success(t('已重新同步配置至无限画布'))
+    } else {
+      setIframeKey((k) => k + 1)
     }
     setTimeout(() => setReloading(false), 400)
   }, [activeFullKey, currentGroup, sendConfigToIframe, t])
@@ -495,6 +508,21 @@ export function PersistentCanvasView({ isVisible }: PersistentCanvasViewProps) {
                 variant='ghost'
                 size='sm'
                 className='h-7 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground'
+                onClick={handleReloadIframe}
+                disabled={reloading || loading}
+                title={t('重新加载画布')}
+              >
+                <RotateCw
+                  className={cn('size-3', reloading && 'animate-spin')}
+                />
+                <span className='hidden sm:inline'>{t('刷新画布')}</span>
+              </Button>
+
+              <Button
+                type='button'
+                variant='ghost'
+                size='sm'
+                className='h-7 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground'
                 onClick={handleReinject}
                 disabled={reloading || loading}
                 title={t('重新同步配置')}
@@ -502,7 +530,7 @@ export function PersistentCanvasView({ isVisible }: PersistentCanvasViewProps) {
                 <RefreshCw
                   className={cn('size-3', (reloading || loading) && 'animate-spin')}
                 />
-                <span className='hidden sm:inline'>{t('重新同步')}</span>
+                <span className='hidden sm:inline'>{t('同步配置')}</span>
               </Button>
 
               <Button
@@ -577,7 +605,7 @@ export function PersistentCanvasView({ isVisible }: PersistentCanvasViewProps) {
         )}
 
         {/* 画布核心 iframe 区域 */}
-        <div className='relative flex-1 w-full min-h-0 bg-background'>
+        <div className='relative flex-1 w-full h-full min-h-[400px] bg-background'>
           {loading ? (
             <div className='flex h-full w-full flex-col items-center justify-center gap-3 text-muted-foreground'>
               <Loader2 className='size-6 animate-spin text-primary' />
@@ -585,8 +613,9 @@ export function PersistentCanvasView({ isVisible }: PersistentCanvasViewProps) {
             </div>
           ) : (
             <iframe
+              key={iframeKey}
               ref={iframeRef}
-              src={initialIframeUrl || embedCanvasUrl}
+              src={embedCanvasUrl}
               onLoad={() => {
                 if (activeFullKey) {
                   sendConfigToIframe(activeFullKey, currentGroup?.label)
