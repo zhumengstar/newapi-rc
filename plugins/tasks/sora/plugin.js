@@ -10,7 +10,15 @@ export const meta = {
   version: "1.0.3",
   channelTypes: [55, 1], // OpenAI-type channels natively serve sora with the same wire format
   author: { name: "QuantumNous" },
-  models: ["sora-2", "sora-2-pro"],
+  models: [
+    "sora-2",
+    "sora-2-pro",
+    "sd-2.0-720-900",
+    "sd-2.0-720-933",
+    "sd-2.5-720-svip",
+    "seedanc2.5-720",
+    "seedance",
+  ],
   fetchMode: "per_task",
   usageSchema: {
     // Requested video duration in seconds.
@@ -36,6 +44,11 @@ export const meta = {
 
 function trimmed(value) {
   return String(value || "").trim();
+}
+
+function isSeedanceModel(model) {
+  const m = String(model || "").toLowerCase();
+  return m.includes("seedanc") || m.startsWith("sd-") || m.startsWith("sd2");
 }
 
 function responsesInput(req) {
@@ -99,6 +112,37 @@ export function buildSubmitRequest(ctx) {
     headers["Content-Type"] = "application/json";
     return { url: ctx.baseUrl + "/v1/videos/" + ctx.originTaskId + "/remix", method: "POST", headers, body: requestValues(req, ctx.upstreamModel), action };
   }
+  if (isSeedanceModel(ctx.upstreamModel)) {
+    headers["Content-Type"] = "application/json";
+    const images = [];
+    if ((ctx.files || []).length) {
+      for (const file of ctx.files) {
+        images.push({ __fileRef: file.ref, encoding: "url" });
+      }
+    }
+    const rawImages = [].concat(req.images || [], req.image ? [req.image] : [], req.input_reference ? [req.input_reference] : []);
+    for (const img of rawImages) {
+      if (img && typeof img === "string" && trimmed(img)) {
+        images.push(trimmed(img));
+      } else if (img && typeof img === "object" && img.__fileRef) {
+        images.push(img);
+      }
+    }
+    const body = {
+      model: ctx.upstreamModel,
+      prompt: trimmed(req.prompt),
+    };
+    if (images.length > 0) {
+      body.images = images;
+    }
+    if (ctx.upstreamModel.includes("900")) {
+      body.duration = 15;
+    } else {
+      const dur = Number(req.duration || req.seconds || 5);
+      body.duration = Number.isFinite(dur) && dur > 0 ? dur : 5;
+    }
+    return { url: ctx.baseUrl + "/v1/videos", method: "POST", headers, body };
+  }
   if ((ctx.files || []).length) {
     const parts = [];
     const values = requestValues(req, ctx.upstreamModel);
@@ -108,7 +152,10 @@ export function buildSubmitRequest(ctx) {
     if (values.metadata && typeof values.metadata === "object" && !Array.isArray(values.metadata)) {
       parts.push({ name: "metadata", value: JSON.stringify(values.metadata) });
     }
-    for (const file of ctx.files) parts.push({ name: file.field, fileRef: file.ref, filename: file.filename });
+    for (const file of ctx.files) {
+      const fieldName = ["image[]", "image", "file"].includes(file.field) ? "input_reference" : file.field;
+      parts.push({ name: fieldName, fileRef: file.ref, filename: file.filename });
+    }
     return { url: ctx.baseUrl + "/v1/videos", method: "POST", headers, bodyType: "multipart", parts };
   }
   headers["Content-Type"] = "application/json";
@@ -156,7 +203,15 @@ export function parseTaskResult(ctx, body) {
   const mapped = statuses[body.status];
   const result = { status: mapped || "UNKNOWN" };
   if (!mapped) result.reason = "unrecognized status: " + String(body.status || "");
-  if (body.progress > 0 && body.progress < 100) result.progress = body.progress + "%";
+  if (body.progress > 0 && body.progress < 100) {
+    result.progress = body.progress + "%";
+  } else if (result.status === "SUCCESS") {
+    result.progress = "100%";
+  }
+  const videoUrl = (body.metadata && body.metadata.url) || body.url || (body.data && body.data.url);
+  if (videoUrl && typeof videoUrl === "string") {
+    result.url = videoUrl;
+  }
   if (result.status === "FAILURE") result.reason = body.error && body.error.message ? body.error.message : "task failed";
   return result;
 }
@@ -167,6 +222,15 @@ export function listArtifacts(task) {
 
 export function buildContentRequest(ctx) {
   if (ctx.artifactKey !== "video") throw new Error("artifact_not_found");
+  const data = ctx.data || {};
+  const directUrl = (data.metadata && data.metadata.url) || data.url || (data.data && data.data.url);
+  if (directUrl && typeof directUrl === "string" && (directUrl.startsWith("http://") || directUrl.startsWith("https://"))) {
+    return {
+      url: directUrl,
+      method: ctx.clientRequest.method || "GET",
+      credentialless: true,
+    };
+  }
   return {
     url: ctx.baseUrl + "/v1/videos/" + encodeURIComponent(ctx.upstreamTaskId) + "/content",
     method: ctx.clientRequest.method,
@@ -266,7 +330,7 @@ protocols.openai_video = {
       return {
         kind: "submit",
         model: ctx.model,
-        action: req.input_reference || req.image ? "image_to_video" : "text_to_video",
+        action: (req.images && req.images.length) || req.input_reference || req.image ? "image_to_video" : "text_to_video",
         requestBody: Object.assign({}, req, { model: ctx.model }),
       };
     }
@@ -282,8 +346,9 @@ protocols.openai_video = {
     }
     let hasInputReferenceFile = false;
     for (const file of ctx.body.files || []) {
-      if (file.field !== "input_reference") throw new Error("unexpected file field: " + file.field);
-      if (hasInputReferenceFile) throw new Error("input_reference must be provided once");
+      if (!["input_reference", "image", "image[]", "images", "images[]", "first_frame", "file"].includes(file.field)) {
+        throw new Error("unexpected file field: " + file.field);
+      }
       hasInputReferenceFile = true;
     }
     if (req.metadata !== undefined) {
@@ -304,12 +369,23 @@ protocols.openai_video = {
     return {
       kind: "submit",
       model: ctx.model,
-      action: hasInputReferenceFile || req.input_reference || req.image ? "image_to_video" : "text_to_video",
+      action: hasInputReferenceFile || req.input_reference || req.image || (req.images && req.images.length) ? "image_to_video" : "text_to_video",
       requestBody: Object.assign({}, req, { model: ctx.model }),
     };
   },
   render: function (ctx, task) {
-    if (task.data && typeof task.data === "object" && !Array.isArray(task.data)) return task.data;
-    return legacyRenderers.openai_video(task);
+    let out = {};
+    if (task.data && typeof task.data === "object" && !Array.isArray(task.data)) {
+      out = Object.assign({}, task.data);
+    } else {
+      out = legacyRenderers.openai_video(task);
+    }
+    const metaUrl = (out.metadata && out.metadata.url) || out.url;
+    if (metaUrl) {
+      out.url = metaUrl;
+      if (!out.metadata) out.metadata = {};
+      out.metadata.url = metaUrl;
+    }
+    return out;
   },
 };

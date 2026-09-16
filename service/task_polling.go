@@ -623,6 +623,10 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 	return nil
 }
 
+func RedactVideoResponseBody(body []byte) []byte {
+	return redactVideoResponseBody(body)
+}
+
 func redactVideoResponseBody(body []byte) []byte {
 	var m map[string]any
 	if err := common.Unmarshal(body, &m); err != nil {

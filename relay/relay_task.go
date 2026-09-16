@@ -2,12 +2,14 @@ package relay
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -519,15 +521,18 @@ func videoFetchByIDRespBodyBuilder(c *gin.Context) (respBody []byte, taskResp *d
 	return
 }
 
-// tryRealtimeFetch 尝试从上游实时拉取 Gemini/Vertex 任务状态。
-// 仅当渠道类型为 Gemini 或 Vertex 时触发；其他渠道或出错时返回 nil。
+// tryRealtimeFetch 尝试从上游实时拉取 Gemini/Vertex/OpenAI 任务状态。
 // 当非 OpenAI Video API 时，还会构建自定义格式的响应体。
 func tryRealtimeFetch(task *model.Task, isOpenAIVideoAPI bool) []byte {
+	if task.Status == model.TaskStatusSuccess || task.Status == model.TaskStatusFailure {
+		return nil
+	}
+
 	channelModel, err := model.GetChannelById(task.ChannelId, true)
 	if err != nil {
 		return nil
 	}
-	if channelModel.Type != constant.ChannelTypeVertexAi && channelModel.Type != constant.ChannelTypeGemini {
+	if channelModel.Type != constant.ChannelTypeVertexAi && channelModel.Type != constant.ChannelTypeGemini && channelModel.Type != constant.ChannelTypeOpenAI {
 		return nil
 	}
 
@@ -536,7 +541,10 @@ func tryRealtimeFetch(task *model.Task, isOpenAIVideoAPI bool) []byte {
 		baseURL = channelModel.GetBaseURL()
 	}
 	proxy := channelModel.GetSetting().Proxy
-	adaptor := GetTaskAdaptor(constant.TaskPlatform(strconv.Itoa(channelModel.Type)))
+	adaptor := GetTaskAdaptor(task.Platform)
+	if adaptor == nil {
+		adaptor = GetTaskAdaptor(constant.TaskPlatform(strconv.Itoa(channelModel.Type)))
+	}
 	if adaptor == nil {
 		return nil
 	}
@@ -558,12 +566,22 @@ func tryRealtimeFetch(task *model.Task, isOpenAIVideoAPI bool) []byte {
 
 	snap := task.Snapshot()
 
-	// 将上游最新状态更新到 task
-	if ti.Status != "" {
-		task.Status = model.TaskStatus(ti.Status)
+	now := time.Now().Unix()
+	parsedStatus := model.TaskStatus(ti.Status)
+	if parsedStatus != "" {
+		task.Status = parsedStatus
 	}
 	if ti.Progress != "" {
 		task.Progress = ti.Progress
+	}
+	if task.Status == model.TaskStatusSuccess {
+		if task.FinishTime == 0 {
+			task.FinishTime = now
+		}
+	} else if task.Status == model.TaskStatusInProgress {
+		if task.StartTime == 0 {
+			task.StartTime = now
+		}
 	}
 	if strings.HasPrefix(ti.Url, "data:") {
 		// data: URI — kept in Data, not ResultURL
@@ -574,8 +592,16 @@ func tryRealtimeFetch(task *model.Task, isOpenAIVideoAPI bool) []byte {
 		task.PrivateData.ResultURL = taskcommon.BuildProxyURL(task.TaskID)
 	}
 
+	if len(body) > 0 {
+		task.Data = service.RedactVideoResponseBody(body)
+	}
+
 	if !snap.Equal(task.Snapshot()) {
 		_, _ = task.UpdateWithStatus(snap.Status)
+	}
+
+	if snap.Status != model.TaskStatusFailure && task.Status == model.TaskStatusFailure && task.Quota != 0 {
+		service.RefundTaskQuota(context.Background(), task, task.FailReason)
 	}
 
 	// OpenAI Video API 由调用者的 ConvertToOpenAIVideo 分支处理

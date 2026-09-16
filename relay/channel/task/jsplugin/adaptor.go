@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"maps"
@@ -14,6 +16,8 @@ import (
 	"net/http"
 	"net/textproto"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -31,6 +35,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/system_setting"
 	"github.com/gin-gonic/gin"
 )
 
@@ -227,12 +232,17 @@ func (a *TaskAdaptor) BuildRequestURL(info *relaycommon.RelayInfo) (string, erro
 	return a.submit.URL, pluginruntime.ValidateRequestURL(a.submit.URL, info.ChannelBaseUrl, a.plugin.Meta.AllowedHosts)
 }
 
-func (a *TaskAdaptor) BuildRequestHeader(_ *gin.Context, req *http.Request, _ *relaycommon.RelayInfo) error {
+func (a *TaskAdaptor) BuildRequestHeader(c *gin.Context, req *http.Request, _ *relaycommon.RelayInfo) error {
 	if a.submit == nil {
 		return fmt.Errorf("plugin submit request was not built")
 	}
 	for name, value := range a.submit.Headers {
 		req.Header.Set(name, value)
+	}
+	if req.Header.Get("Content-Type") == "" && c != nil && c.Request != nil {
+		if ct := c.Request.Header.Get("Content-Type"); ct != "" {
+			req.Header.Set("Content-Type", ct)
+		}
 	}
 	return nil
 }
@@ -300,7 +310,12 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 		if err = writer.Close(); err != nil {
 			return nil, err
 		}
-		c.Request.Header.Set("Content-Type", writer.FormDataContentType())
+		contentType := writer.FormDataContentType()
+		c.Request.Header.Set("Content-Type", contentType)
+		if descriptor.Headers == nil {
+			descriptor.Headers = make(map[string]string)
+		}
+		descriptor.Headers["Content-Type"] = contentType
 		return bytes.NewReader(body.Bytes()), nil
 	}
 	if descriptor.Body == nil {
@@ -385,8 +400,8 @@ func encodeFilePlaceholder(placeholder map[string]any, form *multipart.Form, lim
 		return "", fmt.Errorf("unknown file reference %q", ref)
 	}
 	encoding, _ := placeholder["encoding"].(string)
-	if encoding != "base64" && encoding != "dataUrl" {
-		return "", fmt.Errorf("file placeholder encoding must be \"base64\" or \"dataUrl\"")
+	if encoding != "base64" && encoding != "dataUrl" && encoding != "url" {
+		return "", fmt.Errorf("file placeholder encoding must be \"base64\", \"dataUrl\", or \"url\"")
 	}
 	if form == nil {
 		return "", fmt.Errorf("unknown file reference %q", ref)
@@ -426,15 +441,38 @@ func encodeFilePlaceholder(placeholder map[string]any, form *multipart.Form, lim
 		return "", fmt.Errorf("inlined files exceed the %d byte limit", limit)
 	}
 	*total += int64(len(data))
-	encoded := base64.StdEncoding.EncodeToString(data)
-	if encoding == "base64" {
-		return encoded, nil
-	}
 	mimeType := "application/octet-stream"
 	if override, ok := placeholder["mimeType"].(string); ok && strings.TrimSpace(override) != "" {
 		mimeType = override
 	} else if contentType := header.Header.Get("Content-Type"); contentType != "" {
 		mimeType = contentType
+	}
+	if encoding == "url" {
+		sum := sha256.Sum256(data)
+		hashStr := hex.EncodeToString(sum[:])
+		ext := ".png"
+		if strings.Contains(mimeType, "jpeg") || strings.Contains(mimeType, "jpg") {
+			ext = ".jpg"
+		} else if strings.Contains(mimeType, "webp") {
+			ext = ".webp"
+		} else if strings.Contains(mimeType, "gif") {
+			ext = ".gif"
+		}
+		filename := hashStr + ext
+		dir := "/data/generated-images"
+		_ = os.MkdirAll(dir, 0755)
+		filePath := filepath.Join(dir, filename)
+		_ = os.WriteFile(filePath, data, 0644)
+		serverAddress := system_setting.ServerAddress
+		if serverAddress == "" || strings.Contains(serverAddress, "localhost") || strings.Contains(serverAddress, "127.0.0.1") {
+			serverAddress = "https://vip.muling.store"
+		}
+		serverAddress = strings.TrimSuffix(serverAddress, "/")
+		return serverAddress + "/generated-images/" + filename, nil
+	}
+	encoded := base64.StdEncoding.EncodeToString(data)
+	if encoding == "base64" {
+		return encoded, nil
 	}
 	return "data:" + mimeType + ";base64," + encoded, nil
 }
