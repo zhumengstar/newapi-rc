@@ -695,3 +695,57 @@ func TestModelPriceHelperNativeGeminiNoThinkingDoesNotAliasBillingModel(t *testi
 	assert.Equal(t, 1.25, priceData.ModelRatio)
 	assert.NotEqual(t, 37.5, priceData.ModelRatio)
 }
+
+func TestUserPerCallModelPriceWithHandleGroupRatioAndRetry(t *testing.T) {
+	groupName := "小香蕉对接组"
+	modelName := "gemini-3.1-flash-image-preview-c"
+
+	oldRatio, exists := ratio_setting.GetGroupRatioSetting().GroupRatio.Get(groupName)
+	// 设置全局分组倍率为 0.8
+	ratio_setting.GetGroupRatioSetting().GroupRatio.Set(groupName, 0.8)
+	t.Cleanup(func() {
+		if exists {
+			ratio_setting.GetGroupRatioSetting().GroupRatio.Set(groupName, oldRatio)
+		} else {
+			ratio_setting.GetGroupRatioSetting().GroupRatio.Set(groupName, 1.0)
+		}
+	})
+
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Set("group", groupName)
+
+	info := &relaycommon.RelayInfo{
+		OriginModelName: modelName,
+		UserGroup:       groupName,
+		UsingGroup:      groupName,
+		UserSetting: dto.UserSetting{
+			UserModelPriceRules: []dto.UserModelPriceRule{
+				{
+					Group:  groupName,
+					Models: []string{modelName},
+					Price:  0.05,
+				},
+			},
+		},
+	}
+
+	// 1. 初次调用 ModelPriceHelper
+	priceData, err := ModelPriceHelper(ctx, info, 0, &types.TokenCountMeta{})
+	require.NoError(t, err)
+	assert.True(t, priceData.UsePrice)
+	assert.Equal(t, 0.05, priceData.ModelPrice)
+	assert.Equal(t, 1.0, priceData.GroupRatioInfo.GroupRatio, "First call must have GroupRatio 1.0")
+	assert.Equal(t, 1.0, priceData.GroupRatioInfo.GroupSpecialRatio)
+	assert.True(t, priceData.GroupRatioInfo.HasSpecialRatio)
+
+	// 2. 模拟渠道失败后重试，重新执行 HandleGroupRatio
+	refreshedRatioInfo := HandleGroupRatio(ctx, info)
+	assert.Equal(t, 1.0, refreshedRatioInfo.GroupRatio, "On retry, HandleGroupRatio must keep GroupRatio 1.0 for fixed-price models")
+	assert.Equal(t, 1.0, refreshedRatioInfo.GroupSpecialRatio)
+	assert.True(t, refreshedRatioInfo.HasSpecialRatio)
+
+	// 3. 验证通过 GetUserPerCallModelPrice 也能正确同步
+	userModelPrice, ok := GetUserPerCallModelPrice(info)
+	assert.True(t, ok)
+	assert.Equal(t, 0.05, userModelPrice)
+}

@@ -95,18 +95,20 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		if newAPIError != nil {
 			logger.LogError(c, fmt.Sprintf("relay error: %s", common.LocalLogPreview(newAPIError.Error())))
 			newAPIError.SetMessage(common.MessageWithRequestId(newAPIError.Error(), requestId))
-			switch relayFormat {
-			case types.RelayFormatOpenAIRealtime:
-				helper.WssError(c, ws, newAPIError.ToOpenAIError())
-			case types.RelayFormatClaude:
-				c.JSON(newAPIError.StatusCode, gin.H{
-					"type":  "error",
-					"error": newAPIError.ToClaudeError(),
-				})
-			default:
-				c.JSON(newAPIError.StatusCode, gin.H{
-					"error": newAPIError.ToOpenAIError(),
-				})
+			if !c.Writer.Written() {
+				switch relayFormat {
+				case types.RelayFormatOpenAIRealtime:
+					helper.WssError(c, ws, newAPIError.ToOpenAIError())
+				case types.RelayFormatClaude:
+					c.JSON(newAPIError.StatusCode, gin.H{
+						"type":  "error",
+						"error": newAPIError.ToClaudeError(),
+					})
+				default:
+					c.JSON(newAPIError.StatusCode, gin.H{
+						"error": newAPIError.ToOpenAIError(),
+					})
+				}
 			}
 			if !common.GetContextKeyBool(c, constant.ContextKeyErrorLogRecorded) {
 				recordChannelErrorLog(c, 0, newAPIError, nil)
@@ -389,6 +391,10 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 	}
 
 	info.PriceData.GroupRatioInfo = helper.HandleGroupRatio(c, info)
+	if userModelPrice, ok := helper.GetUserPerCallModelPrice(info); ok {
+		info.PriceData.ModelPrice = userModelPrice
+		info.PriceData.UsePrice = true
+	}
 
 	newAPIError := middleware.SetupContextForSelectedChannel(c, channel, info.OriginModelName)
 	if newAPIError != nil {

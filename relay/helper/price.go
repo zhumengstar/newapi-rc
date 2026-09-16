@@ -46,7 +46,7 @@ const claudeCacheCreation1hMultiplier = 6 / 3.75
 // the pre-consumed quota still reflects a plausible output cost in paid groups.
 const defaultTieredPreConsumeMaxTokens = 8192
 
-func getUserPerCallModelPrice(info *relaycommon.RelayInfo) (float64, bool) {
+func GetUserPerCallModelPrice(info *relaycommon.RelayInfo) (float64, bool) {
 	if info == nil {
 		return 0, false
 	}
@@ -79,6 +79,10 @@ func getUserPerCallModelPrice(info *relaycommon.RelayInfo) (float64, bool) {
 	return 0, false
 }
 
+func getUserPerCallModelPrice(info *relaycommon.RelayInfo) (float64, bool) {
+	return GetUserPerCallModelPrice(info)
+}
+
 // HandleGroupRatio checks for "auto_group" in the context and updates the group ratio and relayInfo.UsingGroup if present
 func HandleGroupRatio(ctx *gin.Context, relayInfo *relaycommon.RelayInfo) hosttypes.GroupRatioInfo {
 	groupRatioInfo := hosttypes.GroupRatioInfo{
@@ -87,15 +91,26 @@ func HandleGroupRatio(ctx *gin.Context, relayInfo *relaycommon.RelayInfo) hostty
 	}
 
 	// check auto group
-	autoGroup, exists := ctx.Get("auto_group")
-	if exists {
-		logger.LogDebug(ctx, "final group: %s", autoGroup)
-		relayInfo.UsingGroup = autoGroup.(string)
+	if ctx != nil {
+		autoGroup, exists := ctx.Get("auto_group")
+		if exists {
+			logger.LogDebug(ctx, "final group: %s", autoGroup)
+			relayInfo.UsingGroup = autoGroup.(string)
+		}
+	}
+
+	// If user has a per-call fixed model price under the effective group,
+	// the group ratio must be strictly 1.0 (fixed dollar amount per call, no double scaling).
+	if _, ok := GetUserPerCallModelPrice(relayInfo); ok {
+		groupRatioInfo.GroupRatio = 1.0
+		groupRatioInfo.GroupSpecialRatio = 1.0
+		groupRatioInfo.HasSpecialRatio = true
+		return groupRatioInfo
 	}
 
 	// check user group special ratio
 	userSetting := dto.UserSetting{}
-	if relayInfo.UserId > 0 {
+	if relayInfo != nil && relayInfo.UserId > 0 {
 		userSetting, _ = model.GetUserSetting(relayInfo.UserId, false)
 	}
 	userGroupRatio := service.GetUserGroupRatioWithSetting(userSetting, relayInfo.UserGroup, relayInfo.UsingGroup)
