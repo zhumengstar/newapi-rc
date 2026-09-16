@@ -570,7 +570,22 @@ export function UsersMutateDrawer({
 
                       const handleToggleGroup = (group: string, checked: boolean) => {
                         const meta = groupMeta[group]
-                        if (meta?.is_public) return
+                        if (meta?.is_public) {
+                          if (checked) {
+                            handleRatioChange(
+                              group,
+                              meta?.ratio !== undefined ? String(meta.ratio) : '1'
+                            )
+                          } else {
+                            handleRatioChange(group, '')
+                            if (selectedGroupList.includes(group)) {
+                              field.onChange(
+                                selectedGroupList.filter((g) => g !== group).join(',')
+                              )
+                            }
+                          }
+                          return
+                        }
                         let nextGroups: string[]
                         if (checked) {
                           nextGroups = Array.from(
@@ -608,6 +623,13 @@ export function UsersMutateDrawer({
                         form.setValue('user_group_ratios', nextRatios)
                       }
 
+                      const configuredGroups = Array.from(
+                        new Set([
+                          ...selectedGroupList,
+                          ...Object.keys(userGroupRatios).filter(Boolean),
+                        ])
+                      )
+
                       const filteredGroups = groupOptions.filter((group) => {
                         if (groupSearchQuery.trim()) {
                           if (!group.toLowerCase().includes(groupSearchQuery.toLowerCase())) {
@@ -619,8 +641,8 @@ export function UsersMutateDrawer({
                         }
                         if (groupFilterTab === 'selected') {
                           return (
-                            Boolean(groupMeta[group]?.is_public) ||
-                            selectedGroupList.includes(group)
+                            selectedGroupList.includes(group) ||
+                            userGroupRatios[group] !== undefined
                           )
                         }
                         return true
@@ -632,7 +654,7 @@ export function UsersMutateDrawer({
                       })
 
                       const sortedSelectedGroupList = sortGroupsByFamilyAndRatio(
-                        selectedGroupList,
+                        configuredGroups,
                         {
                           userGroupRatios,
                           groupMeta,
@@ -677,18 +699,18 @@ export function UsersMutateDrawer({
                                 <div className='flex items-center gap-2 truncate'>
                                     <Layers className='size-4 text-muted-foreground shrink-0' />
                                     <span className='text-xs font-normal'>
-                                      {selectedGroupList.length > 0
+                                      {configuredGroups.length > 0
                                         ? t('Selected {{count}} groups', {
-                                            count: selectedGroupList.length,
+                                            count: configuredGroups.length,
                                           })
                                         : t('Click to select groups...')}
                                     </span>
-                                    {selectedGroupList.length > 0 && (
+                                    {configuredGroups.length > 0 && (
                                       <Badge
                                         variant='secondary'
                                         className='text-[11px] h-5 px-1.5 font-normal'
                                       >
-                                        {selectedGroupList.length}
+                                        {configuredGroups.length}
                                       </Badge>
                                     )}
                                   </div>
@@ -740,7 +762,7 @@ export function UsersMutateDrawer({
                                       className='h-6 text-[11px] px-2'
                                       onClick={() => setGroupFilterTab('selected')}
                                     >
-                                      {t('Selected Groups')} ({selectedGroupList.length})
+                                      {t('Selected Groups')} ({configuredGroups.length})
                                     </Button>
                                   </div>
                                 </div>
@@ -754,9 +776,10 @@ export function UsersMutateDrawer({
                                     dropdownFilteredGroups.map((group) => {
                                       const meta = groupMeta[group]
                                       const isPublic = Boolean(meta?.is_public)
-                                      const isChecked =
-                                        isPublic || selectedGroupList.includes(group)
                                       const customRatio = userGroupRatios[group]
+                                      const isChecked = isPublic
+                                        ? customRatio !== undefined
+                                        : selectedGroupList.includes(group)
                                       const hasPerCall = perCallGroups.has(group)
                                       const perCallCount =
                                         perCallModelCountByGroup[group] || 0
@@ -798,15 +821,12 @@ export function UsersMutateDrawer({
                                             <div
                                               className='flex items-center gap-2 min-w-0 flex-1 cursor-pointer select-none'
                                               onClick={() => {
-                                                if (!isPublic) {
-                                                  handleToggleGroup(group, !isChecked)
-                                                }
+                                                handleToggleGroup(group, !isChecked)
                                               }}
                                             >
                                               <Checkbox
                                                 id={`pop-chk-${group}`}
                                                 checked={isChecked}
-                                                disabled={isPublic}
                                                 onCheckedChange={(checked) =>
                                                   handleToggleGroup(group, Boolean(checked))
                                                 }
@@ -859,7 +879,7 @@ export function UsersMutateDrawer({
                                                 type='number'
                                                 min='0'
                                                 step='0.001'
-                                                disabled={!isChecked}
+                                                disabled={!isPublic && !isChecked}
                                                 className='h-7 w-20 px-1.5 text-xs font-mono text-right'
                                                 placeholder={
                                                   meta?.ratio !== undefined
@@ -977,7 +997,7 @@ export function UsersMutateDrawer({
                                               handleRatioChange(group, e.target.value)
                                             }
                                           />
-                                          {!isPublic && (
+                                          {!isPublic ? (
                                             <Button
                                               variant='ghost'
                                               size='icon'
@@ -988,7 +1008,18 @@ export function UsersMutateDrawer({
                                             >
                                               <X className='size-3.5' />
                                             </Button>
-                                          )}
+                                          ) : customRatio !== undefined ? (
+                                            <Button
+                                              variant='ghost'
+                                              size='icon'
+                                              type='button'
+                                              className='size-7 text-muted-foreground hover:text-destructive shrink-0'
+                                              title={t('Reset to default ratio')}
+                                              onClick={() => handleToggleGroup(group, false)}
+                                            >
+                                              <X className='size-3.5' />
+                                            </Button>
+                                          ) : null}
                                         </div>
                                       </div>
                                     )

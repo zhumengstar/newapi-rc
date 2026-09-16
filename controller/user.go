@@ -971,16 +971,12 @@ func UpdateUser(c *gin.Context) {
 			userSetting.UserModelPrices = nil
 		}
 		if request.UserGroupRatios != nil {
-			selectedGroups := make(map[string]bool)
-			for _, group := range service.ParseUserGroups(updatedUser.Group) {
-				selectedGroups[group] = true
-			}
 			for group, ratio := range request.UserGroupRatios {
 				if ratio < 0 || math.IsNaN(ratio) || math.IsInf(ratio, 0) {
 					common.ApiErrorMsg(c, "user group ratio must be a non-negative finite number")
 					return
 				}
-				if !selectedGroups[group] || !service.GroupInUserUsableGroups(updatedUser.Group, group) {
+				if !service.GroupInUserUsableGroups(updatedUser.Group, group) {
 					delete(request.UserGroupRatios, group)
 				}
 			}
