@@ -850,7 +850,9 @@ func SearchChannels(keyword string, group string, model string, idSort bool, sor
 	baseQuery := DB.Model(&Channel{}).Omit("key")
 
 	// 构造WHERE子句
-	whereClause := "(id = ? OR name LIKE ? OR " + commonKeyCol + " = ? OR " + baseURLCol + " LIKE ?) AND " + modelsCol + " LIKE ?"
+	likeOp := mainLikeOp()
+	whereClause := fmt.Sprintf("(id = ? OR name %s ? OR %s = ? OR %s %s ?) AND %s %s ?",
+		likeOp, commonKeyCol, baseURLCol, likeOp, modelsCol, likeOp)
 	args := []any{common.String2Int(keyword), "%" + keyword + "%", keyword, "%" + keyword + "%", "%" + model + "%"}
 	baseQuery = ApplyChannelGroupFilter(baseQuery.Where(whereClause, args...), group)
 
@@ -1492,7 +1494,9 @@ func SearchTags(keyword string, group string, model string, idSort bool) ([]*str
 	baseQuery := DB.Model(&Channel{}).Omit("key")
 
 	// 构造WHERE子句
-	whereClause := "(id = ? OR name LIKE ? OR " + commonKeyCol + " = ? OR " + baseURLCol + " LIKE ?) AND " + modelsCol + " LIKE ?"
+	likeOp := mainLikeOp()
+	whereClause := fmt.Sprintf("(id = ? OR name %s ? OR %s = ? OR %s %s ?) AND %s %s ?",
+		likeOp, commonKeyCol, baseURLCol, likeOp, modelsCol, likeOp)
 	args := []any{common.String2Int(keyword), "%" + keyword + "%", keyword, "%" + keyword + "%", "%" + model + "%"}
 	baseQuery = ApplyChannelGroupFilter(baseQuery.Where(whereClause, args...), group)
 

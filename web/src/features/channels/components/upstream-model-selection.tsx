@@ -179,10 +179,13 @@ export function UpstreamModelSelection(props: UpstreamModelSelectionProps) {
     const sourceSet = new Set(
       (props.redirectSourceModels ?? []).map(normalizeModelName)
     )
-    const keyword = search.toLowerCase().trim()
-    const filtered = models.filter((model) =>
-      model.toLowerCase().includes(keyword)
-    )
+    const searchTokens = search.toLowerCase().trim().split(/\s+/).filter(Boolean)
+    const matchesKeyword = (modelName: string) => {
+      if (searchTokens.length === 0) return true
+      const lower = modelName.toLowerCase()
+      return searchTokens.every((token) => lower.includes(token))
+    }
+    const filtered = models.filter(matchesKeyword)
     const existing = filtered.filter((model) =>
       classification.classificationSet.has(model)
     )
@@ -195,7 +198,7 @@ export function UpstreamModelSelection(props: UpstreamModelSelectionProps) {
       (model) =>
         !modelSet.has(model) &&
         !sourceSet.has(model) &&
-        model.toLowerCase().includes(keyword)
+        matchesKeyword(model)
     )
     return {
       filtered,

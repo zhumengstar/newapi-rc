@@ -64,6 +64,20 @@ func initCol() {
 	}
 }
 
+func mainLikeOp() string {
+	if DB != nil && DB.Dialector != nil && DB.Dialector.Name() == "postgres" {
+		return "ILIKE"
+	}
+	return common.MainLikeOp()
+}
+
+func logLikeOp() string {
+	if LOG_DB != nil && LOG_DB.Dialector != nil && LOG_DB.Dialector.Name() == "postgres" {
+		return "ILIKE"
+	}
+	return common.LogLikeOp()
+}
+
 var DB *gorm.DB
 
 var LOG_DB *gorm.DB

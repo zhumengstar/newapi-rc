@@ -1,6 +1,8 @@
 package model
 
 import (
+	"fmt"
+
 	"github.com/QuantumNous/new-api/common"
 
 	"gorm.io/gorm"
@@ -103,8 +105,9 @@ func GetAllVendors(offset int, limit int) ([]*Vendor, error) {
 func SearchVendors(keyword string, offset, limit int, association ...string) ([]*Vendor, int64, error) {
 	db := DB.Model(&Vendor{})
 	if keyword != "" {
+		likeOp := mainLikeOp()
 		like := "%" + keyword + "%"
-		db = db.Where("name LIKE ? OR description LIKE ?", like, like)
+		db = db.Where(fmt.Sprintf("name %s ? OR description %s ?", likeOp, likeOp), like, like)
 	}
 	if len(association) > 0 {
 		references := DB.Model(&Model{}).Select("1").Where("models.vendor_id = vendors.id")

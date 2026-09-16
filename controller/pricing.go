@@ -7,6 +7,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 
 	"github.com/gin-gonic/gin"
@@ -22,16 +23,24 @@ func filterPricingByUsableGroups(pricing []model.Pricing, usableGroup map[string
 
 	filtered := make([]model.Pricing, 0, len(pricing))
 	for _, item := range pricing {
-		if common.StringsContains(item.EnableGroup, "all") {
-			filtered = append(filtered, item)
-			continue
-		}
+		hasAll := false
+		matchedGroups := make([]string, 0, len(item.EnableGroup))
 		for _, group := range item.EnableGroup {
+			if group == "all" {
+				hasAll = true
+				matchedGroups = append(matchedGroups, group)
+				continue
+			}
 			if _, ok := usableGroup[group]; ok {
-				filtered = append(filtered, item)
-				break
+				matchedGroups = append(matchedGroups, group)
 			}
 		}
+		if len(matchedGroups) == 0 && !hasAll {
+			continue
+		}
+		itemCopy := item
+		itemCopy.EnableGroup = matchedGroups
+		filtered = append(filtered, itemCopy)
 	}
 	return filtered
 }
@@ -99,15 +108,22 @@ func GetPricing(c *gin.Context) {
 		}
 	}
 
-	usableGroup = service.GetUserUsableGroups(group)
-	pricing = filterPricingByUsableGroups(pricing, usableGroup)
-	pricing = applyUserModelPriceRules(pricing, userSetting)
-	// check groupRatio contains usableGroup
-	for group := range ratio_setting.GetGroupRatioCopy() {
-		if _, ok := usableGroup[group]; !ok {
-			delete(groupRatio, group)
+	isAdmin := c.GetInt("role") >= common.RoleAdminUser
+	if !isAdmin {
+		usableGroup = service.GetUserUsableGroups(group)
+		pricing = filterPricingByUsableGroups(pricing, usableGroup)
+		// check groupRatio contains usableGroup
+		for group := range ratio_setting.GetGroupRatioCopy() {
+			if _, ok := usableGroup[group]; !ok {
+				delete(groupRatio, group)
+			}
+		}
+	} else {
+		for group := range ratio_setting.GetGroupRatioCopy() {
+			usableGroup[group] = setting.GetUsableGroupDescription(group)
 		}
 	}
+	pricing = applyUserModelPriceRules(pricing, userSetting)
 
 	c.JSON(200, gin.H{
 		"success":            true,

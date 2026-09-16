@@ -630,9 +630,11 @@ export function UsersMutateDrawer({
                         ])
                       )
 
+                      const queryTokens = groupSearchQuery.trim().toLowerCase().split(/\s+/).filter(Boolean)
                       const filteredGroups = groupOptions.filter((group) => {
-                        if (groupSearchQuery.trim()) {
-                          if (!group.toLowerCase().includes(groupSearchQuery.toLowerCase())) {
+                        if (queryTokens.length > 0) {
+                          const gLower = group.toLowerCase()
+                          if (!queryTokens.every((token) => gLower.includes(token))) {
                             return false
                           }
                         }

@@ -27,7 +27,7 @@ func TestMergeClaudeUsageCacheCreationReplacesWholeObject(t *testing.T) {
 	assert.Equal(t, 0, merged.CacheCreation.Ephemeral1hInputTokens)
 }
 
-func TestMergeGeminiUsageMetadataCandidatesAndThoughtsReplacedAsPair(t *testing.T) {
+func TestMergeGeminiUsageMetadataPreservesAccumulatedThoughts(t *testing.T) {
 	t.Parallel()
 
 	merged := MergeGeminiUsageMetadataNonZero(
@@ -44,12 +44,12 @@ func TestMergeGeminiUsageMetadataCandidatesAndThoughtsReplacedAsPair(t *testing.
 	)
 	require.NotNil(t, merged)
 	assert.Equal(t, 150, merged.CandidatesTokenCount)
-	assert.Equal(t, 0, merged.ThoughtsTokenCount)
+	assert.Equal(t, 100, merged.ThoughtsTokenCount)
 
 	billing := NewGeminiChatBillingUsage(merged)
 	usage, ok := billing.CanonicalUsage()
 	require.True(t, ok)
-	assert.Equal(t, 150, usage.CompletionTokens)
+	assert.Equal(t, 250, usage.CompletionTokens)
 }
 
 func TestGeminiModalityKeysSettleConsistentlyAndDuplicateEntriesSum(t *testing.T) {

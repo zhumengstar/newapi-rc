@@ -58,6 +58,13 @@ func getTokenNum(tokenEncoder tokenizer.Codec, text string) int {
 	if text == "" {
 		return 0
 	}
+	if tokenEncoder == nil {
+		if defaultTokenEncoder != nil {
+			tokenEncoder = defaultTokenEncoder
+		} else {
+			tokenEncoder = codec.NewCl100kBase()
+		}
+	}
 	tkm, _ := tokenEncoder.Count(text)
 	return tkm
 }

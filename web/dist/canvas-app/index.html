@@ -29,20 +29,31 @@
                         if (apiKey) cfg.apiKey = apiKey;
                         if (!Array.isArray(cfg.channels)) cfg.channels = [];
                         var found = false;
-                        for (var i = 0; i < cfg.channels.length; i++) {
-                            var ch = cfg.channels[i];
-                            if (ch.baseUrl === baseUrl || ch.name === channelName) {
-                                if (baseUrl) ch.baseUrl = baseUrl;
-                                if (apiKey) ch.apiKey = apiKey;
-                                if (channelName) ch.name = channelName;
-                                found = true;
-                                break;
+                        var targetName = (channelName || "").trim();
+                        if (targetName) {
+                            for (var i = 0; i < cfg.channels.length; i++) {
+                                var ch = cfg.channels[i];
+                                if (ch && ch.name && ch.name.trim() === targetName) {
+                                    if (baseUrl) ch.baseUrl = baseUrl;
+                                    if (apiKey) ch.apiKey = apiKey;
+                                    found = true;
+                                    break;
+                                }
+                            }
+                        } else {
+                            for (var i = 0; i < cfg.channels.length; i++) {
+                                var ch = cfg.channels[i];
+                                if (ch && ch.baseUrl === baseUrl) {
+                                    if (apiKey) ch.apiKey = apiKey;
+                                    found = true;
+                                    break;
+                                }
                             }
                         }
                         if (!found && baseUrl) {
                             cfg.channels.unshift({
                                 id: "chan_" + Date.now(),
-                                name: channelName || "New API",
+                                name: targetName || "New API",
                                 baseUrl: baseUrl,
                                 apiKey: apiKey || "",
                                 apiFormat: "openai",
@@ -70,7 +81,7 @@
                 });
             })();
         </script>
-      <script type="module" crossorigin src="/canvas-app/assets/index-DNGGQv0r.js"></script>
+      <script type="module" crossorigin src="/canvas-app/assets/index-xLvIleUg.js"></script>
       <link rel="stylesheet" crossorigin href="/canvas-app/assets/index-vLLVrTWK.css">
     </head>
     <body class="bg-background text-foreground antialiased">

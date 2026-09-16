@@ -703,8 +703,10 @@ func SearchUsers(keyword string, group string, role *int, status *int, startIdx 
 	// 构建基础查询
 	query := DB.Unscoped().Model(&User{})
 
+	likeOp := mainLikeOp()
+
 	// 构建搜索条件
-	likeCondition := "username LIKE ? OR email LIKE ? OR display_name LIKE ?"
+	likeCondition := fmt.Sprintf("username %s ? OR email %s ? OR display_name %s ?", likeOp, likeOp, likeOp)
 	likeArgs := []any{"%" + keyword + "%", "%" + keyword + "%", "%" + keyword + "%"}
 
 	// 尝试将关键字转换为整数ID
@@ -717,7 +719,17 @@ func SearchUsers(keyword string, group string, role *int, status *int, startIdx 
 
 	query = query.Where("("+likeCondition+")", likeArgs...)
 	if group != "" {
-		query = query.Where(commonGroupCol+" = ?", group)
+		escapedGroup := strings.NewReplacer(
+			"!", "!!",
+			"%", "!%",
+			"_", "!_",
+		).Replace(group)
+		pattern := "%," + escapedGroup + ",%"
+		if common.UsingMainDatabase(common.DatabaseTypeMySQL) {
+			query = query.Where(commonGroupCol+" = ? OR CONCAT(',', "+commonGroupCol+", ',') "+likeOp+" ? ESCAPE '!'", group, pattern)
+		} else {
+			query = query.Where(commonGroupCol+" = ? OR (',' || "+commonGroupCol+" || ',') "+likeOp+" ? ESCAPE '!'", group, pattern)
+		}
 	}
 	if role != nil {
 		query = query.Where("role = ?", *role)

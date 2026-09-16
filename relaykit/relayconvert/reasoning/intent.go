@@ -502,11 +502,22 @@ func FromClaude(req *dto.ClaudeRequest) (Intent, error) {
 		if req.Thinking.BudgetTokens != nil {
 			budget := *req.Thinking.BudgetTokens
 			if budget < 1024 {
-				return Intent{}, fmt.Errorf("Claude thinking budget_tokens must be at least 1024, got %d", budget)
+				budget = 1024
+				req.Thinking.BudgetTokens = &budget
 			}
 			if req.MaxTokens != nil && uint(budget) >= *req.MaxTokens {
-				return Intent{}, fmt.Errorf("Claude thinking budget_tokens must be less than max_tokens")
+				if *req.MaxTokens <= 1024 {
+					newMax := uint(budget) + 1024
+					req.MaxTokens = &newMax
+				} else {
+					budget = int(float64(*req.MaxTokens) * 0.8)
+					if budget < 1024 {
+						budget = int(*req.MaxTokens) - 1
+					}
+					req.Thinking.BudgetTokens = &budget
+				}
 			}
+			intent.BudgetTokens = req.Thinking.BudgetTokens
 			intent.BudgetSource = SourceNative
 		}
 		switch req.Thinking.Display {

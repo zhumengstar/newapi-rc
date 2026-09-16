@@ -545,3 +545,20 @@ func mustStreamChunks(t *testing.T, state *ResponsesToChatStreamState, event *dt
 	require.NoError(t, err)
 	return chunks
 }
+
+func TestNormalizeResponsesUsageWithOutputTokensDetails(t *testing.T) {
+	src := &dto.Usage{
+		InputTokens:  100,
+		OutputTokens: 1, // 上游仅报告 1 个正文 token，未将 reasoning 计入 output_tokens
+		OutputTokensDetails: &dto.OutputTokenDetails{
+			ReasoningTokens: 500,
+			TextTokens:      1,
+		},
+	}
+	normalized := NormalizeResponsesUsage(src)
+	require.NotNil(t, normalized)
+	assert.Equal(t, 100, normalized.PromptTokens)
+	assert.Equal(t, 501, normalized.CompletionTokens) // 自动补足 reasoning_tokens
+	assert.Equal(t, 500, normalized.CompletionTokenDetails.ReasoningTokens)
+	assert.Equal(t, 601, normalized.TotalTokens)
+}

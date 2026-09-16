@@ -41,6 +41,22 @@ func UsingLogDatabase(databaseType DatabaseType) bool {
 	return logDatabaseType == databaseType
 }
 
+// MainLikeOp returns ILIKE for PostgreSQL (for case-insensitive matching) and LIKE for MySQL/SQLite.
+func MainLikeOp() string {
+	if UsingMainDatabase(DatabaseTypePostgreSQL) {
+		return "ILIKE"
+	}
+	return "LIKE"
+}
+
+// LogLikeOp returns ILIKE for PostgreSQL (for case-insensitive matching) and LIKE for ClickHouse/MySQL/SQLite.
+func LogLikeOp() string {
+	if UsingLogDatabase(DatabaseTypePostgreSQL) {
+		return "ILIKE"
+	}
+	return "LIKE"
+}
+
 // SQLitePath is the DSN for the default SQLite database. It uses WAL journal
 // mode so readers are never blocked by the single writer, plus a 30s busy
 // timeout for writers to queue.

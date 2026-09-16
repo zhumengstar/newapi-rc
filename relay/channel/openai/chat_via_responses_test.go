@@ -278,3 +278,25 @@ func requireOrderedSubstrings(t *testing.T, s string, parts ...string) {
 		offset += idx + len(part)
 	}
 }
+
+func TestConvertOpenAIResponsesRequestSanitizesEmptyName(t *testing.T) {
+	adaptor := &Adaptor{}
+	inputWithEmptyName := `[
+		{"role": "user", "name": "", "content": "hello with empty name"},
+		{"role": "user", "name": "valid_user", "content": "hello with valid name"}
+	]`
+	req := dto.OpenAIResponsesRequest{
+		Model: "gpt-5.6-sol",
+		Input: []byte(inputWithEmptyName),
+	}
+	res, err := adaptor.ConvertOpenAIResponsesRequest(nil, nil, req)
+	require.NoError(t, err)
+	convertedReq, ok := res.(dto.OpenAIResponsesRequest)
+	require.True(t, ok)
+	var items []map[string]any
+	require.NoError(t, common.Unmarshal(convertedReq.Input, &items))
+	require.Len(t, items, 2)
+	assert.NotContains(t, items[0], "name", "empty name should be deleted")
+	assert.Equal(t, "valid_user", items[1]["name"], "valid name should be preserved")
+}
+

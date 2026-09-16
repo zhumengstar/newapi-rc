@@ -284,13 +284,12 @@ export function PersistentCanvasView({ isVisible }: PersistentCanvasViewProps) {
 
   // 过滤后的分组列表
   const filteredGroups = useMemo(() => {
-    if (!groupSearch.trim()) return groupOptions
-    const q = groupSearch.toLowerCase().trim()
-    return groupOptions.filter(
-      (opt) =>
-        opt.label.toLowerCase().includes(q) ||
-        opt.group.toLowerCase().includes(q)
-    )
+    const tokens = groupSearch.toLowerCase().trim().split(/\s+/).filter(Boolean)
+    if (tokens.length === 0) return groupOptions
+    return groupOptions.filter((opt) => {
+      const target = `${opt.label} ${opt.group}`.toLowerCase()
+      return tokens.every((token) => target.includes(token))
+    })
   }, [groupOptions, groupSearch])
 
   // 构造内嵌画布地址

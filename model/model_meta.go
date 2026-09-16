@@ -2,6 +2,7 @@ package model
 
 import (
 	"errors"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -481,15 +482,16 @@ func GetPreferredModelOwnerChannelTypes(modelNames []string, groups []string) (m
 func SearchModels(keyword string, vendor string, status string, syncOfficial string, offset int, limit int) ([]*Model, int64, error) {
 	var models []*Model
 	db := DB.Model(&Model{})
+	likeOp := mainLikeOp()
 	if keyword != "" {
 		like := "%" + keyword + "%"
-		db = db.Where("model_name LIKE ? OR description LIKE ? OR tags LIKE ?", like, like, like)
+		db = db.Where(fmt.Sprintf("model_name %s ? OR description %s ? OR tags %s ?", likeOp, likeOp, likeOp), like, like, like)
 	}
 	if vendor != "" {
 		if vid, err := strconv.Atoi(vendor); err == nil {
 			db = db.Where("models.vendor_id = ?", vid)
 		} else {
-			db = db.Joins("JOIN vendors ON vendors.id = models.vendor_id").Where("vendors.name LIKE ?", "%"+vendor+"%")
+			db = db.Joins("JOIN vendors ON vendors.id = models.vendor_id").Where("vendors.name "+likeOp+" ?", "%"+vendor+"%")
 		}
 	}
 	if statusValue, ok := parseModelStatusFilter(status); ok {

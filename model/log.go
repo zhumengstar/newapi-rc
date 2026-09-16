@@ -47,7 +47,8 @@ func buildLogLikeCondition(column string, value string) (string, string, error) 
 	if err != nil {
 		return "", "", err
 	}
-	return column + " LIKE ? ESCAPE '!'", pattern, nil
+	likeOp := logLikeOp()
+	return column + " " + likeOp + " ? ESCAPE '!'", pattern, nil
 }
 
 func sanitizeClickHouseLikePattern(input string) (string, error) {
@@ -508,7 +509,7 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 	}
 }
 
-func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, startIdx int, num int, channel int, group string, requestId string, upstreamRequestId string) (logs []*Log, total int64, err error) {
+func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, startIdx int, num int, channel int, group string, requestId string, upstreamRequestId string, statusCode ...string) (logs []*Log, total int64, err error) {
 	var tx *gorm.DB
 	if logType == LogTypeUnknown {
 		tx = LOG_DB
@@ -543,6 +544,15 @@ func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName
 	if group != "" {
 		tx = tx.Where("logs."+logGroupCol+" = ?", group)
 	}
+	var code string
+	if len(statusCode) > 0 {
+		code = strings.TrimSpace(statusCode[0])
+	}
+	if code != "" {
+		statusPattern := "%status_code=" + code + "%"
+		otherPattern := "%\"status_code\":" + code + "%"
+		tx = tx.Where("(logs.content LIKE ? OR logs.other LIKE ?)", statusPattern, otherPattern)
+	}
 	order := "logs.created_at desc, logs.id desc"
 	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
 		order = clickHouseLogOrder("logs.")
@@ -550,7 +560,7 @@ func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName
 	countKey := buildLogCountCacheKey(
 		"all",
 		strconv.Itoa(logType), strconv.FormatInt(startTimestamp, 10), strconv.FormatInt(endTimestamp, 10),
-		modelName, username, tokenName, strconv.Itoa(channel), group, requestId, upstreamRequestId,
+		modelName, username, tokenName, strconv.Itoa(channel), group, requestId, upstreamRequestId, code,
 	)
 	countTx := tx.Session(&gorm.Session{})
 	listTx := tx.Session(&gorm.Session{})
@@ -620,7 +630,7 @@ func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName
 
 const logSearchCountLimit = 10000
 
-func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int64, modelName string, tokenName string, startIdx int, num int, group string, requestId string, upstreamRequestId string) (logs []*Log, total int64, err error) {
+func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int64, modelName string, tokenName string, startIdx int, num int, group string, requestId string, upstreamRequestId string, statusCode ...string) (logs []*Log, total int64, err error) {
 	var tx *gorm.DB
 	if logType == LogTypeUnknown {
 		tx = LOG_DB.Where("logs.user_id = ?", userId)
@@ -649,6 +659,15 @@ func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int
 	if group != "" {
 		tx = tx.Where("logs."+logGroupCol+" = ?", group)
 	}
+	var code string
+	if len(statusCode) > 0 {
+		code = strings.TrimSpace(statusCode[0])
+	}
+	if code != "" {
+		statusPattern := "%status_code=" + code + "%"
+		otherPattern := "%\"status_code\":" + code + "%"
+		tx = tx.Where("(logs.content LIKE ? OR logs.other LIKE ?)", statusPattern, otherPattern)
+	}
 	order := "logs.id desc"
 	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
 		order = clickHouseLogOrder("logs.")
@@ -656,7 +675,7 @@ func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int
 	countKey := buildLogCountCacheKey(
 		"user", strconv.Itoa(userId), strconv.Itoa(logType),
 		strconv.FormatInt(startTimestamp, 10), strconv.FormatInt(endTimestamp, 10),
-		modelName, tokenName, group, requestId, upstreamRequestId,
+		modelName, tokenName, group, requestId, upstreamRequestId, code,
 	)
 	countTx := tx.Session(&gorm.Session{})
 	listTx := tx.Session(&gorm.Session{})

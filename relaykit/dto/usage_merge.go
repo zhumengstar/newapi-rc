@@ -238,8 +238,8 @@ func MergeGeminiUsageMetadataNonZero(current *GeminiUsageMetadata, incoming *Gem
 	}
 	if incoming.CandidatesTokenCount > 0 {
 		merged.CandidatesTokenCount = incoming.CandidatesTokenCount
-		merged.ThoughtsTokenCount = incoming.ThoughtsTokenCount
-	} else if incoming.ThoughtsTokenCount > 0 {
+	}
+	if incoming.ThoughtsTokenCount > 0 {
 		merged.ThoughtsTokenCount = incoming.ThoughtsTokenCount
 	}
 	if incoming.TotalTokenCount > 0 {

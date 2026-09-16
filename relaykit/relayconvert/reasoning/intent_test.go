@@ -170,3 +170,36 @@ func TestOpenAIPivotDoesNotTreatMaxAndXHighAsEquivalent(t *testing.T) {
 	_, err = FromOpenAIResponses(responses)
 	require.ErrorIs(t, err, ErrEffortConflict)
 }
+
+func TestFromClaudeMessagesAutoHealsBudgetTokens(t *testing.T) {
+	// Case 1: budget_tokens >= max_tokens (e.g. 4096 and 4096)
+	b4096 := 4096
+	maxTok4096 := uint(4096)
+	claudeReq := &dto.ClaudeRequest{
+		MaxTokens: &maxTok4096,
+		Thinking: &dto.Thinking{
+			Type:         "enabled",
+			BudgetTokens: &b4096,
+		},
+	}
+	intent, err := FromClaude(claudeReq)
+	require.NoError(t, err)
+	require.NotNil(t, intent.BudgetTokens)
+	assert.True(t, *intent.BudgetTokens < int(maxTok4096), "budget should be less than max_tokens")
+
+	// Case 2: budget_tokens < 1024
+	b500 := 500
+	maxTok8192 := uint(8192)
+	claudeReqSmall := &dto.ClaudeRequest{
+		MaxTokens: &maxTok8192,
+		Thinking: &dto.Thinking{
+			Type:         "enabled",
+			BudgetTokens: &b500,
+		},
+	}
+	intentSmall, err := FromClaude(claudeReqSmall)
+	require.NoError(t, err)
+	require.NotNil(t, intentSmall.BudgetTokens)
+	assert.Equal(t, 1024, *intentSmall.BudgetTokens, "budget should be auto-healed to at least 1024")
+}
+

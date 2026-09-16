@@ -60,6 +60,19 @@ import { useLogsViewScope, useUsageLogsContext } from './usage-logs-provider'
 
 const route = getRouteApi('/_authenticated/usage-logs/$section')
 
+const STATUS_CODE_OPTIONS = [
+  { value: 'all', label: 'All Status Codes' },
+  { value: '400', label: '400' },
+  { value: '401', label: '401' },
+  { value: '403', label: '403' },
+  { value: '404', label: '404' },
+  { value: '429', label: '429' },
+  { value: '500', label: '500' },
+  { value: '502', label: '502' },
+  { value: '503', label: '503' },
+  { value: '504', label: '504' },
+] as const
+
 type LogTypeValue = (typeof LOG_TYPE_FILTERS)[number]['value']
 const logTypeValueSet = new Set<string>(
   LOG_TYPE_FILTERS.map((type) => type.value)
@@ -94,6 +107,7 @@ function buildSearchSourceKey(values: {
   username?: unknown
   requestId?: unknown
   upstreamRequestId?: unknown
+  statusCode?: unknown
   type?: unknown
 }) {
   return [
@@ -106,6 +120,7 @@ function buildSearchSourceKey(values: {
     values.username,
     values.requestId,
     values.upstreamRequestId,
+    values.statusCode,
     Array.isArray(values.type) ? values.type.join(',') : values.type,
   ]
     .map((value) => String(value ?? ''))
@@ -158,6 +173,7 @@ export function CommonLogsFilterBar<TData>(
       username: searchParams.username,
       requestId: searchParams.requestId,
       upstreamRequestId: searchParams.upstreamRequestId,
+      statusCode: searchParams.statusCode,
       type: searchParams.type,
     }
     const filters: CommonLogFilters = {
@@ -172,6 +188,7 @@ export function CommonLogsFilterBar<TData>(
       username: searchParams.username || undefined,
       requestId: searchParams.requestId || undefined,
       upstreamRequestId: searchParams.upstreamRequestId || undefined,
+      statusCode: searchParams.statusCode || undefined,
     }
     return {
       sourceKey: buildSearchSourceKey(sourceValues),
@@ -188,6 +205,7 @@ export function CommonLogsFilterBar<TData>(
     searchParams.username,
     searchParams.requestId,
     searchParams.upstreamRequestId,
+    searchParams.statusCode,
     searchParams.type,
   ])
   const [draft, setDraft] = useState<CommonLogDraft>(() => searchState)
@@ -244,6 +262,7 @@ export function CommonLogsFilterBar<TData>(
       username: undefined,
       requestId: undefined,
       upstreamRequestId: undefined,
+      statusCode: undefined,
     }
     const resetSearch = {
       page: 1,
@@ -257,6 +276,7 @@ export function CommonLogsFilterBar<TData>(
       username: undefined,
       requestId: undefined,
       upstreamRequestId: undefined,
+      statusCode: undefined,
     }
     setDraft({
       sourceKey: buildSearchSourceKey({}),
@@ -302,6 +322,7 @@ export function CommonLogsFilterBar<TData>(
   const hasAdditionalFilters =
     !!filters.model ||
     !!filters.group ||
+    !!filters.statusCode ||
     hasTypeFilter ||
     hasExpandedFilters ||
     isTimeCustom
@@ -519,12 +540,68 @@ export function CommonLogsFilterBar<TData>(
     </>
   )
 
+  const statusCodeItems = useMemo(
+    () =>
+      STATUS_CODE_OPTIONS.map((item) => ({
+        value: item.value,
+        label:
+          item.value === 'all'
+            ? t('Status Code', '状态码')
+            : item.label,
+      })),
+    [t]
+  )
+  const currentStatusCode = filters.statusCode || 'all'
+  const selectedStatusCode = statusCodeItems.find(
+    (item) => item.value === currentStatusCode
+  )
+
+  const statusCodeFilter = (
+    <Select
+      items={statusCodeItems}
+      value={currentStatusCode}
+      onValueChange={(value) => {
+        const nextCode =
+          value !== null && value !== 'all' ? value : undefined
+        handleChange('statusCode', nextCode)
+        handleApply({ ...filters, statusCode: nextCode }, logType)
+      }}
+    >
+      <SelectTrigger
+        size='default'
+        aria-label={t('Status Code', '状态码')}
+        className='h-8 min-w-[95px] shrink-0 text-xs sm:text-sm'
+      >
+        <SelectValue className='min-w-0'>
+          <span className='truncate'>
+            {selectedStatusCode?.label ?? t('Status Code', '状态码')}
+          </span>
+        </SelectValue>
+      </SelectTrigger>
+      <SelectContent
+        alignItemWithTrigger={false}
+        className='max-w-[calc(100vw-2rem)] min-w-32'
+      >
+        <SelectGroup>
+          {statusCodeItems.map((item) => (
+            <SelectItem key={item.value} value={item.value}>
+              {item.value === 'all'
+                ? t('All Status Codes', '全部状态码')
+                : item.label}
+            </SelectItem>
+          ))}
+        </SelectGroup>
+      </SelectContent>
+    </Select>
+  )
+
   return (
     <LogsFilterToolbar
       table={props.table}
       compactMobile
       stats={statsBar}
       actionStart={sensitiveToggle}
+      actionEnd={statusCodeFilter}
       primaryFilters={
         <>
           {dateRangeFilter}
@@ -541,10 +618,14 @@ export function CommonLogsFilterBar<TData>(
           {groupFilter}
           {typeFilter}
           {expandedFilters}
+          <div className='flex items-center justify-between gap-2 pt-1'>
+            <span className='text-muted-foreground text-sm'>{t('Status Code', '状态码')}</span>
+            {statusCodeFilter}
+          </div>
         </>
       }
       mobileFilterCount={
-        [filters.model, filters.group, hasTypeFilter].filter(Boolean).length +
+        [filters.model, filters.group, hasTypeFilter, !!filters.statusCode].filter(Boolean).length +
         expandedFilterCount
       }
       hasActiveFilters={hasAdditionalFilters}

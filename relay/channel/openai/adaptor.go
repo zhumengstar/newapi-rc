@@ -662,7 +662,36 @@ func detectImageMimeType(filename string) string {
 	}
 }
 
+func sanitizeResponsesInputNames(inputRaw json.RawMessage) json.RawMessage {
+	if len(inputRaw) == 0 {
+		return inputRaw
+	}
+	var items []any
+	if err := common.Unmarshal(inputRaw, &items); err == nil {
+		modified := false
+		for _, raw := range items {
+			if item, ok := raw.(map[string]any); ok {
+				if n, exists := item["name"]; exists {
+					if s, ok := n.(string); ok && strings.TrimSpace(s) == "" {
+						delete(item, "name")
+						modified = true
+					}
+				}
+			}
+		}
+		if modified {
+			if cleaned, err := common.Marshal(items); err == nil {
+				return json.RawMessage(cleaned)
+			}
+		}
+	}
+	return inputRaw
+}
+
 func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.OpenAIResponsesRequest) (any, error) {
+	if len(request.Input) > 0 {
+		request.Input = sanitizeResponsesInputNames(request.Input)
+	}
 	//  转换模型推理力度后缀
 	effort, originModel := reasoning.ParseOpenAIReasoningEffortFromModelSuffix(request.Model)
 	preserveSuffix := model_setting.ShouldPreserveThinkingSuffix(request.Model) || (info != nil && model_setting.ShouldPreserveThinkingSuffix(info.OriginModelName))

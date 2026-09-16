@@ -207,10 +207,16 @@ func usageFromResponsesUsage(src *dto.Usage, createBillingSnapshot bool) *dto.Us
 	if src.InputTokens != 0 {
 		usage.PromptTokens = src.InputTokens
 		usage.InputTokens = src.InputTokens
+	} else if src.PromptTokens != 0 {
+		usage.PromptTokens = src.PromptTokens
+		usage.InputTokens = src.PromptTokens
 	}
 	if src.OutputTokens != 0 {
 		usage.CompletionTokens = src.OutputTokens
 		usage.OutputTokens = src.OutputTokens
+	} else if src.CompletionTokens != 0 {
+		usage.CompletionTokens = src.CompletionTokens
+		usage.OutputTokens = src.CompletionTokens
 	}
 	if src.TotalTokens != 0 {
 		usage.TotalTokens = src.TotalTokens
@@ -225,14 +231,49 @@ func usageFromResponsesUsage(src *dto.Usage, createBillingSnapshot bool) *dto.Us
 		usage.PromptTokensDetails.ImageTokens = src.InputTokensDetails.ImageTokens
 		usage.PromptTokensDetails.AudioTokens = src.InputTokensDetails.AudioTokens
 	}
+	// 优先从 OutputTokensDetails 提取详情
+	outDetails := src.OutputTokensDetails
+	if outDetails == nil {
+		outDetails = src.OutputTokenDetailsSingular
+	}
+	if outDetails != nil {
+		if outDetails.ReasoningTokens != 0 {
+			usage.CompletionTokenDetails.ReasoningTokens = outDetails.ReasoningTokens
+		}
+		if outDetails.TextTokens != 0 {
+			usage.CompletionTokenDetails.TextTokens = outDetails.TextTokens
+		}
+		if outDetails.AudioTokens != 0 {
+			usage.CompletionTokenDetails.AudioTokens = outDetails.AudioTokens
+		}
+		if outDetails.ImageTokens != 0 {
+			usage.CompletionTokenDetails.ImageTokens = outDetails.ImageTokens
+		}
+	}
 	if src.CompletionTokenDetails.ReasoningTokens != 0 ||
 		src.CompletionTokenDetails.TextTokens != 0 ||
 		src.CompletionTokenDetails.AudioTokens != 0 ||
 		src.CompletionTokenDetails.ImageTokens != 0 {
-		usage.CompletionTokenDetails.ReasoningTokens = src.CompletionTokenDetails.ReasoningTokens
-		usage.CompletionTokenDetails.TextTokens = src.CompletionTokenDetails.TextTokens
-		usage.CompletionTokenDetails.AudioTokens = src.CompletionTokenDetails.AudioTokens
-		usage.CompletionTokenDetails.ImageTokens = src.CompletionTokenDetails.ImageTokens
+		if src.CompletionTokenDetails.ReasoningTokens != 0 {
+			usage.CompletionTokenDetails.ReasoningTokens = src.CompletionTokenDetails.ReasoningTokens
+		}
+		if src.CompletionTokenDetails.TextTokens != 0 {
+			usage.CompletionTokenDetails.TextTokens = src.CompletionTokenDetails.TextTokens
+		}
+		if src.CompletionTokenDetails.AudioTokens != 0 {
+			usage.CompletionTokenDetails.AudioTokens = src.CompletionTokenDetails.AudioTokens
+		}
+		if src.CompletionTokenDetails.ImageTokens != 0 {
+			usage.CompletionTokenDetails.ImageTokens = src.CompletionTokenDetails.ImageTokens
+		}
+	}
+	// 如果上游输出的 OutputTokens 小于思考 reasoning tokens，说明未计入推理 token，予以补足
+	if usage.CompletionTokenDetails.ReasoningTokens > 0 && usage.CompletionTokens < usage.CompletionTokenDetails.ReasoningTokens {
+		usage.CompletionTokens += usage.CompletionTokenDetails.ReasoningTokens
+		usage.OutputTokens = usage.CompletionTokens
+		if usage.TotalTokens < usage.PromptTokens+usage.CompletionTokens {
+			usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+		}
 	}
 	usage.ClaudeCacheCreation5mTokens = src.ClaudeCacheCreation5mTokens
 	usage.ClaudeCacheCreation1hTokens = src.ClaudeCacheCreation1hTokens

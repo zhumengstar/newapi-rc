@@ -164,16 +164,26 @@ func GetUsableTokenByName(userId int, name string) (*Token, error) {
 //  4. 含 % 时（模糊搜索），去掉 % 后关键词长度必须 >= 2
 //  5. 不含 % 时按精确匹配
 func sanitizeLikePattern(input string) (string, error) {
+	return sanitizeLikePatternWithAutoWildcard(input, false)
+}
+
+func sanitizeLikePatternWithAutoWildcard(input string, allowAutoWildcard bool) (string, error) {
 	// 1. 先转义 ESCAPE 字符 ! 自身，再转义 _
 	//    使用 ! 而非 \ 作为 ESCAPE 字符，避免 MySQL 中反斜杠的字符串转义问题
 	input = strings.ReplaceAll(input, "!", "!!")
 	input = strings.ReplaceAll(input, `_`, `!_`)
 
-	if err := validateLikePattern(input); err != nil {
-		return "", err
+	if strings.Contains(input, "%") {
+		if err := validateLikePattern(input); err != nil {
+			return "", err
+		}
+		return input, nil
 	}
 
-	// 5. 无 % 时，精确全匹配
+	// 5. 无 % 时，若允许自动模糊，包装为 %keyword%
+	if allowAutoWildcard && input != "" {
+		return "%" + input + "%", nil
+	}
 	return input, nil
 }
 
@@ -217,34 +227,37 @@ func SearchUserTokens(userId int, keyword string, token string, offset int, limi
 
 	// 超量用户（令牌数超过上限）只允许精确搜索，禁止模糊搜索
 	maxTokens := operation_setting.GetMaxUserTokens()
+	count, countErr := CountUserTokens(userId)
+	isOverLimit := countErr == nil && int(count) > maxTokens
+
 	hasFuzzy := strings.Contains(keyword, "%") || strings.Contains(token, "%")
 	if hasFuzzy {
-		count, err := CountUserTokens(userId)
-		if err != nil {
-			common.SysLog("failed to count user tokens: " + err.Error())
+		if countErr != nil {
+			common.SysLog("failed to count user tokens: " + countErr.Error())
 			return nil, 0, errors.New("获取令牌数量失败")
 		}
-		if int(count) > maxTokens {
+		if isOverLimit {
 			return nil, 0, errors.New("令牌数量超过上限，仅允许精确搜索，请勿使用 % 通配符")
 		}
 	}
 
+	likeOp := mainLikeOp()
 	baseQuery := DB.Model(&Token{}).Where("user_id = ?", userId)
 
 	// 非空才加 LIKE 条件，空则跳过（不过滤该字段）
 	if keyword != "" {
-		keywordPattern, err := sanitizeLikePattern(keyword)
+		keywordPattern, err := sanitizeLikePatternWithAutoWildcard(keyword, !isOverLimit)
 		if err != nil {
 			return nil, 0, err
 		}
-		baseQuery = baseQuery.Where("name LIKE ? ESCAPE '!'", keywordPattern)
+		baseQuery = baseQuery.Where("name "+likeOp+" ? ESCAPE '!'", keywordPattern)
 	}
 	if token != "" {
-		tokenPattern, err := sanitizeLikePattern(token)
+		tokenPattern, err := sanitizeLikePatternWithAutoWildcard(token, !isOverLimit)
 		if err != nil {
 			return nil, 0, err
 		}
-		baseQuery = baseQuery.Where(commonKeyCol+" LIKE ? ESCAPE '!'", tokenPattern)
+		baseQuery = baseQuery.Where(commonKeyCol+" "+likeOp+" ? ESCAPE '!'", tokenPattern)
 	}
 
 	// 先查匹配总数（用于分页，受 maxTokens 上限保护，避免全表 COUNT）

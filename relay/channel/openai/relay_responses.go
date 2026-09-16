@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
@@ -118,9 +119,19 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 				imageCounter.Commit(info)
 				imageCommitted = true
 			}
-		case "response.output_text.delta":
-			// 处理输出文本
-			responseTextBuilder.WriteString(streamResponse.Delta)
+		case "response.output_text.delta", "response.text.delta", "response.refusal.delta",
+			"response.reasoning.delta", "response.reasoning_text.delta", "response.reasoning_summary_text.delta":
+			if streamResponse.Delta != "" {
+				responseTextBuilder.WriteString(streamResponse.Delta)
+			} else if streamResponse.Text != nil && *streamResponse.Text != "" {
+				responseTextBuilder.WriteString(*streamResponse.Text)
+			}
+		case "response.function_call_arguments.delta":
+			if streamResponse.Delta != "" {
+				responseTextBuilder.WriteString(streamResponse.Delta)
+			} else if streamResponse.Arguments != nil && *streamResponse.Arguments != "" {
+				responseTextBuilder.WriteString(*streamResponse.Arguments)
+			}
 		case dto.ResponsesOutputTypeItemDone:
 			if streamResponse.Item != nil {
 				switch streamResponse.Item.Type {
@@ -139,13 +150,18 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 		}
 	})
 
-	if usage.CompletionTokens == 0 {
-		// 计算输出文本的 token 数量
-		tempStr := responseTextBuilder.String()
-		if len(tempStr) > 0 {
-			// 非正常结束，使用输出文本的 token 数量
-			completionTokens := service.CountTextToken(tempStr, info.UpstreamModelName)
+	tempStr := responseTextBuilder.String()
+	needFallback := usage.CompletionTokens == 0
+	if !needFallback && usage.CompletionTokens == 1 && len(strings.TrimSpace(tempStr)) > 10 {
+		needFallback = true
+	}
+	if needFallback && len(tempStr) > 0 {
+		// 非正常结束或上游异常仅报告1个token，使用输出文本的实际 token 数量兜底
+		completionTokens := service.CountTextToken(tempStr, info.UpstreamModelName)
+		if completionTokens > usage.CompletionTokens {
 			usage.CompletionTokens = completionTokens
+			usage.OutputTokens = completionTokens
+			common.SetContextKey(c, constant.ContextKeyLocalCountTokens, true)
 		}
 	}
 

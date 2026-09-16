@@ -232,3 +232,80 @@ func TestGetTokenAutoGroupsReturnsFullFilteredGlobalOrderAndLimit(t *testing.T) 
 	assert.Equal(t, []string{"vip", "default"}, data.Groups)
 	assert.Equal(t, 1, data.MaxCount)
 }
+
+func TestAddTokenGroupValidation(t *testing.T) {
+	configureTokenAutoGroupsTest(t, "5", `["default","vip"]`)
+	user := setupTokenAutoGroupsControllerTest(t)
+
+	// 1. 未授权私有分组被拒绝
+	request := baseAutoTokenRequest("reject-private")
+	request["group"] = "unauthorized-group"
+	ctx, recorder := newTokenAutoGroupsAuthenticatedContext(t, http.MethodPost, "/api/token/", request, user.Id)
+	AddToken(ctx)
+
+	resp := decodeAPIResponse(t, recorder)
+	assert.False(t, resp.Success)
+	var count int64
+	require.NoError(t, model.DB.Model(&model.Token{}).Where("name = ?", "reject-private").Count(&count).Error)
+	assert.Zero(t, count)
+
+	// 2. 授权分组（vip）被允许
+	requestVIP := baseAutoTokenRequest("allow-vip")
+	requestVIP["group"] = "vip"
+	ctxVIP, recorderVIP := newTokenAutoGroupsAuthenticatedContext(t, http.MethodPost, "/api/token/", requestVIP, user.Id)
+	AddToken(ctxVIP)
+
+	respVIP := decodeAPIResponse(t, recorderVIP)
+	require.True(t, respVIP.Success, respVIP.Message)
+	var tokenVIP model.Token
+	require.NoError(t, model.DB.Where("name = ?", "allow-vip").First(&tokenVIP).Error)
+	assert.Equal(t, "vip", tokenVIP.Group)
+
+	// 3. 空分组（默认分组）被允许
+	requestEmpty := baseAutoTokenRequest("allow-empty")
+	requestEmpty["group"] = ""
+	ctxEmpty, recorderEmpty := newTokenAutoGroupsAuthenticatedContext(t, http.MethodPost, "/api/token/", requestEmpty, user.Id)
+	AddToken(ctxEmpty)
+
+	respEmpty := decodeAPIResponse(t, recorderEmpty)
+	require.True(t, respEmpty.Success, respEmpty.Message)
+	var tokenEmpty model.Token
+	require.NoError(t, model.DB.Where("name = ?", "allow-empty").First(&tokenEmpty).Error)
+	assert.Equal(t, "", tokenEmpty.Group)
+}
+
+func TestUpdateTokenGroupValidation(t *testing.T) {
+	configureTokenAutoGroupsTest(t, "5", `["default","vip"]`)
+	user := setupTokenAutoGroupsControllerTest(t)
+	token := seedToken(t, model.DB, user.Id, "update-group-token", "update-group-key")
+	token.Group = "default"
+	require.NoError(t, model.DB.Save(token).Error)
+
+	// 1. 更新为未授权私有分组被拒绝
+	request := baseAutoTokenRequest("update-group-token")
+	request["id"] = token.Id
+	request["group"] = "private-forbidden-group"
+	ctx, recorder := newTokenAutoGroupsAuthenticatedContext(t, http.MethodPut, "/api/token/", request, user.Id)
+	UpdateToken(ctx)
+
+	resp := decodeAPIResponse(t, recorder)
+	assert.False(t, resp.Success)
+
+	var checkToken model.Token
+	require.NoError(t, model.DB.First(&checkToken, token.Id).Error)
+	assert.Equal(t, "default", checkToken.Group)
+
+	// 2. 更新为合法可用分组 vip 被允许
+	requestVIP := baseAutoTokenRequest("update-group-token")
+	requestVIP["id"] = token.Id
+	requestVIP["group"] = "vip"
+	ctxVIP, recorderVIP := newTokenAutoGroupsAuthenticatedContext(t, http.MethodPut, "/api/token/", requestVIP, user.Id)
+	UpdateToken(ctxVIP)
+
+	respVIP := decodeAPIResponse(t, recorderVIP)
+	require.True(t, respVIP.Success, respVIP.Message)
+
+	require.NoError(t, model.DB.First(&checkToken, token.Id).Error)
+	assert.Equal(t, "vip", checkToken.Group)
+}
+
