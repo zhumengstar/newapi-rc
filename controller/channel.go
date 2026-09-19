@@ -1437,7 +1437,7 @@ func EditTagChannels(c *gin.Context) {
 			return
 		}
 		for _, taggedChannel := range channels {
-			priority, priorityErr := constrainChannelPriority(taggedChannel.Id, *channelTag.Priority)
+			priority, priorityErr := constrainChannelPriority(taggedChannel.Id, taggedChannel.Group, *channelTag.Priority)
 			if priorityErr != nil {
 				common.ApiError(c, priorityErr)
 				return
@@ -1469,11 +1469,85 @@ func EditTagChannels(c *gin.Context) {
 	return
 }
 
+// getGroupBasePriority finds a reference priority for the group from abilities or channels.
+func getGroupBasePriority(group string) (*int64, error) {
+	firstGroup := strings.TrimSpace(strings.Split(group, ",")[0])
+	if firstGroup == "" {
+		return nil, nil
+	}
+	var ability model.Ability
+	err := model.DB.Where(&model.Ability{Group: firstGroup}).Order("priority ASC").First(&ability).Error
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+	if err == nil && ability.Priority != nil {
+		return ability.Priority, nil
+	}
+	var ch model.Channel
+	commonGroupCol := model.DB.NamingStrategy.ColumnName("", "group")
+	err = model.DB.Where(commonGroupCol+" = ? OR "+commonGroupCol+" LIKE ? OR "+commonGroupCol+" LIKE ?", firstGroup, firstGroup+",%", "%,"+firstGroup).Order("priority ASC").First(&ch).Error
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+	if err == nil && ch.Priority != nil {
+		return ch.Priority, nil
+	}
+	return nil, nil
+}
+
+func isPriorityInGroupRange(groupPriority *int64, priority int64) bool {
+	if groupPriority == nil || *groupPriority <= 0 {
+		return true
+	}
+	base := ((*groupPriority - 1) / 10) * 10
+	return priority >= base+1 && priority <= base+9
+}
+
+// remapPriorityByBase maps an existing priority into the target base's [base+1, base+9] range.
+// It preserves the intra-group tier (% 10 offset):
+// e.g. 81 (%10=1, tier 1) in a base=40 group becomes 41 (40 + 1).
+// 85 (%10=5, tier 5) in a base=40 group becomes 45 (40 + 5).
+// 89 (%10=9, tier 9) in a base=40 group becomes 49 (40 + 9).
+func remapPriorityByBase(targetBasePriority int64, currentPriority int64) int64 {
+	if targetBasePriority <= 0 {
+		return currentPriority
+	}
+	base := ((targetBasePriority - 1) / 10) * 10
+	offset := currentPriority % 10
+	if offset < 1 || offset > 9 {
+		offset = 1
+	}
+	return base + offset
+}
+
+func remapPriorityToGroupRange(targetGroup string, currentPriority int64) (int64, error) {
+	groupPriority, err := getGroupBasePriority(targetGroup)
+	if err != nil {
+		return currentPriority, err
+	}
+	if groupPriority == nil || *groupPriority <= 0 {
+		return currentPriority, nil
+	}
+	return remapPriorityByBase(*groupPriority, currentPriority), nil
+}
+
 // constrainChannelPriority keeps a channel inside the reserved nine-value
-// range of its first routing group. Channels without abilities are legacy or
-// incomplete records; use the first range rather than accepting an unbounded
-// value so a subsequent ability rebuild cannot introduce an invalid priority.
-func constrainChannelPriority(channelID int, requested int64) (int64, error) {
+// range of its target routing group. Channels without abilities are legacy or
+// incomplete records; use the target group or ability range rather than accepting
+// an unbounded value.
+func constrainChannelPriority(channelID int, targetGroup string, requested int64) (int64, error) {
+	if targetGroup != "" {
+		firstGroup := strings.TrimSpace(strings.Split(targetGroup, ",")[0])
+		if firstGroup != "" {
+			groupPriority, err := getGroupBasePriority(firstGroup)
+			if err != nil {
+				return 0, err
+			}
+			if groupPriority != nil {
+				return constrainPriorityToGroupRange(groupPriority, requested), nil
+			}
+		}
+	}
 	var ability model.Ability
 	err := model.DB.Where("channel_id = ?", channelID).Order("priority ASC").First(&ability).Error
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -1486,12 +1560,12 @@ func constrainChannelPriority(channelID int, requested int64) (int64, error) {
 }
 
 func constrainNewChannelPriority(group string, requested int64) (int64, error) {
-	var ability model.Ability
-	err := model.DB.Where(&model.Ability{Group: group}).Order("priority ASC").First(&ability).Error
-	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+	firstGroup := strings.TrimSpace(strings.Split(group, ",")[0])
+	groupPriority, err := getGroupBasePriority(firstGroup)
+	if err != nil {
 		return 0, err
 	}
-	return constrainPriorityToGroupRange(ability.Priority, requested), nil
+	return constrainPriorityToGroupRange(groupPriority, requested), nil
 }
 
 func constrainPriorityToGroupRange(groupPriority *int64, requested int64) int64 {
@@ -1665,8 +1739,39 @@ func UpdateChannel(c *gin.Context) {
 		// budget. Clamp first, then rebalance the complete group below.
 		*channel.Weight = 300
 	}
+	// Detect group change (切组)
+	targetGroup := originChannel.Group
+	if g, ok := requestData["group"].(string); ok && strings.TrimSpace(g) != "" {
+		targetGroup = strings.TrimSpace(g)
+	} else if channel.Group != "" {
+		targetGroup = channel.Group
+	}
+	groupChanged := targetGroup != originChannel.Group
+
+	if groupChanged {
+		_, priorityProvided := requestData["priority"]
+		if !priorityProvided {
+			origPriority := int64(0)
+			if originChannel.Priority != nil {
+				origPriority = *originChannel.Priority
+			}
+			newPriority, err := remapPriorityToGroupRange(targetGroup, origPriority)
+			if err == nil {
+				channel.Priority = &newPriority
+			}
+		} else if channel.Priority != nil {
+			groupPriority, _ := getGroupBasePriority(targetGroup)
+			if groupPriority != nil && !isPriorityInGroupRange(groupPriority, *channel.Priority) {
+				newPriority, err := remapPriorityToGroupRange(targetGroup, *channel.Priority)
+				if err == nil {
+					*channel.Priority = newPriority
+				}
+			}
+		}
+	}
+
 	if channel.Priority != nil {
-		priority, priorityErr := constrainChannelPriority(channel.Id, *channel.Priority)
+		priority, priorityErr := constrainChannelPriority(channel.Id, targetGroup, *channel.Priority)
 		if priorityErr != nil {
 			common.ApiError(c, priorityErr)
 			return
