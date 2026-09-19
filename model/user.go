@@ -121,6 +121,8 @@ type User struct {
 	EffectiveGroupRatios map[string]float64         `json:"effective_group_ratios,omitempty" gorm:"-:all"`
 	TodayConsumedQuota   int64                      `json:"today_consumed_quota" gorm:"-:all"`
 	TotalConsumedQuota   int64                      `json:"total_consumed_quota" gorm:"-:all"`
+	RPM                  int64                      `json:"rpm" gorm:"-:all"`
+	MPM                  int64                      `json:"mpm" gorm:"-:all"`
 }
 
 func (user *User) ToBaseUser() *UserBase {

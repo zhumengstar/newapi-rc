@@ -488,6 +488,8 @@ func TokenAuth() func(c *gin.Context) {
 		if err != nil {
 			return
 		}
+		service.RecordUserRPM(token.UserId)
+		c.Set("user_rpm_recorded", true)
 		c.Next()
 	}
 }

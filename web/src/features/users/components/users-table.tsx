@@ -61,6 +61,9 @@ function isDisabledUserRow(user: User) {
   return isUserDeleted(user) || user.status === USER_STATUS.DISABLED
 }
 
+const USERS_COLUMN_VISIBILITY_STORAGE_KEY = 'users:column-visibility'
+const USERS_COLUMN_ORDER_STORAGE_KEY = 'users:column-order'
+
 export function UsersTable() {
   const { t } = useTranslation()
   const columns = useUsersColumns()
@@ -178,6 +181,8 @@ export function UsersTable() {
     data: users,
     columns,
     enableRowSelection: true,
+    columnVisibilityStorageKey: USERS_COLUMN_VISIBILITY_STORAGE_KEY,
+    columnOrderStorageKey: USERS_COLUMN_ORDER_STORAGE_KEY,
     columnFilters,
     globalFilter,
     pagination,

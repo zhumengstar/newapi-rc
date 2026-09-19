@@ -6,6 +6,7 @@ import {
   ExternalLink,
   Layers,
   Loader2,
+  Network,
   RefreshCw,
   RotateCw,
   Search,
@@ -31,6 +32,9 @@ const CANVAS_EMBED_PATH = '/canvas-app/canvas'
 const CANVAS_STANDALONE_URL = '/canvas-app/canvas'
 const SELECTED_TOKEN_ID_KEY = 'infinite-canvas:selected-token-id'
 const BANNER_DISMISSED_KEY = 'infinite-canvas:banner-dismissed'
+const CANVAS_BASE_URL_KEY = 'infinite-canvas:api-base-url'
+const DEFAULT_INTERNAL_IP_URL = 'http://147.124.216.251:3000/v1'
+const GPM_INTERNAL_IP_URL = 'http://147.124.216.251:18331/v1'
 
 interface GroupOption {
   group: string
@@ -71,27 +75,52 @@ export function PersistentCanvasView({ isVisible }: PersistentCanvasViewProps) {
       return false
     }
   })
+  const [apiBaseUrl, setApiBaseUrl] = useState<string>(() => {
+    try {
+      const stored = localStorage.getItem(CANVAS_BASE_URL_KEY)
+      if (stored && stored.trim()) {
+        if (stored.includes('vip.muling.store')) {
+          localStorage.setItem(CANVAS_BASE_URL_KEY, DEFAULT_INTERNAL_IP_URL)
+          return DEFAULT_INTERNAL_IP_URL
+        }
+        return stored.trim()
+      }
+    } catch {
+      /* ignore */
+    }
+    return DEFAULT_INTERNAL_IP_URL
+  })
+  const [customUrlInput, setCustomUrlInput] = useState<string>('')
+  const [urlPopoverOpen, setUrlPopoverOpen] = useState<boolean>(false)
 
-  // 当窗口失焦时（如点击了 iframe 或外部窗口），自动隐藏分组下拉框
+  // 检测当前是否处于 HTTPS 环境
+  const isHttpsOrigin = useMemo(() => {
+    return typeof window !== 'undefined' && window.location.protocol === 'https:'
+  }, [])
+
+  // 当窗口失焦时（如点击了 iframe 或外部窗口），自动隐藏下拉框
   useEffect(() => {
-    if (!popoverOpen) return
-    const onBlur = () => setPopoverOpen(false)
+    if (!popoverOpen && !urlPopoverOpen) return
+    const onBlur = () => {
+      setPopoverOpen(false)
+      setUrlPopoverOpen(false)
+    }
     window.addEventListener('blur', onBlur)
     return () => window.removeEventListener('blur', onBlur)
-  }, [popoverOpen])
+  }, [popoverOpen, urlPopoverOpen])
 
-  // 向 iframe 发送实时配置热更新（无感更新通道与密钥，避免刷新画布和弹出配置弹窗）
+  // 向 iframe 发送实时配置热更新（无感更新通道、密钥与内部IP地址，避免刷新画布和弹出配置弹窗）
   const sendConfigToIframe = useCallback(
-    (key: string, channelName?: string) => {
+    (key: string, channelName?: string, overrideBaseUrl?: string) => {
       if (!iframeRef.current?.contentWindow) return
-      const currentOrigin =
-        typeof window !== 'undefined' ? window.location.origin : ''
-      const apiBaseUrl = currentOrigin ? `${currentOrigin}/v1` : ''
+      const targetBaseUrl = (
+        overrideBaseUrl !== undefined ? overrideBaseUrl : apiBaseUrl
+      ).trim()
       try {
         iframeRef.current.contentWindow.postMessage(
           {
             type: 'NEWAPI_CANVAS_CONFIG',
-            baseUrl: apiBaseUrl,
+            baseUrl: targetBaseUrl,
             apiKey: key,
             channelName: channelName || '默认分组',
           },
@@ -101,7 +130,26 @@ export function PersistentCanvasView({ isVisible }: PersistentCanvasViewProps) {
         /* ignore postMessage error */
       }
     },
-    []
+    [apiBaseUrl]
+  )
+
+  // 切换接口调用地址
+  const handleUpdateApiBaseUrl = useCallback(
+    (newUrl: string) => {
+      const trimmed = newUrl.trim()
+      setApiBaseUrl(trimmed)
+      try {
+        localStorage.setItem(CANVAS_BASE_URL_KEY, trimmed)
+      } catch {
+        /* ignore */
+      }
+      if (activeFullKey) {
+        sendConfigToIframe(activeFullKey, currentGroup?.label, trimmed)
+      }
+      toast.success(t('已切换接口调用地址'))
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [activeFullKey, sendConfigToIframe, t]
   )
 
   // 解析并确定当前用户的可用令牌与真实密钥
@@ -189,9 +237,6 @@ export function PersistentCanvasView({ isVisible }: PersistentCanvasViewProps) {
 
       if (!initialUrlSetRef.current) {
         initialUrlSetRef.current = true
-        const currentOrigin =
-          typeof window !== 'undefined' ? window.location.origin : ''
-        const apiBaseUrl = currentOrigin ? `${currentOrigin}/v1` : ''
         const params = new URLSearchParams()
         if (apiBaseUrl) params.set('baseUrl', apiBaseUrl)
         if (formattedKey) params.set('apiKey', formattedKey)
@@ -199,13 +244,13 @@ export function PersistentCanvasView({ isVisible }: PersistentCanvasViewProps) {
         setInitialIframeUrl(`${CANVAS_EMBED_PATH}?${params.toString()}`)
       }
 
-      sendConfigToIframe(formattedKey, groupDisplayName)
+      sendConfigToIframe(formattedKey, groupDisplayName, apiBaseUrl)
     } catch {
       setActiveFullKey('')
     } finally {
       setLoading(false)
     }
-  }, [selectedTokenId, sendConfigToIframe, t])
+  }, [apiBaseUrl, selectedTokenId, sendConfigToIframe, t])
 
   useEffect(() => {
     void resolveTokenAndKey()
@@ -296,31 +341,46 @@ export function PersistentCanvasView({ isVisible }: PersistentCanvasViewProps) {
 
   // 构造内嵌画布地址
   const embedCanvasUrl = useMemo(() => {
-    const currentOrigin =
-      typeof window !== 'undefined' ? window.location.origin : ''
-    const apiBaseUrl = currentOrigin ? `${currentOrigin}/v1` : ''
-
     const params = new URLSearchParams()
     if (apiBaseUrl) params.set('baseUrl', apiBaseUrl)
     if (activeFullKey) params.set('apiKey', activeFullKey)
     if (currentGroup?.label) params.set('channelName', currentGroup.label)
 
     return `${CANVAS_EMBED_PATH}?${params.toString()}`
-  }, [activeFullKey, currentGroup])
+  }, [apiBaseUrl, activeFullKey, currentGroup])
 
-  // 构造独立新窗口画布地址
+  // 构造独立新窗口画布地址（如果配置了内部 IP，优先以内部 IP 端口打开纯 HTTP 页面，免受 Mixed Content 限制并实现零 CDN 延迟）
   const standaloneCanvasUrl = useMemo(() => {
-    const currentOrigin =
-      typeof window !== 'undefined' ? window.location.origin : ''
-    const apiBaseUrl = currentOrigin ? `${currentOrigin}/v1` : ''
-
     const params = new URLSearchParams()
     if (apiBaseUrl) params.set('baseUrl', apiBaseUrl)
     if (activeFullKey) params.set('apiKey', activeFullKey)
     if (currentGroup?.label) params.set('channelName', currentGroup.label)
 
-    return `${CANVAS_STANDALONE_URL}?${params.toString()}`
-  }, [activeFullKey, currentGroup])
+    let originPrefix = ''
+    if (apiBaseUrl.startsWith('http://147.124.216.251:3000')) {
+      originPrefix = 'http://147.124.216.251:3000'
+    } else if (apiBaseUrl.startsWith('http://147.124.216.251:18331')) {
+      originPrefix = 'http://147.124.216.251:3000'
+    }
+
+    return `${originPrefix}${CANVAS_STANDALONE_URL}?${params.toString()}`
+  }, [apiBaseUrl, activeFullKey, currentGroup])
+
+  // 当前接口调用地址显示标签
+  const currentUrlLabel = useMemo(() => {
+    if (apiBaseUrl === DEFAULT_INTERNAL_IP_URL) {
+      return t('内部IP直连 (3000)')
+    }
+    if (apiBaseUrl === GPM_INTERNAL_IP_URL) {
+      return t('GPM调度直连 (18331)')
+    }
+    const currentOrigin =
+      typeof window !== 'undefined' ? window.location.origin : ''
+    if (currentOrigin && apiBaseUrl === `${currentOrigin}/v1`) {
+      return t('同源域名')
+    }
+    return apiBaseUrl.replace(/^https?:\/\//, '').replace(/\/v1$/, '') || t('内部IP')
+  }, [apiBaseUrl, t])
 
   // 切换分组操作
   const handleSwitchGroup = useCallback(
@@ -499,6 +559,162 @@ export function PersistentCanvasView({ isVisible }: PersistentCanvasViewProps) {
                 </Popover>
               </>
             )}
+
+            {/* 接口调用地址 Popover（支持配置内部IP，消除域名CDN延迟） */}
+            {urlPopoverOpen && (
+              <div
+                className='fixed inset-0 z-40 bg-transparent'
+                onClick={(e) => {
+                  e.stopPropagation()
+                  setUrlPopoverOpen(false)
+                }}
+                onPointerDown={(e) => {
+                  e.stopPropagation()
+                  setUrlPopoverOpen(false)
+                }}
+              />
+            )}
+            <Popover open={urlPopoverOpen} onOpenChange={setUrlPopoverOpen}>
+              <PopoverTrigger
+                render={
+                  <Button
+                    type='button'
+                    variant='outline'
+                    size='sm'
+                    className='h-6.5 gap-1.5 rounded-md border-border/70 bg-background px-2.5 text-xs font-medium text-foreground hover:bg-muted/80 shadow-2xs'
+                  />
+                }
+              >
+                <Network className='size-3 text-emerald-500' />
+                <span className='max-w-32 sm:max-w-44 truncate font-medium'>
+                  {currentUrlLabel}
+                </span>
+                <ChevronDown className='size-3 opacity-50' />
+              </PopoverTrigger>
+              <PopoverContent
+                align='start'
+                sideOffset={6}
+                className='z-50 w-80 p-3 shadow-xl border-border/80'
+              >
+                <div className='flex flex-col gap-2.5'>
+                  <div className='flex items-center justify-between px-0.5 text-xs font-semibold text-muted-foreground'>
+                    <span className='flex items-center gap-1.5'>
+                      <Network className='size-3.5 text-primary' />
+                      {t('接口调用地址配置')}
+                    </span>
+                    <Badge
+                      variant='outline'
+                      className='h-4.5 px-1.5 text-[10px] font-normal text-emerald-600 border-emerald-500/30 bg-emerald-50/50 dark:bg-emerald-950/30'
+                    >
+                      {apiBaseUrl.startsWith('http://147.')
+                        ? t('内部IP直连')
+                        : t('自定义地址')}
+                    </Badge>
+                  </div>
+
+                  <div className='space-y-1'>
+                    {/* 预设1：内部 IP 直连（3000）推荐 */}
+                    <button
+                      type='button'
+                      onClick={() => {
+                        handleUpdateApiBaseUrl(DEFAULT_INTERNAL_IP_URL)
+                        setUrlPopoverOpen(false)
+                      }}
+                      className={cn(
+                        'flex w-full flex-col items-start gap-0.5 rounded-md p-2 text-left text-xs transition-colors hover:bg-accent hover:text-accent-foreground border border-transparent',
+                        apiBaseUrl === DEFAULT_INTERNAL_IP_URL &&
+                          'bg-accent/80 border-primary/30'
+                      )}
+                    >
+                      <div className='flex w-full items-center justify-between'>
+                        <span className='font-semibold text-foreground flex items-center gap-1.5'>
+                          <span>{t('内部IP直连 (推荐)')}</span>
+                          <Badge className='h-4 px-1 text-[9px] font-normal bg-primary text-primary-foreground'>
+                            3000端口
+                          </Badge>
+                        </span>
+                        {apiBaseUrl === DEFAULT_INTERNAL_IP_URL && (
+                          <Check className='size-3.5 text-primary shrink-0' />
+                        )}
+                      </div>
+                      <span className='text-[11px] font-mono text-muted-foreground truncate w-full'>
+                        {DEFAULT_INTERNAL_IP_URL}
+                      </span>
+                    </button>
+
+                    {/* 预设2：GPM 调度直连（18331） */}
+                    <button
+                      type='button'
+                      onClick={() => {
+                        handleUpdateApiBaseUrl(GPM_INTERNAL_IP_URL)
+                        setUrlPopoverOpen(false)
+                      }}
+                      className={cn(
+                        'flex w-full flex-col items-start gap-0.5 rounded-md p-2 text-left text-xs transition-colors hover:bg-accent hover:text-accent-foreground border border-transparent',
+                        apiBaseUrl === GPM_INTERNAL_IP_URL &&
+                          'bg-accent/80 border-primary/30'
+                      )}
+                    >
+                      <div className='flex w-full items-center justify-between'>
+                        <span className='font-semibold text-foreground flex items-center gap-1.5'>
+                          <span>{t('GPM调度网关直连')}</span>
+                          <Badge
+                            variant='outline'
+                            className='h-4 px-1 text-[9px] font-normal'
+                          >
+                            18331端口
+                          </Badge>
+                        </span>
+                        {apiBaseUrl === GPM_INTERNAL_IP_URL && (
+                          <Check className='size-3.5 text-primary shrink-0' />
+                        )}
+                      </div>
+                      <span className='text-[11px] font-mono text-muted-foreground truncate w-full'>
+                        {GPM_INTERNAL_IP_URL}
+                      </span>
+                    </button>
+                  </div>
+
+                  {/* 自定义输入框 */}
+                  <div className='flex items-center gap-1.5 pt-1 border-t border-border/60'>
+                    <Input
+                      value={customUrlInput}
+                      onChange={(e) => setCustomUrlInput(e.target.value)}
+                      placeholder={t('自定义地址，如 http://...')}
+                      className='h-7.5 text-xs font-mono'
+                    />
+                    <Button
+                      type='button'
+                      size='sm'
+                      className='h-7.5 px-2.5 text-xs shrink-0'
+                      onClick={() => {
+                        if (customUrlInput.trim()) {
+                          handleUpdateApiBaseUrl(customUrlInput.trim())
+                          setCustomUrlInput('')
+                          setUrlPopoverOpen(false)
+                        }
+                      }}
+                    >
+                      {t('保存')}
+                    </Button>
+                  </div>
+
+                  {/* Mixed Content 提示 */}
+                  {isHttpsOrigin && apiBaseUrl.startsWith('http://') && (
+                    <div className='rounded bg-amber-500/10 p-2 text-[11px] text-amber-600 dark:text-amber-400 border border-amber-500/20'>
+                      <p className='font-medium mb-0.5'>
+                        {t('浏览器 Mixed Content 提示：')}
+                      </p>
+                      <p className='text-[10px] leading-relaxed text-muted-foreground'>
+                        {t(
+                          '当前处于 HTTPS 域名，内嵌 iframe 直接请求 HTTP 内部 IP 可能会被浏览器拦截。推荐点击右上角「在新窗口打开」，直接在纯内部 IP 下极速使用！'
+                        )}
+                      </p>
+                    </div>
+                  )}
+                </div>
+              </PopoverContent>
+            </Popover>
             </div>
 
             {/* 右侧动作按钮组 */}

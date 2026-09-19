@@ -37,17 +37,39 @@ func GeminiTextGenerationHandler(c *gin.Context, info *relaycommon.RelayInfo, re
 	countGeminiBillableFunctionCalls(info, &geminiResponse)
 
 	if len(geminiResponse.Candidates) == 0 {
-		blockReason := "unknown"
 		if geminiResponse.PromptFeedback != nil && geminiResponse.PromptFeedback.BlockReason != nil {
-			blockReason = *geminiResponse.PromptFeedback.BlockReason
+			blockReason := *geminiResponse.PromptFeedback.BlockReason
+			common.SetContextKey(c, constant.ContextKeyAdminRejectReason, fmt.Sprintf("gemini_block_reason=%s", blockReason))
+			service.IOCopyBytesGracefully(c, resp, responseBody)
+
+			usage := buildUsageFromGeminiResponse(c, info, &geminiResponse)
+			zeroBillingUsageCompletion(&usage)
+			return &usage, nil
 		}
-		common.SetContextKey(c, constant.ContextKeyAdminRejectReason, fmt.Sprintf("gemini_block_reason=%s", blockReason))
+		common.SetContextKey(c, constant.ContextKeyAdminRejectReason, "gemini_empty_candidates")
 		service.IOCopyBytesGracefully(c, resp, responseBody)
 		return nil, nil
 	}
 
 	// 计算使用量（优先上游 UsageMetadata，缺失时本地估算并保留 Gemini 计费语义）
 	usage := buildUsageFromGeminiResponse(c, info, &geminiResponse)
+
+	isSafetyBlock := false
+	if geminiResponse.PromptFeedback != nil && geminiResponse.PromptFeedback.BlockReason != nil {
+		isSafetyBlock = true
+		common.SetContextKey(c, constant.ContextKeyAdminRejectReason, fmt.Sprintf("gemini_block_reason=%s", *geminiResponse.PromptFeedback.BlockReason))
+	} else {
+		for _, cand := range geminiResponse.Candidates {
+			if cand.FinishReason != nil && *cand.FinishReason == "SAFETY" {
+				isSafetyBlock = true
+				common.SetContextKey(c, constant.ContextKeyAdminRejectReason, "gemini_block_reason=SAFETY")
+				break
+			}
+		}
+	}
+	if isSafetyBlock {
+		zeroBillingUsageCompletion(&usage)
+	}
 
 	if usage.CompletionTokens == 0 {
 		logger.LogWarn(c, fmt.Sprintf("GEMINI_NATIVE_ZERO_TOKEN_DEBUG: req_id=%s, model=%s, candidates_count=%d, has_usage=%v, prompt_tok=%d, cand_tok=%d, body=%s",

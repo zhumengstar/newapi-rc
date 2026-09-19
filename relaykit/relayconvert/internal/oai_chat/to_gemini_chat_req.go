@@ -111,19 +111,16 @@ func OpenAIChatRequestToGeminiGenerateContent(c context.Context, textRequest dto
 			}
 
 			if imageConfig, ok := googleBody["image_config"].(map[string]any); ok {
-				if _, hasErrorParam := imageConfig["aspectRatio"]; hasErrorParam {
-					return nil, errors.New("extra_body.google.image_config.aspectRatio is not supported, use extra_body.google.image_config.aspect_ratio instead")
-				}
-				if _, hasErrorParam := imageConfig["imageSize"]; hasErrorParam {
-					return nil, errors.New("extra_body.google.image_config.imageSize is not supported, use extra_body.google.image_config.image_size instead")
-				}
-
 				geminiImageConfig := make(map[string]any)
 				if aspectRatio, ok := imageConfig["aspect_ratio"]; ok {
 					geminiImageConfig["aspectRatio"] = aspectRatio
+				} else if aspectRatio, ok := imageConfig["aspectRatio"]; ok {
+					geminiImageConfig["aspectRatio"] = aspectRatio
 				}
 				if imageSize, ok := imageConfig["image_size"]; ok {
-					geminiImageConfig["imageSize"] = imageSize
+					geminiImageConfig["imageSize"] = strings.ToUpper(fmt.Sprintf("%v", imageSize))
+				} else if imageSize, ok := imageConfig["imageSize"]; ok {
+					geminiImageConfig["imageSize"] = strings.ToUpper(fmt.Sprintf("%v", imageSize))
 				}
 
 				if len(geminiImageConfig) > 0 {
@@ -134,6 +131,35 @@ func OpenAIChatRequestToGeminiGenerateContent(c context.Context, textRequest dto
 					geminiRequest.GenerationConfig.ImageConfig = imageConfigBytes
 				}
 			}
+		}
+	}
+
+	if geminiRequest.GenerationConfig.ImageConfig == nil && opts.Gemini.SupportsImagineModel(upstreamModelName) {
+		aspectRatio := "1:1"
+		imageSize := "1K"
+		modelLower := strings.ToLower(upstreamModelName)
+		if strings.Contains(modelLower, "4k") || strings.Contains(modelLower, "hd") {
+			imageSize = "4K"
+		} else if strings.Contains(modelLower, "2k") {
+			imageSize = "2K"
+		}
+		if len(textRequest.ExtraBody) > 0 {
+			var eb map[string]any
+			if kitutil.Unmarshal(textRequest.ExtraBody, &eb) == nil {
+				if ar, ok := eb["aspect_ratio"].(string); ok && ar != "" {
+					aspectRatio = ar
+				}
+				if is, ok := eb["image_size"].(string); ok && is != "" {
+					imageSize = strings.ToUpper(strings.TrimSpace(is))
+				}
+			}
+		}
+		geminiImageConfig := map[string]any{
+			"aspectRatio": aspectRatio,
+			"imageSize":   imageSize,
+		}
+		if imageConfigBytes, err := kitutil.Marshal(geminiImageConfig); err == nil {
+			geminiRequest.GenerationConfig.ImageConfig = imageConfigBytes
 		}
 	}
 

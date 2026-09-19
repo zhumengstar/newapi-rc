@@ -165,6 +165,21 @@ export function useUsersColumns(): ColumnDef<User>[] {
               <p className='text-xs'>
                 {t('Requests:')} {requestCount.toLocaleString()}
               </p>
+              {typeof user.rpm === 'number' && (
+                <p className='text-xs font-mono text-emerald-600 dark:text-emerald-400'>
+                  RPM (1m): {user.rpm.toLocaleString()}
+                </p>
+              )}
+              {typeof user.mpm === 'number' && user.mpm > 0 && (
+                <p className='text-xs font-mono text-amber-600 dark:text-amber-400'>
+                  MPM (1m):{' '}
+                  {formatQuotaWithCurrency(user.mpm, {
+                    digitsLarge: 2,
+                    digitsSmall: 4,
+                    abbreviate: false,
+                  })}
+                </p>
+              )}
             </TooltipContent>
           </Tooltip>
         )
@@ -175,6 +190,83 @@ export function useUsersColumns(): ColumnDef<User>[] {
       enableSorting: false,
       size: 120,
       meta: { mobileBadge: true },
+    },
+    {
+      id: 'rpm',
+      accessorKey: 'rpm',
+      header: t('RPM'),
+      cell: ({ row }) => {
+        const rpm = row.original.rpm ?? 0
+        const isActive = rpm > 0
+
+        return (
+          <Tooltip>
+            <TooltipTrigger render={<div className='inline-flex items-center cursor-help' />}>
+              <span
+                className={`font-mono text-xs px-2 py-0.5 rounded-full font-medium tabular-nums border transition-colors ${
+                  isActive
+                    ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/30'
+                    : 'text-muted-foreground bg-muted/40 border-transparent'
+                }`}
+              >
+                {rpm.toLocaleString()}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>
+              <p className='text-xs'>
+                {t('Recent 1-minute requests (RPM):') || '最近一分钟请求数 (RPM):'} {rpm.toLocaleString()}
+              </p>
+            </TooltipContent>
+          </Tooltip>
+        )
+      },
+      enableSorting: false,
+      size: 90,
+      minSize: 80,
+      meta: { mobileOrder: 35 },
+    },
+    {
+      id: 'mpm',
+      accessorKey: 'mpm',
+      header: t('MPM'),
+      cell: ({ row }) => {
+        const mpm = row.original.mpm ?? 0
+        const isActive = mpm > 0
+
+        return (
+          <Tooltip>
+            <TooltipTrigger render={<div className='inline-flex items-center cursor-help' />}>
+              <span
+                className={`font-mono text-xs px-2 py-0.5 rounded-full font-medium tabular-nums border transition-colors ${
+                  isActive
+                    ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/30'
+                    : 'text-muted-foreground bg-muted/40 border-transparent'
+                }`}
+              >
+                {formatQuotaWithCurrency(mpm, {
+                  digitsLarge: 2,
+                  digitsSmall: 4,
+                  abbreviate: false,
+                })}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>
+              <p className='text-xs'>
+                {t('Recent 1-minute spend (MPM):') || '最近一分钟消耗金额 (MPM):'}{' '}
+                {formatQuotaWithCurrency(mpm, {
+                  digitsLarge: 2,
+                  digitsSmall: 6,
+                  abbreviate: false,
+                })}
+              </p>
+            </TooltipContent>
+          </Tooltip>
+        )
+      },
+      enableSorting: false,
+      size: 110,
+      minSize: 90,
+      meta: { mobileOrder: 36 },
     },
     {
       id: 'quota',

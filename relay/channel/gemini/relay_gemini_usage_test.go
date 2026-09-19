@@ -691,7 +691,8 @@ func TestGeminiTextGenerationHandler_ProhibitedContent_NativePreserve(t *testing
 
 	usage, newApiErr := GeminiTextGenerationHandler(c, info, resp)
 	require.Nil(t, newApiErr)
-	require.Nil(t, usage)
+	require.NotNil(t, usage)
+	require.Equal(t, 0, usage.CompletionTokens)
 	require.Equal(t, http.StatusOK, w.Code)
 	require.Contains(t, w.Body.String(), "PROHIBITED_CONTENT")
 	require.Equal(t, "gemini_block_reason=PROHIBITED_CONTENT", common.GetContextKeyString(c, constant.ContextKeyAdminRejectReason))
@@ -731,6 +732,7 @@ func TestGeminiStreamHandler_ProhibitedContent_GracefulStream(t *testing.T) {
 	})
 	require.Nil(t, newApiErr)
 	require.NotNil(t, usage)
+	require.Equal(t, 0, usage.CompletionTokens)
 	require.True(t, called)
 	require.Equal(t, "gemini_block_reason=PROHIBITED_CONTENT", common.GetContextKeyString(c, constant.ContextKeyAdminRejectReason))
 }
@@ -762,5 +764,110 @@ func TestGeminiResponsesHandler_ProhibitedContent_GracefulRefusal(t *testing.T) 
 	require.Equal(t, http.StatusOK, w.Code)
 	require.Contains(t, w.Body.String(), "PROHIBITED_CONTENT")
 	require.Equal(t, "gemini_block_reason=PROHIBITED_CONTENT", common.GetContextKeyString(c, constant.ContextKeyAdminRejectReason))
+}
+
+func TestGeminiSafetyBlockBillsPromptTokensAcrossHandlers(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("native_generateContent_with_usageMetadata", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-3-flash:generateContent", nil)
+
+		info := &relaycommon.RelayInfo{
+			OriginModelName: "gemini-3-flash",
+			ChannelMeta: &relaycommon.ChannelMeta{
+				UpstreamModelName: "gemini-3-flash",
+			},
+		}
+
+		respBody := `{"candidates":[],"promptFeedback":{"blockReason":"SAFETY"},"usageMetadata":{"promptTokenCount":42,"totalTokenCount":42}}`
+		resp := &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewReader([]byte(respBody))),
+		}
+
+		usage, err := GeminiTextGenerationHandler(c, info, resp)
+		require.Nil(t, err)
+		require.NotNil(t, usage)
+		require.Equal(t, 42, usage.PromptTokens)
+		require.Equal(t, 0, usage.CompletionTokens)
+		require.Equal(t, 42, usage.TotalTokens)
+		require.NotNil(t, usage.BillingUsage)
+		require.Equal(t, 0, usage.BillingUsage.GeminiUsageMetadata.CandidatesTokenCount)
+		require.Equal(t, 42, usage.BillingUsage.GeminiUsageMetadata.PromptTokenCount)
+		require.Equal(t, "gemini_block_reason=SAFETY", common.GetContextKeyString(c, constant.ContextKeyAdminRejectReason))
+	})
+
+	t.Run("chat_completions_with_usageMetadata", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+		info := &relaycommon.RelayInfo{
+			RelayFormat:     types.RelayFormatOpenAI,
+			OriginModelName: "gemini-3-flash",
+			ChannelMeta: &relaycommon.ChannelMeta{
+				UpstreamModelName: "gemini-3-flash",
+			},
+		}
+
+		respBody := `{"candidates":[],"promptFeedback":{"blockReason":"SAFETY"},"usageMetadata":{"promptTokenCount":55,"totalTokenCount":55}}`
+		resp := &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewReader([]byte(respBody))),
+		}
+
+		usage, err := GeminiChatHandler(c, info, resp)
+		require.Nil(t, err)
+		require.NotNil(t, usage)
+		require.Equal(t, 55, usage.PromptTokens)
+		require.Equal(t, 0, usage.CompletionTokens)
+		require.Equal(t, 55, usage.TotalTokens)
+		require.NotNil(t, usage.BillingUsage)
+		require.Equal(t, 0, usage.BillingUsage.GeminiUsageMetadata.CandidatesTokenCount)
+		require.Equal(t, 55, usage.BillingUsage.GeminiUsageMetadata.PromptTokenCount)
+		require.Equal(t, "gemini_block_reason=SAFETY", common.GetContextKeyString(c, constant.ContextKeyAdminRejectReason))
+	})
+
+	t.Run("stream_with_usageMetadata", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+		oldStreamingTimeout := constant.StreamingTimeout
+		constant.StreamingTimeout = 300
+		t.Cleanup(func() {
+			constant.StreamingTimeout = oldStreamingTimeout
+		})
+
+		info := &relaycommon.RelayInfo{
+			OriginModelName: "gemini-3-flash",
+			ChannelMeta: &relaycommon.ChannelMeta{
+				UpstreamModelName: "gemini-3-flash",
+			},
+		}
+
+		streamBody := []byte("data: {\"candidates\":[],\"promptFeedback\":{\"blockReason\":\"SAFETY\"},\"usageMetadata\":{\"promptTokenCount\":68,\"totalTokenCount\":68}}\n")
+		resp := &http.Response{
+			Body: io.NopCloser(bytes.NewReader(streamBody)),
+		}
+
+		called := false
+		usage, err := geminiStreamHandler(c, info, resp, func(data string, r *dto.GeminiChatResponse) bool {
+			called = true
+			return true
+		})
+		require.Nil(t, err)
+		require.NotNil(t, usage)
+		require.True(t, called)
+		require.Equal(t, 68, usage.PromptTokens)
+		require.Equal(t, 0, usage.CompletionTokens)
+		require.Equal(t, 68, usage.TotalTokens)
+		require.NotNil(t, usage.BillingUsage)
+		require.Equal(t, 0, usage.BillingUsage.GeminiUsageMetadata.CandidatesTokenCount)
+		require.Equal(t, 68, usage.BillingUsage.GeminiUsageMetadata.PromptTokenCount)
+		require.Equal(t, "gemini_block_reason=SAFETY", common.GetContextKeyString(c, constant.ContextKeyAdminRejectReason))
+	})
 }
 

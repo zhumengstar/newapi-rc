@@ -441,6 +441,21 @@ func attachEffectiveGroupRatios(users []*model.User) {
 	}
 }
 
+func attachUserRPM(users []*model.User) {
+	if len(users) == 0 {
+		return
+	}
+	userIDs := make([]int, len(users))
+	for i, u := range users {
+		userIDs[i] = u.Id
+	}
+	rpmMap, mpmMap := service.GetUsersRPMAndMPM(userIDs)
+	for _, u := range users {
+		u.RPM = rpmMap[u.Id]
+		u.MPM = mpmMap[u.Id]
+	}
+}
+
 func GetAllUsers(c *gin.Context) {
 	pageInfo := common.GetPageQuery(c)
 	sortOptions := model.NewUserSortOptions(c.Query("sort_by"), c.Query("sort_order"))
@@ -451,6 +466,7 @@ func GetAllUsers(c *gin.Context) {
 	}
 
 	attachEffectiveGroupRatios(users)
+	attachUserRPM(users)
 	pageInfo.SetTotal(int(total))
 	pageInfo.SetItems(users)
 
@@ -482,6 +498,7 @@ func SearchUsers(c *gin.Context) {
 	}
 
 	attachEffectiveGroupRatios(users)
+	attachUserRPM(users)
 	pageInfo.SetTotal(int(total))
 	pageInfo.SetItems(users)
 	common.ApiSuccess(c, pageInfo)
@@ -519,6 +536,7 @@ func GetUser(c *gin.Context) {
 	}
 	user.AdminPermissions = authz.Capabilities(user.Id, user.Role)
 	attachEffectiveGroupRatios([]*model.User{user})
+	attachUserRPM([]*model.User{user})
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",

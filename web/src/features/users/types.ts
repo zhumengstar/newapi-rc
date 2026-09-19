@@ -62,6 +62,8 @@ export const userSchema = z.object({
   remark: z.string().optional(),
   today_consumed_quota: z.number().optional(),
   total_consumed_quota: z.number().optional(),
+  rpm: z.number().optional(),
+  mpm: z.number().optional(),
   setting: z.string().optional(),
   admin_permissions: z
     .record(z.string(), z.record(z.string(), z.boolean()))

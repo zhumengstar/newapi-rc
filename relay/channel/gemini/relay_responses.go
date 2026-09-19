@@ -62,10 +62,18 @@ func GeminiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *h
 		}
 	}
 
+	if !strings.Contains(common.GetContextKeyString(c, constant.ContextKeyAdminRejectReason), "gemini_block_reason=") {
+		for _, candidate := range geminiResponse.Candidates {
+			if candidate.FinishReason != nil && *candidate.FinishReason == "SAFETY" {
+				common.SetContextKey(c, constant.ContextKeyAdminRejectReason, "gemini_block_reason=SAFETY")
+				break
+			}
+		}
+	}
+
 	usage := buildUsageFromGeminiResponse(c, info, &geminiResponse)
 	if strings.Contains(common.GetContextKeyString(c, constant.ContextKeyAdminRejectReason), "gemini_block_reason=") {
-		usage.CompletionTokens = 0
-		usage.TotalTokens = usage.PromptTokens
+		zeroBillingUsageCompletion(&usage)
 	}
 
 	convertResult, err := service.ConvertResponse(c, info, types.RelayFormatOpenAIResponses, &geminiResponse)

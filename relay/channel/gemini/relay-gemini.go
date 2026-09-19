@@ -37,6 +37,31 @@ func attachEstimatedGeminiBillingUsage(usage *dto.Usage) *dto.Usage {
 	return usage
 }
 
+func zeroBillingUsageCompletion(usage *dto.Usage) {
+	if usage == nil {
+		return
+	}
+	usage.CompletionTokens = 0
+	usage.TotalTokens = usage.PromptTokens
+	if usage.BillingUsage != nil {
+		if usage.BillingUsage.OpenAIUsage != nil {
+			usage.BillingUsage.OpenAIUsage.CompletionTokens = 0
+			usage.BillingUsage.OpenAIUsage.OutputTokens = 0
+			usage.BillingUsage.OpenAIUsage.TotalTokens = usage.BillingUsage.OpenAIUsage.PromptTokens
+		}
+		if usage.BillingUsage.ClaudeUsage != nil {
+			usage.BillingUsage.ClaudeUsage.OutputTokens = 0
+		}
+		if usage.BillingUsage.GeminiUsageMetadata != nil {
+			usage.BillingUsage.GeminiUsageMetadata.CandidatesTokenCount = 0
+			usage.BillingUsage.GeminiUsageMetadata.ThoughtsTokenCount = 0
+			usage.BillingUsage.GeminiUsageMetadata.TotalTokenCount = usage.BillingUsage.GeminiUsageMetadata.PromptTokenCount + usage.BillingUsage.GeminiUsageMetadata.ToolUsePromptTokenCount
+		}
+	} else {
+		attachEstimatedGeminiBillingUsage(usage)
+	}
+}
+
 // patchGeminiZeroCompletionUsage estimates completion tokens locally when upstream
 // usageMetadata was billable but reported zero completion tokens even though output
 // content was actually received. Typical case: the client aborts a stream before the
@@ -203,6 +228,12 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		if len(geminiResponse.Candidates) == 0 && geminiResponse.PromptFeedback != nil && geminiResponse.PromptFeedback.BlockReason != nil {
 			blockReason := *geminiResponse.PromptFeedback.BlockReason
 			common.SetContextKey(c, constant.ContextKeyAdminRejectReason, fmt.Sprintf("gemini_block_reason=%s", blockReason))
+			if metadata := geminiResponse.GetUsageMetadata(); dto.HasGeminiUsageMetadataTokens(metadata) {
+				accumulatedUsageMetadata = dto.MergeGeminiUsageMetadataNonZero(accumulatedUsageMetadata, metadata)
+				mappedUsage := buildUsageFromGeminiMetadata(accumulatedUsageMetadata, info.GetEstimatePromptTokens())
+				*usage = mappedUsage
+				hasBillableUsageMetadata = true
+			}
 			refusalText := fmt.Sprintf("抱歉，由于触发了 Google Gemini 内容安全审查策略 (%s)，请求已被拦截，无法生成回答。请调整您的提示词后重试。", blockReason)
 			safetyReason := "SAFETY"
 			syntheticResp := &dto.GeminiChatResponse{
@@ -226,6 +257,15 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 
 		markGeminiGoogleSearchCall(c, &geminiResponse)
 		countGeminiBillableFunctionCalls(info, &geminiResponse)
+
+		if !strings.Contains(common.GetContextKeyString(c, constant.ContextKeyAdminRejectReason), "gemini_block_reason=") {
+			for _, candidate := range geminiResponse.Candidates {
+				if candidate.FinishReason != nil && *candidate.FinishReason == "SAFETY" {
+					common.SetContextKey(c, constant.ContextKeyAdminRejectReason, "gemini_block_reason=SAFETY")
+					break
+				}
+			}
+		}
 
 		// 统计图片数量与输出文本
 		for _, candidate := range geminiResponse.Candidates {
@@ -282,6 +322,10 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		attachEstimatedGeminiBillingUsage(usage)
 	} else {
 		patchGeminiZeroCompletionUsage(c, info, usage, responseText.String(), imageCount)
+	}
+
+	if strings.Contains(common.GetContextKeyString(c, constant.ContextKeyAdminRejectReason), "gemini_block_reason=") {
+		zeroBillingUsageCompletion(usage)
 	}
 
 	if streamErr != nil {
@@ -464,12 +508,19 @@ func GeminiChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.R
 			return nil, newAPIError
 		}
 	}
+	if !strings.Contains(common.GetContextKeyString(c, constant.ContextKeyAdminRejectReason), "gemini_block_reason=") {
+		for _, candidate := range geminiResponse.Candidates {
+			if candidate.FinishReason != nil && *candidate.FinishReason == "SAFETY" {
+				common.SetContextKey(c, constant.ContextKeyAdminRejectReason, "gemini_block_reason=SAFETY")
+				break
+			}
+		}
+	}
 	fullTextResponse := responseGeminiChat2OpenAI(c, &geminiResponse)
 	fullTextResponse.Model = info.UpstreamModelName
 	usage := buildUsageFromGeminiResponse(c, info, &geminiResponse)
 	if strings.Contains(common.GetContextKeyString(c, constant.ContextKeyAdminRejectReason), "gemini_block_reason=") {
-		usage.CompletionTokens = 0
-		usage.TotalTokens = usage.PromptTokens
+		zeroBillingUsageCompletion(&usage)
 	}
 
 	if usage.CompletionTokens == 0 {

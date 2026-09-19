@@ -403,6 +403,9 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 	}
 
 	adminRejectReason := common.GetContextKeyString(ctx, constant.ContextKeyAdminRejectReason)
+	if strings.Contains(adminRejectReason, "gemini_block_reason=") {
+		extraContent = append(extraContent, "触发安全审查拦截，仅结算输入 Token")
+	}
 	summary := calculateTextQuotaSummary(ctx, relayInfo, billingUsage)
 
 	var tieredResult *billingexpr.TieredResult

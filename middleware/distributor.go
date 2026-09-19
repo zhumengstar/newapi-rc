@@ -33,6 +33,13 @@ type ModelRequest struct {
 
 func Distribute() func(c *gin.Context) {
 	return func(c *gin.Context) {
+		if !c.GetBool("user_rpm_recorded") {
+			userId := c.GetInt("id")
+			if userId > 0 {
+				service.RecordUserRPM(userId)
+				c.Set("user_rpm_recorded", true)
+			}
+		}
 		var channel *model.Channel
 		constraints := service.GetChannelConstraints(c)
 		constraints.AddFilter(taskdto.ChannelFilter{

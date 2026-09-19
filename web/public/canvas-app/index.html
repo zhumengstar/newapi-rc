@@ -28,6 +28,15 @@
                         if (baseUrl) cfg.baseUrl = baseUrl;
                         if (apiKey) cfg.apiKey = apiKey;
                         if (!Array.isArray(cfg.channels)) cfg.channels = [];
+                        // 自动清洗老旧的公网域名渠道，全部无感升级为当前配置的内部 IP
+                        if (baseUrl) {
+                            for (var cIdx = 0; cIdx < cfg.channels.length; cIdx++) {
+                                var existingCh = cfg.channels[cIdx];
+                                if (existingCh && existingCh.baseUrl && existingCh.baseUrl.indexOf("vip.muling.store") !== -1) {
+                                    existingCh.baseUrl = baseUrl;
+                                }
+                            }
+                        }
                         var found = false;
                         var targetName = (channelName || "").trim();
                         if (targetName) {
@@ -81,8 +90,8 @@
                 });
             })();
         </script>
-      <script type="module" crossorigin src="/canvas-app/assets/index-xLvIleUg.js"></script>
-      <link rel="stylesheet" crossorigin href="/canvas-app/assets/index-vLLVrTWK.css">
+      <script type="module" crossorigin src="/canvas-app/static/index-CypYWAoo.js"></script>
+      <link rel="stylesheet" crossorigin href="/canvas-app/static/index-qzbMtoLF.css">
     </head>
     <body class="bg-background text-foreground antialiased">
         <div id="root"></div>
