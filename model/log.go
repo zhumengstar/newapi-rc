@@ -708,7 +708,72 @@ type Stat struct {
 	Tpm   int `json:"tpm"`
 }
 
+type logStatCacheItem struct {
+	stat      Stat
+	expiresAt time.Time
+}
+
+var (
+	logStatCacheMu sync.RWMutex
+	logStatCache   = make(map[string]logStatCacheItem)
+	logStatGroup   singleflight.Group
+)
+
 func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string) (stat Stat, err error) {
+	cacheKey := fmt.Sprintf("%d:%d:%d:%s:%s:%s:%d:%s", logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group)
+	now := time.Now()
+
+	logStatCacheMu.RLock()
+	item, found := logStatCache[cacheKey]
+	if found && now.Before(item.expiresAt) {
+		logStatCacheMu.RUnlock()
+		return item.stat, nil
+	}
+	logStatCacheMu.RUnlock()
+
+	val, err, _ := logStatGroup.Do(cacheKey, func() (interface{}, error) {
+		now := time.Now()
+		logStatCacheMu.RLock()
+		if it, ok := logStatCache[cacheKey]; ok && now.Before(it.expiresAt) {
+			logStatCacheMu.RUnlock()
+			return it.stat, nil
+		}
+		logStatCacheMu.RUnlock()
+
+		res, queryErr := sumUsedQuotaFromDB(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group)
+		if queryErr != nil {
+			return Stat{}, queryErr
+		}
+
+		ttl := 10 * time.Second
+		if endTimestamp > 0 && endTimestamp < now.Unix()-60 {
+			ttl = 5 * time.Minute
+		}
+
+		logStatCacheMu.Lock()
+		if len(logStatCache) > 256 {
+			for k, v := range logStatCache {
+				if now.After(v.expiresAt) {
+					delete(logStatCache, k)
+				}
+			}
+		}
+		logStatCache[cacheKey] = logStatCacheItem{
+			stat:      res,
+			expiresAt: now.Add(ttl),
+		}
+		logStatCacheMu.Unlock()
+
+		return res, nil
+	})
+
+	if err != nil {
+		return Stat{}, err
+	}
+	return val.(Stat), nil
+}
+
+func sumUsedQuotaFromDB(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string) (stat Stat, err error) {
 	tx := LOG_DB.Table("logs").Select("COALESCE(sum(quota), 0) quota")
 
 	// 为rpm和tpm创建单独的查询
@@ -751,19 +816,41 @@ func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelNa
 	// 只统计最近60秒的rpm和tpm
 	rpmTpmQuery = rpmTpmQuery.Where("created_at >= ?", time.Now().Add(-60*time.Second).Unix())
 
-	// 执行查询
-	if err := tx.Scan(&stat).Error; err != nil {
-		common.SysError("failed to query log stat: " + err.Error())
-		return stat, errors.New("查询统计数据失败")
+	var (
+		rateStat struct {
+			Rpm int
+			Tpm int
+		}
+		wg       sync.WaitGroup
+		quotaErr error
+		rateErr  error
+	)
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if err := tx.Scan(&stat).Error; err != nil {
+			common.SysError("failed to query log stat: " + err.Error())
+			quotaErr = errors.New("查询统计数据失败")
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		if err := rpmTpmQuery.Scan(&rateStat).Error; err != nil {
+			common.SysError("failed to query rpm/tpm stat: " + err.Error())
+			rateErr = errors.New("查询统计数据失败")
+		}
+	}()
+
+	wg.Wait()
+	if quotaErr != nil {
+		return stat, quotaErr
 	}
-	var rateStat struct {
-		Rpm int
-		Tpm int
+	if rateErr != nil {
+		return stat, rateErr
 	}
-	if err := rpmTpmQuery.Scan(&rateStat).Error; err != nil {
-		common.SysError("failed to query rpm/tpm stat: " + err.Error())
-		return stat, errors.New("查询统计数据失败")
-	}
+
 	stat.Rpm = rateStat.Rpm
 	stat.Tpm = rateStat.Tpm
 
@@ -900,7 +987,7 @@ func GetCachedRecentIncome() (RecentIncome, error) {
 
 		recentIncomeCacheMu.Lock()
 		recentIncomeCacheVal = income
-		recentIncomeCacheExp = now.Add(3 * time.Second)
+		recentIncomeCacheExp = now.Add(10 * time.Second)
 		recentIncomeCacheMu.Unlock()
 		return income, nil
 	})
