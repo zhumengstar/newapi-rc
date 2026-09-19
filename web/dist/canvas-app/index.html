@@ -16,8 +16,68 @@
         </script>
         <script>
             (function() {
+                function getSafeDefaultBaseUrl() {
+                    return window.location.origin ? (window.location.origin + "/v1") : "/v1";
+                }
+
+                function sanitizeBaseUrl(url) {
+                    if (!url) return getSafeDefaultBaseUrl();
+                    var u = String(url).trim();
+                    var isHttps = window.location.protocol === "https:";
+                    // 彻底清除 147.124.216.251 裸 IP、3000/18331 端口或在 HTTPS 下的 http://，防止 Mixed Content 阻断与 IP 泄露
+                    if (
+                        u.indexOf("147.124.216.251") !== -1 ||
+                        u.indexOf(":3000") !== -1 ||
+                        u.indexOf(":18331") !== -1 ||
+                        (isHttps && u.indexOf("http://") === 0)
+                    ) {
+                        return getSafeDefaultBaseUrl();
+                    }
+                    return u;
+                }
+
+                function cleanLegacyConfig() {
+                    try {
+                        var storeKey = "infinite-canvas:ai_config_store";
+                        var raw = localStorage.getItem(storeKey);
+                        if (!raw) return;
+                        var data = JSON.parse(raw);
+                        var changed = false;
+                        var safeDefault = getSafeDefaultBaseUrl();
+                        if (data && data.state && data.state.config) {
+                            var cfg = data.state.config;
+                            if (cfg.baseUrl) {
+                                var cleaned = sanitizeBaseUrl(cfg.baseUrl);
+                                if (cleaned !== cfg.baseUrl) {
+                                    cfg.baseUrl = cleaned;
+                                    changed = true;
+                                }
+                            }
+                            if (Array.isArray(cfg.channels)) {
+                                for (var i = 0; i < cfg.channels.length; i++) {
+                                    var ch = cfg.channels[i];
+                                    if (ch && ch.baseUrl) {
+                                        var chCleaned = sanitizeBaseUrl(ch.baseUrl);
+                                        if (chCleaned !== ch.baseUrl) {
+                                            ch.baseUrl = chCleaned;
+                                            changed = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (changed) {
+                            localStorage.setItem(storeKey, JSON.stringify(data));
+                        }
+                    } catch (e) {}
+                }
+
+                // 启动即刻清洗本地已存储的脏配置
+                cleanLegacyConfig();
+
                 function syncConfig(baseUrl, apiKey, channelName) {
-                    if (!baseUrl && !apiKey) return;
+                    var safeUrl = sanitizeBaseUrl(baseUrl);
+                    if (!safeUrl && !apiKey) return;
                     try {
                         var storeKey = "infinite-canvas:ai_config_store";
                         var raw = localStorage.getItem(storeKey);
@@ -25,25 +85,25 @@
                         if (!data.state) data.state = {};
                         if (!data.state.config) data.state.config = {};
                         var cfg = data.state.config;
-                        if (baseUrl) cfg.baseUrl = baseUrl;
+                        if (safeUrl) cfg.baseUrl = safeUrl;
                         if (apiKey) cfg.apiKey = apiKey;
                         if (!Array.isArray(cfg.channels)) cfg.channels = [];
-                        // 自动清洗老旧的公网域名渠道，全部无感升级为当前配置的内部 IP
-                        if (baseUrl) {
-                            for (var cIdx = 0; cIdx < cfg.channels.length; cIdx++) {
-                                var existingCh = cfg.channels[cIdx];
-                                if (existingCh && existingCh.baseUrl && existingCh.baseUrl.indexOf("vip.muling.store") !== -1) {
-                                    existingCh.baseUrl = baseUrl;
-                                }
+
+                        // 自动纠正旧渠道地址为安全专线地址
+                        for (var cIdx = 0; cIdx < cfg.channels.length; cIdx++) {
+                            var existingCh = cfg.channels[cIdx];
+                            if (existingCh && existingCh.baseUrl) {
+                                existingCh.baseUrl = sanitizeBaseUrl(existingCh.baseUrl);
                             }
                         }
+
                         var found = false;
                         var targetName = (channelName || "").trim();
                         if (targetName) {
                             for (var i = 0; i < cfg.channels.length; i++) {
                                 var ch = cfg.channels[i];
                                 if (ch && ch.name && ch.name.trim() === targetName) {
-                                    if (baseUrl) ch.baseUrl = baseUrl;
+                                    if (safeUrl) ch.baseUrl = safeUrl;
                                     if (apiKey) ch.apiKey = apiKey;
                                     found = true;
                                     break;
@@ -52,18 +112,18 @@
                         } else {
                             for (var i = 0; i < cfg.channels.length; i++) {
                                 var ch = cfg.channels[i];
-                                if (ch && ch.baseUrl === baseUrl) {
+                                if (ch && ch.baseUrl === safeUrl) {
                                     if (apiKey) ch.apiKey = apiKey;
                                     found = true;
                                     break;
                                 }
                             }
                         }
-                        if (!found && baseUrl) {
+                        if (!found && safeUrl) {
                             cfg.channels.unshift({
                                 id: "chan_" + Date.now(),
-                                name: targetName || "New API",
-                                baseUrl: baseUrl,
+                                name: targetName || "专线通道",
+                                baseUrl: safeUrl,
                                 apiKey: apiKey || "",
                                 apiFormat: "openai",
                                 models: []

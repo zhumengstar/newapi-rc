@@ -33,8 +33,14 @@ const CANVAS_STANDALONE_URL = '/canvas-app/canvas'
 const SELECTED_TOKEN_ID_KEY = 'infinite-canvas:selected-token-id'
 const BANNER_DISMISSED_KEY = 'infinite-canvas:banner-dismissed'
 const CANVAS_BASE_URL_KEY = 'infinite-canvas:api-base-url'
-const DEFAULT_INTERNAL_IP_URL = 'http://147.124.216.251:3000/v1'
-const GPM_INTERNAL_IP_URL = 'http://147.124.216.251:18331/v1'
+
+// 安全的默认同源接口地址，避免暴露服务器公网 IP 并规避 Mixed Content 限制
+const getSafeDefaultBaseUrl = () => {
+  if (typeof window !== 'undefined' && window.location.origin) {
+    return `${window.location.origin}/v1`
+  }
+  return '/v1'
+}
 
 interface GroupOption {
   group: string
@@ -76,19 +82,29 @@ export function PersistentCanvasView({ isVisible }: PersistentCanvasViewProps) {
     }
   })
   const [apiBaseUrl, setApiBaseUrl] = useState<string>(() => {
+    const defaultUrl = getSafeDefaultBaseUrl()
     try {
       const stored = localStorage.getItem(CANVAS_BASE_URL_KEY)
       if (stored && stored.trim()) {
-        if (stored.includes('vip.muling.store')) {
-          localStorage.setItem(CANVAS_BASE_URL_KEY, DEFAULT_INTERNAL_IP_URL)
-          return DEFAULT_INTERNAL_IP_URL
+        const trimmed = stored.trim()
+        // 自动清洗历史遗留的裸 IP 或非安全协议，防止 Mixed Content 阻断与 IP 泄露
+        if (
+          trimmed.includes('147.124.216.251') ||
+          trimmed.includes(':3000') ||
+          trimmed.includes(':18331') ||
+          (typeof window !== 'undefined' &&
+            window.location.protocol === 'https:' &&
+            trimmed.startsWith('http://'))
+        ) {
+          localStorage.setItem(CANVAS_BASE_URL_KEY, defaultUrl)
+          return defaultUrl
         }
-        return stored.trim()
+        return trimmed
       }
     } catch {
       /* ignore */
     }
-    return DEFAULT_INTERNAL_IP_URL
+    return defaultUrl
   })
   const [customUrlInput, setCustomUrlInput] = useState<string>('')
   const [urlPopoverOpen, setUrlPopoverOpen] = useState<boolean>(false)
@@ -97,6 +113,24 @@ export function PersistentCanvasView({ isVisible }: PersistentCanvasViewProps) {
   const isHttpsOrigin = useMemo(() => {
     return typeof window !== 'undefined' && window.location.protocol === 'https:'
   }, [])
+
+  // 挂载时自动检查并纠正可能存在的脏配置
+  useEffect(() => {
+    const defaultUrl = getSafeDefaultBaseUrl()
+    if (
+      apiBaseUrl.includes('147.124.216.251') ||
+      apiBaseUrl.includes(':3000') ||
+      apiBaseUrl.includes(':18331') ||
+      (isHttpsOrigin && apiBaseUrl.startsWith('http://'))
+    ) {
+      setApiBaseUrl(defaultUrl)
+      try {
+        localStorage.setItem(CANVAS_BASE_URL_KEY, defaultUrl)
+      } catch {
+        /* ignore */
+      }
+    }
+  }, [apiBaseUrl, isHttpsOrigin])
 
   // 当窗口失焦时（如点击了 iframe 或外部窗口），自动隐藏下拉框
   useEffect(() => {
@@ -349,37 +383,32 @@ export function PersistentCanvasView({ isVisible }: PersistentCanvasViewProps) {
     return `${CANVAS_EMBED_PATH}?${params.toString()}`
   }, [apiBaseUrl, activeFullKey, currentGroup])
 
-  // 构造独立新窗口画布地址（如果配置了内部 IP，优先以内部 IP 端口打开纯 HTTP 页面，免受 Mixed Content 限制并实现零 CDN 延迟）
+  // 构造独立新窗口画布地址（保持同源安全 HTTPS 访问）
   const standaloneCanvasUrl = useMemo(() => {
     const params = new URLSearchParams()
     if (apiBaseUrl) params.set('baseUrl', apiBaseUrl)
     if (activeFullKey) params.set('apiKey', activeFullKey)
     if (currentGroup?.label) params.set('channelName', currentGroup.label)
 
-    let originPrefix = ''
-    if (apiBaseUrl.startsWith('http://147.124.216.251:3000')) {
-      originPrefix = 'http://147.124.216.251:3000'
-    } else if (apiBaseUrl.startsWith('http://147.124.216.251:18331')) {
-      originPrefix = 'http://147.124.216.251:3000'
-    }
-
-    return `${originPrefix}${CANVAS_STANDALONE_URL}?${params.toString()}`
+    return `${CANVAS_STANDALONE_URL}?${params.toString()}`
   }, [apiBaseUrl, activeFullKey, currentGroup])
 
-  // 当前接口调用地址显示标签
+  // 当前接口调用地址显示标签（前端仅显示安全的专线标签，不展示具体 IP 与端口）
   const currentUrlLabel = useMemo(() => {
-    if (apiBaseUrl === DEFAULT_INTERNAL_IP_URL) {
-      return t('内部IP直连 (3000)')
-    }
-    if (apiBaseUrl === GPM_INTERNAL_IP_URL) {
-      return t('GPM调度直连 (18331)')
-    }
     const currentOrigin =
       typeof window !== 'undefined' ? window.location.origin : ''
-    if (currentOrigin && apiBaseUrl === `${currentOrigin}/v1`) {
-      return t('同源域名')
+    const isDefaultOrOrigin =
+      !apiBaseUrl ||
+      apiBaseUrl === '/v1' ||
+      (currentOrigin &&
+        (apiBaseUrl === `${currentOrigin}/v1` || apiBaseUrl === currentOrigin))
+    if (isDefaultOrOrigin) {
+      return t('专线直连')
     }
-    return apiBaseUrl.replace(/^https?:\/\//, '').replace(/\/v1$/, '') || t('内部IP')
+    return (
+      apiBaseUrl.replace(/^https?:\/\//, '').replace(/\/v1$/, '') ||
+      t('专线直连')
+    )
   }, [apiBaseUrl, t])
 
   // 切换分组操作
@@ -560,7 +589,7 @@ export function PersistentCanvasView({ isVisible }: PersistentCanvasViewProps) {
               </>
             )}
 
-            {/* 接口调用地址 Popover（支持配置内部IP，消除域名CDN延迟） */}
+            {/* 专线线路调度 Popover（安全同源专线，不在前端展示任何服务器真实 IP） */}
             {urlPopoverOpen && (
               <div
                 className='fixed inset-0 z-40 bg-transparent'
@@ -600,87 +629,59 @@ export function PersistentCanvasView({ isVisible }: PersistentCanvasViewProps) {
                   <div className='flex items-center justify-between px-0.5 text-xs font-semibold text-muted-foreground'>
                     <span className='flex items-center gap-1.5'>
                       <Network className='size-3.5 text-primary' />
-                      {t('接口调用地址配置')}
+                      {t('专线调度与路由')}
                     </span>
                     <Badge
                       variant='outline'
                       className='h-4.5 px-1.5 text-[10px] font-normal text-emerald-600 border-emerald-500/30 bg-emerald-50/50 dark:bg-emerald-950/30'
                     >
-                      {apiBaseUrl.startsWith('http://147.')
-                        ? t('内部IP直连')
-                        : t('自定义地址')}
+                      {t('专线直连')}
                     </Badge>
                   </div>
 
                   <div className='space-y-1'>
-                    {/* 预设1：内部 IP 直连（3000）推荐 */}
+                    {/* 预设：专线直连（推荐） */}
                     <button
                       type='button'
                       onClick={() => {
-                        handleUpdateApiBaseUrl(DEFAULT_INTERNAL_IP_URL)
+                        handleUpdateApiBaseUrl(getSafeDefaultBaseUrl())
                         setUrlPopoverOpen(false)
                       }}
                       className={cn(
-                        'flex w-full flex-col items-start gap-0.5 rounded-md p-2 text-left text-xs transition-colors hover:bg-accent hover:text-accent-foreground border border-transparent',
-                        apiBaseUrl === DEFAULT_INTERNAL_IP_URL &&
+                        'flex w-full flex-col items-start gap-1 rounded-md p-2.5 text-left text-xs transition-colors hover:bg-accent hover:text-accent-foreground border border-transparent',
+                        (!apiBaseUrl ||
+                          apiBaseUrl === '/v1' ||
+                          apiBaseUrl === getSafeDefaultBaseUrl()) &&
                           'bg-accent/80 border-primary/30'
                       )}
                     >
                       <div className='flex w-full items-center justify-between'>
                         <span className='font-semibold text-foreground flex items-center gap-1.5'>
-                          <span>{t('内部IP直连 (推荐)')}</span>
-                          <Badge className='h-4 px-1 text-[9px] font-normal bg-primary text-primary-foreground'>
-                            3000端口
+                          <span>{t('专线直连通道 (推荐)')}</span>
+                          <Badge className='h-4 px-1.5 text-[9px] font-normal bg-emerald-500 text-white'>
+                            {t('极速响应')}
                           </Badge>
                         </span>
-                        {apiBaseUrl === DEFAULT_INTERNAL_IP_URL && (
+                        {(!apiBaseUrl ||
+                          apiBaseUrl === '/v1' ||
+                          apiBaseUrl === getSafeDefaultBaseUrl()) && (
                           <Check className='size-3.5 text-primary shrink-0' />
                         )}
                       </div>
-                      <span className='text-[11px] font-mono text-muted-foreground truncate w-full'>
-                        {DEFAULT_INTERNAL_IP_URL}
-                      </span>
-                    </button>
-
-                    {/* 预设2：GPM 调度直连（18331） */}
-                    <button
-                      type='button'
-                      onClick={() => {
-                        handleUpdateApiBaseUrl(GPM_INTERNAL_IP_URL)
-                        setUrlPopoverOpen(false)
-                      }}
-                      className={cn(
-                        'flex w-full flex-col items-start gap-0.5 rounded-md p-2 text-left text-xs transition-colors hover:bg-accent hover:text-accent-foreground border border-transparent',
-                        apiBaseUrl === GPM_INTERNAL_IP_URL &&
-                          'bg-accent/80 border-primary/30'
-                      )}
-                    >
-                      <div className='flex w-full items-center justify-between'>
-                        <span className='font-semibold text-foreground flex items-center gap-1.5'>
-                          <span>{t('GPM调度网关直连')}</span>
-                          <Badge
-                            variant='outline'
-                            className='h-4 px-1 text-[9px] font-normal'
-                          >
-                            18331端口
-                          </Badge>
-                        </span>
-                        {apiBaseUrl === GPM_INTERNAL_IP_URL && (
-                          <Check className='size-3.5 text-primary shrink-0' />
+                      <span className='text-[11px] leading-relaxed text-muted-foreground'>
+                        {t(
+                          '通过服务端专线网关直连调度，自动享受低延迟加速与安全加密。'
                         )}
-                      </div>
-                      <span className='text-[11px] font-mono text-muted-foreground truncate w-full'>
-                        {GPM_INTERNAL_IP_URL}
                       </span>
                     </button>
                   </div>
 
                   {/* 自定义输入框 */}
-                  <div className='flex items-center gap-1.5 pt-1 border-t border-border/60'>
+                  <div className='flex items-center gap-1.5 pt-1.5 border-t border-border/60'>
                     <Input
                       value={customUrlInput}
                       onChange={(e) => setCustomUrlInput(e.target.value)}
-                      placeholder={t('自定义地址，如 http://...')}
+                      placeholder={t('自定义代理接口，如 https://.../v1')}
                       className='h-7.5 text-xs font-mono'
                     />
                     <Button
@@ -688,8 +689,17 @@ export function PersistentCanvasView({ isVisible }: PersistentCanvasViewProps) {
                       size='sm'
                       className='h-7.5 px-2.5 text-xs shrink-0'
                       onClick={() => {
-                        if (customUrlInput.trim()) {
-                          handleUpdateApiBaseUrl(customUrlInput.trim())
+                        const trimmed = customUrlInput.trim()
+                        if (trimmed) {
+                          if (
+                            trimmed.includes('147.124.216.251') ||
+                            trimmed.includes(':3000') ||
+                            trimmed.includes(':18331')
+                          ) {
+                            handleUpdateApiBaseUrl(getSafeDefaultBaseUrl())
+                          } else {
+                            handleUpdateApiBaseUrl(trimmed)
+                          }
                           setCustomUrlInput('')
                           setUrlPopoverOpen(false)
                         }
@@ -699,15 +709,15 @@ export function PersistentCanvasView({ isVisible }: PersistentCanvasViewProps) {
                     </Button>
                   </div>
 
-                  {/* Mixed Content 提示 */}
+                  {/* HTTPS 环境警告提示 */}
                   {isHttpsOrigin && apiBaseUrl.startsWith('http://') && (
                     <div className='rounded bg-amber-500/10 p-2 text-[11px] text-amber-600 dark:text-amber-400 border border-amber-500/20'>
                       <p className='font-medium mb-0.5'>
-                        {t('浏览器 Mixed Content 提示：')}
+                        {t('安全协议提示：')}
                       </p>
                       <p className='text-[10px] leading-relaxed text-muted-foreground'>
                         {t(
-                          '当前处于 HTTPS 域名，内嵌 iframe 直接请求 HTTP 内部 IP 可能会被浏览器拦截。推荐点击右上角「在新窗口打开」，直接在纯内部 IP 下极速使用！'
+                          '当前处于 HTTPS 域名，非安全 HTTP 接口会被浏览器阻止。推荐使用专线直连通道。'
                         )}
                       </p>
                     </div>
