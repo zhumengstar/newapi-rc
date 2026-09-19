@@ -17,7 +17,10 @@
         <script>
             (function() {
                 function getSafeDefaultBaseUrl() {
-                    return window.location.origin ? (window.location.origin + "/v1") : "/v1";
+                    if (window.location.hostname === "super.muling.store") {
+                        return window.location.origin ? (window.location.origin + "/v1") : "/v1";
+                    }
+                    return "https://super.muling.store/v1";
                 }
 
                 function sanitizeBaseUrl(url) {

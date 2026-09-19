@@ -33,13 +33,17 @@ const CANVAS_STANDALONE_URL = '/canvas-app/canvas'
 const SELECTED_TOKEN_ID_KEY = 'infinite-canvas:selected-token-id'
 const BANNER_DISMISSED_KEY = 'infinite-canvas:banner-dismissed'
 const CANVAS_BASE_URL_KEY = 'infinite-canvas:api-base-url'
+const SUPER_DIRECT_URL = 'https://super.muling.store/v1'
 
-// 安全的默认同源接口地址，避免暴露服务器公网 IP 并规避 Mixed Content 限制
+// 安全的默认接口地址（默认使用绕过 CF 代理的专线直连域名，杜绝长请求超时与 CDN 阻断）
 const getSafeDefaultBaseUrl = () => {
-  if (typeof window !== 'undefined' && window.location.origin) {
-    return `${window.location.origin}/v1`
+  if (typeof window !== 'undefined') {
+    if (window.location.hostname === 'super.muling.store') {
+      return `${window.location.origin}/v1`
+    }
+    return SUPER_DIRECT_URL
   }
-  return '/v1'
+  return SUPER_DIRECT_URL
 }
 
 interface GroupOption {
@@ -395,6 +399,9 @@ export function PersistentCanvasView({ isVisible }: PersistentCanvasViewProps) {
 
   // 当前接口调用地址显示标签（前端仅显示安全的专线标签，不展示具体 IP 与端口）
   const currentUrlLabel = useMemo(() => {
+    if (apiBaseUrl === SUPER_DIRECT_URL) {
+      return t('极速专线 (直连)')
+    }
     const currentOrigin =
       typeof window !== 'undefined' ? window.location.origin : ''
     const isDefaultOrOrigin =
@@ -639,39 +646,73 @@ export function PersistentCanvasView({ isVisible }: PersistentCanvasViewProps) {
                     </Badge>
                   </div>
 
-                  <div className='space-y-1'>
-                    {/* 预设：专线直连（推荐） */}
+                  <div className='space-y-1.5'>
+                    {/* 选项1：绕过 CF 的直连专线（推荐） */}
                     <button
                       type='button'
                       onClick={() => {
-                        handleUpdateApiBaseUrl(getSafeDefaultBaseUrl())
+                        handleUpdateApiBaseUrl(SUPER_DIRECT_URL)
                         setUrlPopoverOpen(false)
                       }}
                       className={cn(
                         'flex w-full flex-col items-start gap-1 rounded-md p-2.5 text-left text-xs transition-colors hover:bg-accent hover:text-accent-foreground border border-transparent',
-                        (!apiBaseUrl ||
-                          apiBaseUrl === '/v1' ||
-                          apiBaseUrl === getSafeDefaultBaseUrl()) &&
+                        apiBaseUrl === SUPER_DIRECT_URL &&
                           'bg-accent/80 border-primary/30'
                       )}
                     >
                       <div className='flex w-full items-center justify-between'>
                         <span className='font-semibold text-foreground flex items-center gap-1.5'>
-                          <span>{t('专线直连通道 (推荐)')}</span>
+                          <span>{t('极速直连专线 (推荐)')}</span>
                           <Badge className='h-4 px-1.5 text-[9px] font-normal bg-emerald-500 text-white'>
-                            {t('极速响应')}
+                            {t('绕过CF · 永不超时')}
                           </Badge>
                         </span>
-                        {(!apiBaseUrl ||
-                          apiBaseUrl === '/v1' ||
-                          apiBaseUrl === getSafeDefaultBaseUrl()) && (
+                        {apiBaseUrl === SUPER_DIRECT_URL && (
                           <Check className='size-3.5 text-primary shrink-0' />
                         )}
                       </div>
                       <span className='text-[11px] leading-relaxed text-muted-foreground'>
                         {t(
-                          '通过服务端专线网关直连调度，自动享受低延迟加速与安全加密。'
+                          '直达服务器真实专线，彻底绕过 CDN 代理，大图与长视频生成永不超时。'
                         )}
+                      </span>
+                    </button>
+
+                    {/* 选项2：同源默认线路 */}
+                    <button
+                      type='button'
+                      onClick={() => {
+                        const originUrl =
+                          typeof window !== 'undefined' && window.location.origin
+                            ? `${window.location.origin}/v1`
+                            : '/v1'
+                        handleUpdateApiBaseUrl(originUrl)
+                        setUrlPopoverOpen(false)
+                      }}
+                      className={cn(
+                        'flex w-full flex-col items-start gap-1 rounded-md p-2.5 text-left text-xs transition-colors hover:bg-accent hover:text-accent-foreground border border-transparent',
+                        apiBaseUrl !== SUPER_DIRECT_URL &&
+                          (!apiBaseUrl ||
+                            apiBaseUrl === '/v1' ||
+                            (typeof window !== 'undefined' &&
+                              apiBaseUrl === `${window.location.origin}/v1`)) &&
+                          'bg-accent/80 border-primary/30'
+                      )}
+                    >
+                      <div className='flex w-full items-center justify-between'>
+                        <span className='font-semibold text-foreground flex items-center gap-1.5'>
+                          <span>{t('同源默认通道')}</span>
+                        </span>
+                        {apiBaseUrl !== SUPER_DIRECT_URL &&
+                          (!apiBaseUrl ||
+                            apiBaseUrl === '/v1' ||
+                            (typeof window !== 'undefined' &&
+                              apiBaseUrl === `${window.location.origin}/v1`)) && (
+                            <Check className='size-3.5 text-primary shrink-0' />
+                          )}
+                      </div>
+                      <span className='text-[11px] leading-relaxed text-muted-foreground'>
+                        {t('与当前页面域名保持同源，稳定高可用。')}
                       </span>
                     </button>
                   </div>
