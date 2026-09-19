@@ -16,9 +16,9 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Loader2 } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Dialog } from '@/components/dialog'
@@ -26,7 +26,17 @@ import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import { requireServerSuccess } from '@/lib/server-error-message'
 
+import { getChannelGroupPriorities, getGroups } from '../../api'
 import { handleCopyChannel } from '../../lib'
 import { useChannels } from '../channels-provider'
 
@@ -43,8 +53,47 @@ export function CopyChannelDialog({
   const { currentRow } = useChannels()
   const queryClient = useQueryClient()
   const [suffix, setSuffix] = useState('_copy')
+  const [targetGroup, setTargetGroup] = useState('')
   const [resetBalance, setResetBalance] = useState(true)
   const [isCopying, setIsCopying] = useState(false)
+
+  const { data: groupsData } = useQuery({
+    queryKey: ['groups'],
+    queryFn: async () => requireServerSuccess(await getGroups()),
+    enabled: open,
+  })
+
+  const { data: groupPrioritiesData } = useQuery({
+    queryKey: ['channel-group-priorities'],
+    queryFn: async () => requireServerSuccess(await getChannelGroupPriorities()),
+    enabled: open,
+  })
+
+  useEffect(() => {
+    if (open && currentRow) {
+      setTargetGroup(currentRow.group || '')
+    }
+  }, [open, currentRow])
+
+  const groupOptions = useMemo(() => {
+    const list = groupsData?.data || []
+    const set = new Set([
+      ...list,
+      ...(currentRow?.group ? [currentRow.group] : []),
+    ])
+    return Array.from(set).filter(Boolean)
+  }, [groupsData, currentRow?.group])
+
+  const remappedPriorityPreview = useMemo(() => {
+    if (!targetGroup || !currentRow || targetGroup === currentRow.group)
+      return null
+    const basePrio = groupPrioritiesData?.data?.[targetGroup]
+    if (!basePrio || basePrio <= 0) return null
+    const base = Math.floor((basePrio - 1) / 10) * 10
+    const offset = (currentRow.priority ?? 1) % 10
+    const validOffset = offset >= 1 && offset <= 9 ? offset : 1
+    return base + validOffset
+  }, [targetGroup, currentRow, groupPrioritiesData])
 
   if (!currentRow) return null
 
@@ -56,6 +105,7 @@ export function CopyChannelDialog({
       {
         suffix,
         reset_balance: resetBalance,
+        group: targetGroup || undefined,
       },
       queryClient,
       () => {
@@ -75,8 +125,7 @@ export function CopyChannelDialog({
       title={t('Copy Channel')}
       description={
         <>
-          {t('Create a copy of:')}
-          <strong>{currentRow.name}</strong>
+          {t('Create a copy of:')} <strong>{currentRow.name}</strong>
         </>
       }
       contentHeight='auto'
@@ -111,6 +160,37 @@ export function CopyChannelDialog({
             {t('New name will be:')} {currentRow.name}
             {suffix}
           </p>
+        </div>
+
+        <div className='space-y-2'>
+          <Label htmlFor='target-group'>{t('Target Group')}</Label>
+          <Select
+            value={targetGroup}
+            onValueChange={(val) => setTargetGroup(val || '')}
+            disabled={isCopying}
+          >
+            <SelectTrigger id='target-group' className='w-full'>
+              <SelectValue placeholder={t('Select target group')} />
+            </SelectTrigger>
+            <SelectContent alignItemWithTrigger={false}>
+              <SelectGroup>
+                {groupOptions.map((g) => (
+                  <SelectItem key={g} value={g}>
+                    {g}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+          {remappedPriorityPreview !== null && (
+            <div className='rounded border border-amber-500/20 bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-300'>
+              💡{' '}
+              {t(
+                'Target group differs from source; priority will be automatically remapped to:'
+              )}{' '}
+              <strong>{remappedPriorityPreview}</strong>
+            </div>
+          )}
         </div>
 
         <div className='flex items-center space-x-2'>

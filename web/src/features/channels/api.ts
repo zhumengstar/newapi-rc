@@ -829,6 +829,18 @@ export async function getChannelGroups(): Promise<{
   return res.data
 }
 
+/**
+ * Get base priority mapping for channel groups.
+ */
+export async function getChannelGroupPriorities(): Promise<{
+  success: boolean
+  message?: string
+  data?: Record<string, number>
+}> {
+  const res = await api.get('/api/channel/group-priorities')
+  return res.data
+}
+
 // ============================================================================
 // Prefill Groups (Model Groups)
 // ============================================================================

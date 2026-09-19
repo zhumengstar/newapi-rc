@@ -289,13 +289,21 @@ function PriorityCell({ channel }: { channel: Channel }) {
     return <TagPriorityCell channel={channel} />
   }
 
+  const priority = channel.priority ?? 0
+  const base = priority > 0 ? Math.floor((priority - 1) / 10) * 10 : 0
+  const min = base > 0 ? base + 1 : -999
+  const max = base > 0 ? base + 9 : 999
+
   return (
-    <ChannelFieldCell
-      channelId={channel.id}
-      value={channel.priority}
-      field='priority'
-      min={-999}
-    />
+    <div title={base > 0 ? `当前分组区间: ${min} ~ ${max}` : undefined}>
+      <ChannelFieldCell
+        channelId={channel.id}
+        value={channel.priority}
+        field='priority'
+        min={min}
+        max={max}
+      />
+    </div>
   )
 }
 
@@ -343,11 +351,13 @@ function ChannelFieldCell({
   value,
   field,
   min,
+  max,
 }: {
   channelId: number
   value: number | null | undefined
   field: 'priority' | 'weight' | 'name'
   min: number
+  max?: number
 }) {
   const queryClient = useQueryClient()
   const fieldUpdateScheduler = useMemo(
@@ -366,6 +376,7 @@ function ChannelFieldCell({
       onChange={fieldUpdateScheduler.schedule}
       onCommit={fieldUpdateScheduler.flush}
       min={min}
+      max={max}
     />
   )
 }

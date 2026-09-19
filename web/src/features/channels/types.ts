@@ -366,6 +366,7 @@ export interface ChannelTestParams {
 export interface CopyChannelParams {
   suffix?: string
   reset_balance?: boolean
+  group?: string
 }
 
 export interface MultiKeyManageParams {

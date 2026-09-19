@@ -54,11 +54,15 @@ function getColumnWidth<TData>(
   columnSize: number,
   totalSize: number
 ) {
-  if (!table.options.enableColumnResizing && isContentSizedColumn(columnId)) {
+  if (isContentSizedColumn(columnId)) {
     return '1%'
   }
 
   if (table.options.enableColumnResizing === true) {
+    const columnSizing = table.getState().columnSizing || {}
+    if (columnId === 'name' && !columnSizing[columnId]) {
+      return undefined
+    }
     return `${columnSize}px`
   }
 

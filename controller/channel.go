@@ -1531,6 +1531,22 @@ func remapPriorityToGroupRange(targetGroup string, currentPriority int64) (int64
 	return remapPriorityByBase(*groupPriority, currentPriority), nil
 }
 
+// GetChannelGroupPriorities returns a mapping of group name -> base priority
+func GetChannelGroupPriorities(c *gin.Context) {
+	groups, err := model.GetChannelGroups()
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	result := make(map[string]int64)
+	for _, g := range groups {
+		if prio, err := getGroupBasePriority(g); err == nil && prio != nil {
+			result[g] = *prio
+		}
+	}
+	common.ApiSuccess(c, result)
+}
+
 // constrainChannelPriority keeps a channel inside the reserved nine-value
 // range of its target routing group. Channels without abilities are legacy or
 // incomplete records; use the target group or ability range rather than accepting
@@ -2239,6 +2255,10 @@ func CopyChannel(c *gin.Context) {
 	}
 
 	suffix := c.DefaultQuery("suffix", "_复制")
+	targetGroup := strings.TrimSpace(c.Query("group"))
+	if targetGroup == "" {
+		targetGroup = strings.TrimSpace(c.Query("target_group"))
+	}
 	resetBalance := true
 	if rbStr := c.DefaultQuery("reset_balance", "true"); rbStr != "" {
 		if v, err := strconv.ParseBool(rbStr); err == nil {
@@ -2269,6 +2289,17 @@ func CopyChannel(c *gin.Context) {
 	if resetBalance {
 		clone.Balance = 0
 		clone.UsedQuota = 0
+	}
+	if targetGroup != "" && targetGroup != origin.Group {
+		clone.Group = targetGroup
+		origPriority := int64(0)
+		if origin.Priority != nil {
+			origPriority = *origin.Priority
+		}
+		newPriority, err := remapPriorityToGroupRange(targetGroup, origPriority)
+		if err == nil {
+			clone.Priority = &newPriority
+		}
 	}
 
 	if err := clone.ValidateSettings(); err != nil {

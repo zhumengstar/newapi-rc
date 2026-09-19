@@ -34,13 +34,21 @@ export function getTableSizeStyle<TData>(
     .reduce((total, column) => total + column.getSize(), 0)
 
   if (table.options.enableColumnResizing === true) {
-    // Keep the table exactly as wide as its columns. Filling the container
-    // makes the browser distribute unused space across the other columns when
-    // one column is narrowed, even with a fixed table layout.
+    const columnSizing = table.getState().columnSizing || {}
+    const hasExplicitResize = Object.keys(columnSizing).length > 0
+
+    if (hasExplicitResize) {
+      return {
+        minWidth: `max(100%, ${width}px)`,
+        tableLayout: 'fixed',
+        width: `${width}px`,
+      }
+    }
+
     return {
-      minWidth: `${width}px`,
+      minWidth: `max(100%, ${width}px)`,
       tableLayout: 'fixed',
-      width: `${width}px`,
+      width: '100%',
     }
   }
 

@@ -128,6 +128,7 @@ import {
   getAllModels,
   getChannel,
   getChannelDefaultBaseURLs,
+  getChannelGroupPriorities,
   getGroups,
   getPrefillGroups,
   getTaskPluginOptions,
@@ -477,6 +478,13 @@ export function ChannelMutateDrawer({
     enabled: open && !showProviderPicker,
   })
 
+  // Fetch channel group priorities mapping
+  const { data: groupPrioritiesData } = useQuery({
+    queryKey: ['channel-group-priorities'],
+    queryFn: async () => requireServerSuccess(await getChannelGroupPriorities()),
+    enabled: open && !showProviderPicker,
+  })
+
   // Fetch all available models
   const { data: allModelsData } = useQuery({
     queryKey: ['channel_models'],
@@ -530,6 +538,36 @@ export function ChannelMutateDrawer({
   const currentSettings = formValues.settings
   const currentAdvancedCustom = formValues.advanced_custom
   const currentPriority = formValues.priority
+  const firstSelectedGroup = currentGroups?.[0] || ''
+  const targetGroupBasePriority =
+    groupPrioritiesData?.data?.[firstSelectedGroup]
+
+  const priorityRecommendation = useMemo(() => {
+    if (
+      !firstSelectedGroup ||
+      !targetGroupBasePriority ||
+      targetGroupBasePriority <= 0
+    ) {
+      return null
+    }
+    const base = Math.floor((targetGroupBasePriority - 1) / 10) * 10
+    const min = base + 1
+    const max = base + 9
+    const priority = currentPriority ?? 0
+    const inRange = priority >= min && priority <= max
+    const offset = priority % 10
+    const validOffset = offset >= 1 && offset <= 9 ? offset : 1
+    const suggested = base + validOffset
+
+    return {
+      group: firstSelectedGroup,
+      base,
+      min,
+      max,
+      inRange,
+      suggested,
+    }
+  }, [firstSelectedGroup, targetGroupBasePriority, currentPriority])
   const currentWeight = formValues.weight
   const currentTestModel = formValues.test_model
   const currentAutoBan = formValues.auto_ban
@@ -1882,6 +1920,38 @@ export function ChannelMutateDrawer({
                   onChange={(e) => field.onChange(Number(e.target.value))}
                 />
               </FormControl>
+              {priorityRecommendation && (
+                <div className='mt-1.5'>
+                  {!priorityRecommendation.inRange ? (
+                    <div className='flex items-center justify-between rounded-md border border-amber-500/25 bg-amber-500/10 px-2.5 py-1.5 text-xs text-amber-700 dark:text-amber-300'>
+                      <span>
+                        当前值不在「{priorityRecommendation.group}」基准区间（
+                        {priorityRecommendation.min} ~{' '}
+                        {priorityRecommendation.max}
+                        ），建议调控为：<b>{priorityRecommendation.suggested}</b>
+                      </span>
+                      <Button
+                        type='button'
+                        variant='ghost'
+                        size='sm'
+                        className='h-6 px-2 text-xs font-medium hover:bg-amber-500/20'
+                        onClick={() =>
+                          field.onChange(priorityRecommendation.suggested)
+                        }
+                      >
+                        {t('Apply')}
+                      </Button>
+                    </div>
+                  ) : (
+                    <div className='text-xs text-muted-foreground'>
+                      {t('Group standard range: {{min}} ~ {{max}}', {
+                        min: priorityRecommendation.min,
+                        max: priorityRecommendation.max,
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
               <FormDescription>
                 {t(FIELD_DESCRIPTIONS.PRIORITY)}
               </FormDescription>
@@ -3270,7 +3340,25 @@ export function ChannelMutateDrawer({
                       <MultiSelect
                         options={groupOptions}
                         selected={field.value}
-                        onChange={field.onChange}
+                        onChange={(nextGroups) => {
+                          field.onChange(nextGroups)
+                          const nextFirst = nextGroups[0]
+                          if (
+                            nextFirst &&
+                            groupPrioritiesData?.data?.[nextFirst]
+                          ) {
+                            const nextBasePrio =
+                              groupPrioritiesData.data[nextFirst]
+                            const nextBase =
+                              Math.floor((nextBasePrio - 1) / 10) * 10
+                            const cur = form.getValues('priority') ?? 0
+                            const curOffset = cur % 10
+                            const validOffset =
+                              curOffset >= 1 && curOffset <= 9 ? curOffset : 1
+                            const newPrio = nextBase + validOffset
+                            form.setValue('priority', newPrio)
+                          }
+                        }}
                         placeholder={t(FIELD_PLACEHOLDERS.GROUP)}
                       />
                     )}
