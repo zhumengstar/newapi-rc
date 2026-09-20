@@ -52,7 +52,7 @@ export function CopyChannelDialog({
   const { t } = useTranslation()
   const { currentRow } = useChannels()
   const queryClient = useQueryClient()
-  const [suffix, setSuffix] = useState('_copy')
+  const [name, setName] = useState('')
   const [targetGroup, setTargetGroup] = useState('')
   const [resetBalance, setResetBalance] = useState(true)
   const [isCopying, setIsCopying] = useState(false)
@@ -71,6 +71,7 @@ export function CopyChannelDialog({
 
   useEffect(() => {
     if (open && currentRow) {
+      setName(currentRow.name || '')
       setTargetGroup(currentRow.group || '')
     }
   }, [open, currentRow])
@@ -98,19 +99,21 @@ export function CopyChannelDialog({
   if (!currentRow) return null
 
   const handleCopy = async () => {
+    const trimmedName = name.trim()
+    if (!trimmedName) return
+
     setIsCopying(true)
 
     await handleCopyChannel(
       currentRow.id,
       {
-        suffix,
+        name: trimmedName,
         reset_balance: resetBalance,
         group: targetGroup || undefined,
       },
       queryClient,
       () => {
         onOpenChange(false)
-        setSuffix('_copy')
         setResetBalance(true)
       }
     )
@@ -139,7 +142,7 @@ export function CopyChannelDialog({
           >
             {t('Cancel')}
           </Button>
-          <Button onClick={handleCopy} disabled={isCopying}>
+          <Button onClick={handleCopy} disabled={isCopying || !name.trim()}>
             {isCopying && <Loader2 className='mr-2 h-4 w-4 animate-spin' />}
             {isCopying ? t('Copying...') : t('Copy Channel')}
           </Button>
@@ -148,18 +151,15 @@ export function CopyChannelDialog({
     >
       <div className='space-y-4 py-4'>
         <div className='space-y-2'>
-          <Label htmlFor='suffix'>{t('Name Suffix')}</Label>
+          <Label htmlFor='channel-name'>{t('Channel Name')}</Label>
           <Input
-            id='suffix'
-            placeholder={t('_copy')}
-            value={suffix}
-            onChange={(e) => setSuffix(e.target.value)}
+            id='channel-name'
+            placeholder={t('Enter channel name')}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
             disabled={isCopying}
+            autoFocus
           />
-          <p className='text-muted-foreground text-xs'>
-            {t('New name will be:')} {currentRow.name}
-            {suffix}
-          </p>
         </div>
 
         <div className='space-y-2'>

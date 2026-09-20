@@ -2224,7 +2224,8 @@ func GetTagModels(c *gin.Context) {
 // POST /api/channel/copy/:id
 // Optional query params:
 //
-//	suffix         - string appended to the original name (default "_复制")
+//	name           - string, new channel name (if provided, directly overrides original name)
+//	suffix         - string appended to the original name (default "_复制", used only when name is not provided)
 //	reset_balance  - bool, when true will reset balance & used_quota to 0 (default true)
 func CopyChannel(c *gin.Context) {
 	id, err := strconv.Atoi(c.Param("id"))
@@ -2233,7 +2234,7 @@ func CopyChannel(c *gin.Context) {
 		return
 	}
 
-	suffix := c.DefaultQuery("suffix", "_复制")
+	customName := strings.TrimSpace(c.Query("name"))
 	targetGroup := strings.TrimSpace(c.Query("group"))
 	if targetGroup == "" {
 		targetGroup = strings.TrimSpace(c.Query("target_group"))
@@ -2262,7 +2263,14 @@ func CopyChannel(c *gin.Context) {
 	clone := *origin // shallow copy is sufficient as we will overwrite primitives
 	clone.Id = 0     // let DB auto-generate
 	clone.CreatedTime = common.GetTimestamp()
-	clone.Name = origin.Name + suffix
+	if customName != "" {
+		clone.Name = customName
+	} else if c.Query("suffix") != "" {
+		clone.Name = origin.Name + c.Query("suffix")
+	} else {
+		suffix := c.DefaultQuery("suffix", "_复制")
+		clone.Name = origin.Name + suffix
+	}
 	clone.TestTime = 0
 	clone.ResponseTime = 0
 	if resetBalance {

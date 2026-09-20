@@ -260,6 +260,50 @@ func TestCopyChannelRejectsInvalidLegacyProxySettings(t *testing.T) {
 	assert.Equal(t, int64(1), channelCount)
 }
 
+func TestCopyChannelNameOverride(t *testing.T) {
+	db := setupModelListControllerTestDB(t)
+	origin := &model.Channel{
+		Type:   constant.ChannelTypeOpenAI,
+		Name:   "original-channel",
+		Key:    "test-key",
+		Models: "gpt-test",
+		Group:  "default",
+	}
+	require.NoError(t, db.Create(origin).Error)
+
+	// 1. Copy with custom name override
+	{
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		ctx.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", origin.Id)}}
+		ctx.Request = httptest.NewRequest(http.MethodPost, "/api/channel/copy?name=overridden-channel", nil)
+
+		CopyChannel(ctx)
+		require.Equal(t, http.StatusOK, recorder.Code)
+		assert.Contains(t, recorder.Body.String(), `"success":true`)
+
+		var copied model.Channel
+		require.NoError(t, db.Where("name = ?", "overridden-channel").First(&copied).Error)
+		assert.Equal(t, "overridden-channel", copied.Name)
+	}
+
+	// 2. Copy without name but with suffix
+	{
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		ctx.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", origin.Id)}}
+		ctx.Request = httptest.NewRequest(http.MethodPost, "/api/channel/copy?suffix=_v2", nil)
+
+		CopyChannel(ctx)
+		require.Equal(t, http.StatusOK, recorder.Code)
+		assert.Contains(t, recorder.Body.String(), `"success":true`)
+
+		var copied model.Channel
+		require.NoError(t, db.Where("name = ?", "original-channel_v2").First(&copied).Error)
+		assert.Equal(t, "original-channel_v2", copied.Name)
+	}
+}
+
 func TestDeleteChannelResetsProxyCacheWhenPreReadFails(t *testing.T) {
 	db := setupModelListControllerTestDB(t)
 	require.NoError(t, db.AutoMigrate(&model.Log{}, &model.AuditLog{}))
