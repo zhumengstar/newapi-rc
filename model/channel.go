@@ -1745,3 +1745,30 @@ func GetAllChannelModels() []string {
 	sort.Strings(result)
 	return result
 }
+
+// GetGroupBasePriority finds a reference priority for the group from abilities or channels.
+// It safely handles reserved keyword quoting for SQL dialects (PostgreSQL / MySQL) via commonGroupCol and ApplyChannelGroupFilter.
+func GetGroupBasePriority(group string) (*int64, error) {
+	firstGroup := strings.TrimSpace(strings.Split(group, ",")[0])
+	if firstGroup == "" {
+		return nil, nil
+	}
+	var ability Ability
+	err := DB.Where(commonGroupCol+" = ?", firstGroup).Order("priority ASC").First(&ability).Error
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+	if err == nil && ability.Priority != nil {
+		return ability.Priority, nil
+	}
+
+	var ch Channel
+	err = ApplyChannelGroupFilter(DB.Model(&Channel{}), firstGroup).Order("priority ASC").First(&ch).Error
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+	if err == nil && ch.Priority != nil {
+		return ch.Priority, nil
+	}
+	return nil, nil
+}

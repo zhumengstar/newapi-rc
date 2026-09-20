@@ -1471,28 +1471,7 @@ func EditTagChannels(c *gin.Context) {
 
 // getGroupBasePriority finds a reference priority for the group from abilities or channels.
 func getGroupBasePriority(group string) (*int64, error) {
-	firstGroup := strings.TrimSpace(strings.Split(group, ",")[0])
-	if firstGroup == "" {
-		return nil, nil
-	}
-	var ability model.Ability
-	err := model.DB.Where(&model.Ability{Group: firstGroup}).Order("priority ASC").First(&ability).Error
-	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, err
-	}
-	if err == nil && ability.Priority != nil {
-		return ability.Priority, nil
-	}
-	var ch model.Channel
-	commonGroupCol := model.DB.NamingStrategy.ColumnName("", "group")
-	err = model.DB.Where(commonGroupCol+" = ? OR "+commonGroupCol+" LIKE ? OR "+commonGroupCol+" LIKE ?", firstGroup, firstGroup+",%", "%,"+firstGroup).Order("priority ASC").First(&ch).Error
-	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, err
-	}
-	if err == nil && ch.Priority != nil {
-		return ch.Priority, nil
-	}
-	return nil, nil
+	return model.GetGroupBasePriority(group)
 }
 
 func isPriorityInGroupRange(groupPriority *int64, priority int64) bool {

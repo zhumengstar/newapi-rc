@@ -115,3 +115,52 @@ func TestChannelGroupOrderSortUsesPriorityThenWeight(t *testing.T) {
 	assert.Equal(t, "alpha-low", ordered[1].Name)
 	assert.Equal(t, "beta", ordered[2].Name)
 }
+
+func TestGetGroupBasePriority(t *testing.T) {
+	setupChannelStatusTest(t)
+
+	priority41 := int64(41)
+	priority85 := int64(85)
+	channels := []Channel{
+		{Name: "ch-gpt", Key: "k1", Group: "gpt-group", Priority: &priority41, Status: common.ChannelStatusEnabled},
+		{Name: "ch-multi", Key: "k2", Group: "foo,bar", Priority: &priority85, Status: common.ChannelStatusEnabled},
+	}
+	for index := range channels {
+		require.NoError(t, DB.Create(&channels[index]).Error)
+	}
+
+	// Case 1: Ability table match
+	require.NoError(t, DB.Create(&Ability{
+		Group:     "ability-group",
+		Model:     "gpt",
+		ChannelId: channels[0].Id,
+		Priority:  &priority41,
+		Enabled:   true,
+	}).Error)
+	prio, err := GetGroupBasePriority("ability-group")
+	require.NoError(t, err)
+	require.NotNil(t, prio)
+	assert.Equal(t, int64(41), *prio)
+
+	// Case 2: Channel table match (no ability entry)
+	prio, err = GetGroupBasePriority("gpt-group")
+	require.NoError(t, err)
+	require.NotNil(t, prio)
+	assert.Equal(t, int64(41), *prio)
+
+	// Case 3: Comma-separated group matching in channel table
+	prio, err = GetGroupBasePriority("bar")
+	require.NoError(t, err)
+	require.NotNil(t, prio)
+	assert.Equal(t, int64(85), *prio)
+
+	// Case 4: Completely new group (does not exist in either table) - must NOT fail with SQL syntax error
+	prio, err = GetGroupBasePriority("aswb专用分组外接-蒸馏")
+	require.NoError(t, err)
+	assert.Nil(t, prio)
+
+	// Case 5: Empty group
+	prio, err = GetGroupBasePriority("")
+	require.NoError(t, err)
+	assert.Nil(t, prio)
+}
