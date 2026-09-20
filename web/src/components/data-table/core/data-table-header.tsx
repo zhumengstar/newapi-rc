@@ -61,7 +61,7 @@ export function DataTableHeader<TData>({
                 'relative',
                 getColumnClassName?.(header.column.id, 'header')
               )}
-              style={getHeaderSizeStyle(header, applyHeaderSize)}
+              style={getHeaderSizeStyle(table, header, applyHeaderSize)}
             >
               {renderHeaderContent(header)}
               {shouldRenderColumnResizer(table, header) && (
@@ -250,10 +250,27 @@ function shouldRenderColumnResizer<TData>(
 }
 
 function getHeaderSizeStyle<TData>(
+  table: TanstackTable<TData>,
   header: Header<TData, unknown>,
   applyHeaderSize: boolean | undefined
 ) {
-  if (!applyHeaderSize || isContentSizedColumn(header.column.id)) {
+  if (!applyHeaderSize) {
+    return undefined
+  }
+
+  if (
+    !table.options.enableColumnResizing &&
+    isContentSizedColumn(header.column.id)
+  ) {
+    return undefined
+  }
+
+  const columnSizing = table.getState().columnSizing || {}
+  if (
+    table.options.enableColumnResizing &&
+    header.column.id === 'name' &&
+    !columnSizing['name']
+  ) {
     return undefined
   }
 

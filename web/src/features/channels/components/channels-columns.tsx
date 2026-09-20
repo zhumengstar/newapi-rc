@@ -1737,9 +1737,9 @@ export function useChannelsColumns(
         // Four compact actions fit at desktop width without making the
         // column consume excess space; it remains resizable within a safe
         // range so the controls do not disappear.
-        size: 148,
-        minSize: 128,
-        maxSize: 180,
+        size: 156,
+        minSize: 140,
+        maxSize: 200,
         meta: { pinned: 'right' as const },
       },
     ],
