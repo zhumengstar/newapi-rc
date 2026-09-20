@@ -215,22 +215,15 @@ func GetGeneratedImageAsset(c *gin.Context) {
 		return
 	}
 
-	userId := c.GetInt("id")
-	role := c.GetInt("role")
-	if userId <= 0 {
-		c.Status(http.StatusUnauthorized)
-		return
-	}
-
-	if !model.CanAccessGeneratedImageAsset(userId, role, date, filename) {
+	path := service.GeneratedImageAssetFilePath(date, filename)
+	if _, err := os.Stat(path); err != nil {
 		c.Status(http.StatusNotFound)
 		return
 	}
-	path := service.GeneratedImageAssetFilePath(date, filename)
-	if _, err := os.Stat(path); err != nil {
-		c.Status(http.StatusGone)
-		return
-	}
+
+	// Set cache header for browser image caching
+	c.Header("Cache-Control", "public, max-age=86400")
+
 	if c.Query("download") == "1" || c.Query("download") == "true" {
 		c.FileAttachment(path, filename)
 		return
