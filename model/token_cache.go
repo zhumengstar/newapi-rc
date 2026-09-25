@@ -105,3 +105,40 @@ func cacheGetTokenByKey(key string) (*Token, error) {
 	token.Key = key
 	return &token, nil
 }
+
+func getTokenInvalidCacheKey(key string) string {
+	return fmt.Sprintf("token:invalid:%s", common.GenerateHMAC(key))
+}
+
+const tokenInvalidCacheTTL = 300 * time.Second
+
+// isTokenMarkedInvalid 检查 token 是否被标记为不存在/无效（负缓存），用于治理缓存穿透
+func isTokenMarkedInvalid(key string) bool {
+	if !common.RedisEnabled || key == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	val, err := common.RDB.Exists(ctx, getTokenInvalidCacheKey(key)).Result()
+	return err == nil && val > 0
+}
+
+// markTokenInvalid 在 Redis 中记录负缓存，TTL 5分钟，彻底阻止对无效/已删除 Token 的高频穿透打库
+func markTokenInvalid(key string) {
+	if !common.RedisEnabled || key == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_ = common.RDB.Set(ctx, getTokenInvalidCacheKey(key), "1", tokenInvalidCacheTTL).Err()
+}
+
+// clearTokenInvalid 在 Token 创建或更新时清除负缓存标记
+func clearTokenInvalid(key string) {
+	if !common.RedisEnabled || key == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_ = common.RDB.Del(ctx, getTokenInvalidCacheKey(key)).Err()
+}

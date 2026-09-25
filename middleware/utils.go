@@ -77,18 +77,14 @@ func recordMiddlewareAbortErrorLog(c *gin.Context, statusCode int, message strin
 		return
 	}
 
-	// 排除非模型调用的 401 扫描（如 GET /v1/models、GET /v1beta/models 纯列出模型）
-	if statusCode == http.StatusUnauthorized && c.Request != nil {
-		if c.Request.Method != http.MethodPost && !strings.Contains(path, "models/") {
-			return
-		}
+	// 401 Unauthorized（鉴权失败、未携带密钥或使用已被删除/无效的 Token）一律不写入数据库 logs 表
+	// 彻底杜绝外部客户端脚本死循环报错或扫描器向 PostgreSQL 灌入数万条垃圾流水
+	if statusCode == http.StatusUnauthorized {
+		return
 	}
 
 	userId := c.GetInt("id")
 	tokenName := c.GetString("token_name")
-	if tokenName == "" && statusCode == http.StatusUnauthorized {
-		tokenName = "Invalid Token"
-	}
 	tokenId := c.GetInt("token_id")
 	userGroup := c.GetString("group")
 	channelId := c.GetInt("channel_id")

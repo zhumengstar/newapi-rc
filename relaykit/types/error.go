@@ -413,6 +413,9 @@ func IsRecordErrorLog(e *NewAPIError) bool {
 	if e == nil {
 		return false
 	}
+	if e.StatusCode == http.StatusUnauthorized {
+		return false
+	}
 	if e.recordErrorLog == nil {
 		// default to true if not set
 		return true

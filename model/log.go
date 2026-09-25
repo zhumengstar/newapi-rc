@@ -325,6 +325,10 @@ func RecordTopupLog(userId int, content string, callerIp string, paymentMethod s
 
 func RecordErrorLog(c *gin.Context, userId int, channelId int, modelName string, tokenName string, content string, tokenId int, useTimeSeconds int,
 	isStream bool, group string, other *LogOther) {
+	// 401 鉴权失败或无效 Token 绝不入库，防止死循环垃圾流水打爆数据库 logs 表
+	if (userId <= 0 && tokenId <= 0) || strings.Contains(content, "status_code=401") || strings.Contains(content, "Invalid token") {
+		return
+	}
 	logger.LogInfo(c, fmt.Sprintf("record error log: userId=%d, channelId=%d, modelName=%s, tokenName=%s, content=%s", userId, channelId, modelName, tokenName, common.LocalLogPreview(content)))
 	username := c.GetString("username")
 	requestId := c.GetString(common.RequestIdKey)

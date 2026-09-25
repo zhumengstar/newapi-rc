@@ -338,7 +338,11 @@ func GetTokenById(id int) (*Token, error) {
 
 func GetTokenByKey(key string, fromDB bool) (token *Token, err error) {
 	if !fromDB && common.RedisEnabled {
-		// Try Redis first
+		// 1. 负缓存拦截：如果该 key 已被记录为无效/不存在，直接返回 ErrRecordNotFound，0 成本阻断，不击穿 DB
+		if isTokenMarkedInvalid(key) {
+			return nil, gorm.ErrRecordNotFound
+		}
+		// 2. 正常缓存读取
 		token, err := cacheGetTokenByKey(key)
 		if err == nil {
 			return token, nil
@@ -347,6 +351,10 @@ func GetTokenByKey(key string, fromDB bool) (token *Token, err error) {
 	}
 	token = &Token{}
 	if err = DB.Where(commonKeyCol+" = ?", key).First(token).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) && common.RedisEnabled {
+			// 3. 查库不存在（包括软删除），写入负缓存，拦截后续死循环请求，治理缓存穿透！
+			markTokenInvalid(key)
+		}
 		return nil, err
 	}
 	if common.RedisEnabled {
@@ -362,6 +370,9 @@ func GetTokenByKey(key string, fromDB bool) (token *Token, err error) {
 func (token *Token) Insert() error {
 	var err error
 	err = DB.Create(token).Error
+	if err == nil && common.RedisEnabled {
+		clearTokenInvalid(token.Key)
+	}
 	return err
 }
 
@@ -371,6 +382,9 @@ func (token *Token) Update() (err error) {
 	if cacheErr := invalidateTokenCacheForMutation(token.Key); cacheErr != nil {
 		common.SysLog("failed to invalidate token cache before update: " + cacheErr.Error())
 	}
+	if common.RedisEnabled {
+		clearTokenInvalid(token.Key)
+	}
 	return DB.Model(token).Select("name", "status", "expired_time", "remain_quota", "unlimited_quota",
 		"model_limits_enabled", "model_limits", "allow_ips", "group", "cross_group_retry", "auto_groups").Updates(token).Error
 }
@@ -378,6 +392,9 @@ func (token *Token) Update() (err error) {
 func (token *Token) SelectUpdate() (err error) {
 	if cacheErr := invalidateTokenCacheForMutation(token.Key); cacheErr != nil {
 		common.SysLog("failed to invalidate token cache before status update: " + cacheErr.Error())
+	}
+	if common.RedisEnabled {
+		clearTokenInvalid(token.Key)
 	}
 	// This can update zero values
 	return DB.Model(token).Select("accessed_time", "status").Updates(token).Error
@@ -387,7 +404,11 @@ func (token *Token) Delete() (err error) {
 	if cacheErr := invalidateTokenCacheForMutation(token.Key); cacheErr != nil {
 		common.SysLog("failed to invalidate token cache before delete: " + cacheErr.Error())
 	}
-	return DB.Delete(token).Error
+	err = DB.Delete(token).Error
+	if err == nil && common.RedisEnabled {
+		markTokenInvalid(token.Key)
+	}
+	return err
 }
 
 func (token *Token) IsModelLimitsEnabled() bool {
