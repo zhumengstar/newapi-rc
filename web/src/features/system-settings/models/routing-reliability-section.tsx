@@ -76,7 +76,11 @@ const createRoutingReliabilitySchema = (
 ) =>
   z
     .object({
-      RetryTimes: z.coerce.number().int().min(0).max(2),
+      RetryTimes: z.coerce
+        .number()
+        .int(t('Enter an integer'))
+        .min(0, t('Number of times to retry failed requests (0-10)'))
+        .max(10, t('Number of times to retry failed requests (0-10)')),
       ChannelDisableThreshold: numericString,
       AutomaticDisableChannelEnabled: z.boolean(),
       AutomaticEnableChannelEnabled: z.boolean(),
