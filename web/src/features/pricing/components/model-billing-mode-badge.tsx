@@ -38,7 +38,9 @@ export function ModelBillingModeBadge(props: ModelBillingModeBadgeProps) {
   const isCaption = props.appearance === 'caption'
   let variant: StatusVariant = 'purple'
 
-  if (isDynamicPricingModel(props.model)) {
+  if (labelKey === 'Custom Per-call') {
+    variant = 'success'
+  } else if (isDynamicPricingModel(props.model)) {
     variant = 'warning'
   } else if (labelKey === 'Token-based') {
     variant = 'info'

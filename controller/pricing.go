@@ -45,7 +45,7 @@ func filterPricingByUsableGroups(pricing []model.Pricing, usableGroup map[string
 	return filtered
 }
 
-func applyUserModelPriceRules(pricing []model.Pricing, userSetting dto.UserSetting) []model.Pricing {
+func applyUserModelPriceRules(pricing []model.Pricing, userSetting dto.UserSetting, userGroup ...string) []model.Pricing {
 	if len(pricing) == 0 || (len(userSetting.UserModelPriceRules) == 0 && len(userSetting.UserModelPrices) == 0) {
 		return pricing
 	}
@@ -71,6 +71,7 @@ func applyUserModelPriceRules(pricing []model.Pricing, userSetting dto.UserSetti
 		item.QuotaType = 1
 		item.ModelRatio = 1
 		item.CompletionRatio = 1
+		item.ModelPrice = price
 	}
 
 	for _, rule := range userSetting.UserModelPriceRules {
@@ -84,6 +85,21 @@ func applyUserModelPriceRules(pricing []model.Pricing, userSetting dto.UserSetti
 		}
 		for _, group := range result[indexByModel[modelName]].EnableGroup {
 			applyPrice(modelName, group, price)
+		}
+	}
+
+	targetGroup := ""
+	if len(userGroup) > 0 {
+		targetGroup = userGroup[0]
+	}
+	if targetGroup != "" {
+		for i := range result {
+			item := &result[i]
+			if len(item.UserGroupPrices) > 0 {
+				if p, ok := item.UserGroupPrices[targetGroup]; ok {
+					item.ModelPrice = p
+				}
+			}
 		}
 	}
 	return result
@@ -123,7 +139,7 @@ func GetPricing(c *gin.Context) {
 			usableGroup[group] = setting.GetUsableGroupDescription(group)
 		}
 	}
-	pricing = applyUserModelPriceRules(pricing, userSetting)
+	pricing = applyUserModelPriceRules(pricing, userSetting, group)
 
 	c.JSON(200, gin.H{
 		"success":            true,

@@ -25,10 +25,14 @@ export type BillingModeLabelKey =
   | 'Dynamic Pricing'
   | 'Token-based'
   | 'Task billing'
+  | 'Custom Per-call'
 
 export function getBillingModeLabelKey(
   model: PricingModel
 ): BillingModeLabelKey {
+  if (model.user_group_prices && Object.keys(model.user_group_prices).length > 0) {
+    return 'Custom Per-call'
+  }
   // Task-usage models badge as one business category; the metering unit
   // ($/1M token, $/credit, $/second) is already carried by the price line.
   if (hasTaskUsageSchema(model)) return 'Task billing'

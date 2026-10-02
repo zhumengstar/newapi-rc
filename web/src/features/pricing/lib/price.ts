@@ -224,8 +224,16 @@ export function formatFixedPrice(
     return '-'
   }
 
-  const ratio = getConfiguredGroupRatio(groupRatio, group)
-  let priceInUSD = (model.model_price || 0) * ratio
+  let priceInUSD: number
+  if (
+    model.user_group_prices &&
+    typeof model.user_group_prices[group] === 'number'
+  ) {
+    priceInUSD = model.user_group_prices[group]
+  } else {
+    const ratio = getConfiguredGroupRatio(groupRatio, group)
+    priceInUSD = (model.model_price || 0) * ratio
+  }
 
   priceInUSD = applyRechargeRate(
     priceInUSD,
@@ -256,9 +264,26 @@ export function formatRequestPrice(
     return '-'
   }
 
-  const displayGroupRatio = getDisplayGroupRatio(model, selectedGroup)
-
-  let priceInUSD = (model.model_price || 0) * displayGroupRatio
+  let priceInUSD: number
+  if (
+    selectedGroup &&
+    model.user_group_prices &&
+    typeof model.user_group_prices[selectedGroup] === 'number'
+  ) {
+    priceInUSD = model.user_group_prices[selectedGroup]
+  } else if (
+    model.user_group_prices &&
+    Object.keys(model.user_group_prices).length > 0
+  ) {
+    const userPrices = Object.values(model.user_group_prices).filter(
+      (p): p is number => typeof p === 'number' && p >= 0
+    )
+    priceInUSD =
+      userPrices.length > 0 ? Math.min(...userPrices) : model.model_price || 0
+  } else {
+    const displayGroupRatio = getDisplayGroupRatio(model, selectedGroup)
+    priceInUSD = (model.model_price || 0) * displayGroupRatio
+  }
 
   priceInUSD = applyRechargeRate(
     priceInUSD,
