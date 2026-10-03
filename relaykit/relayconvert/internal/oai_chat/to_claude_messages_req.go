@@ -293,9 +293,13 @@ func OpenAIChatRequestToClaudeMessages(c context.Context, info convmeta.Meta, te
 							kitutil.LogInfo("tool call function arguments is not a map[string]any: " + fmt.Sprintf("%v", toolCall.Function.Arguments))
 						}
 					}
+					callID := strings.TrimSpace(toolCall.ID)
+					if callID == "" || callID == "null" || callID == "<nil>" {
+						callID = "toolu_" + kitutil.GetUUID()[:24]
+					}
 					claudeMediaMessages = append(claudeMediaMessages, dto.ClaudeMediaMessage{
 						Type:  "tool_use",
-						Id:    toolCall.ID,
+						Id:    callID,
 						Name:  toolCall.Function.Name,
 						Input: inputObj,
 					})

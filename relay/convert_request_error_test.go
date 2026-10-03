@@ -40,6 +40,7 @@ func (s *imageReservation) GetPreConsumedQuota() int { return s.held }
 func (*imageReservation) Settle(int) error           { return nil }
 func (*imageReservation) Refund(*gin.Context)        {}
 func (*imageReservation) NeedsRefund() bool          { return false }
+func (*imageReservation) IsSettled() bool            { return false }
 
 func TestImageRequestReservesFinalQuantityBeforeUpstream(t *testing.T) {
 	service.InitHttpClient()

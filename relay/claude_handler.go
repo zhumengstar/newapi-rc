@@ -120,6 +120,11 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 			}
 		}
 
+		// 安全防护：确保发送给 Claude/反重力渠道的所有 tool_use 块均携带合法非空 id，避免上游 400 Field required
+		if repaired, repErr := relaycommon.EnsureClaudeToolIDs(jsonData); repErr == nil && len(repaired) > 0 {
+			jsonData = repaired
+		}
+
 		logger.LogDebug(c, "requestBody: %s", jsonData)
 		body, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
 		if err != nil {

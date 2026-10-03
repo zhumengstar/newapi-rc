@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	common2 "github.com/QuantumNous/new-api/common"
@@ -2523,3 +2524,63 @@ func TestReasoningEffortOverrideIsAuditedWithoutDebugMode(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"set reasoning.effort = max"}, info.ParamOverrideAudit)
 }
+
+func TestEnsureToolIDs(t *testing.T) {
+	// 测试含有缺少 id 的 tool_use block 的 Claude 请求
+	inputJSON := `{
+		"model": "claude-opus-4-6-c",
+		"messages": [
+			{
+				"role": "user",
+				"content": "hello"
+			},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "text", "text": "let me search"},
+					{"type": "tool_use", "name": "searchMemory", "id": "call_existing_123", "input": {"q": "test"}},
+					{"type": "tool_use", "name": "call_chatcmpl-f0436cfa0f25c73305e4c75c_0", "input": {}}
+				]
+			}
+		]
+	}`
+
+	info := &RelayInfo{
+		RelayFormat: types.RelayFormatClaude,
+		ChannelMeta: &ChannelMeta{ParamOverride: map[string]any{
+			"operations": []any{
+				map[string]any{
+					"mode": "ensure_tool_ids",
+					"path": "messages",
+				},
+			},
+		}},
+	}
+
+	outBytes, err := ApplyParamOverrideWithRelayInfo([]byte(inputJSON), info)
+	require.NoError(t, err)
+
+	// 验证已有的 id 没有被覆盖
+	assert.True(t, strings.Contains(string(outBytes), `"id":"call_existing_123"`))
+
+	// 验证缺失 id 的 tool_use 已被自动注入合法的 toolu_ 前缀 id
+	var resultObj map[string]any
+	err = json.Unmarshal(outBytes, &resultObj)
+	require.NoError(t, err)
+
+	msgs := resultObj["messages"].([]any)
+	asst := msgs[1].(map[string]any)
+	contents := asst["content"].([]any)
+	item2 := contents[2].(map[string]any)
+
+	id2, ok := item2["id"].(string)
+	assert.True(t, ok)
+	assert.True(t, strings.HasPrefix(id2, "toolu_"), "expected toolu_ prefix but got: "+id2)
+	assert.True(t, len(id2) > 10)
+
+	// 验证 EnsureClaudeToolIDs 辅助函数
+	directRepaired, err := EnsureClaudeToolIDs([]byte(inputJSON))
+	require.NoError(t, err)
+	assert.True(t, strings.Contains(string(directRepaired), "toolu_"))
+}
+

@@ -64,7 +64,7 @@ type ConditionOperation struct {
 
 type ParamOperation struct {
 	Path       string               `json:"path"`
-	Mode       string               `json:"mode"` // delete, set, move, copy, prepend, append, trim_prefix, trim_suffix, ensure_prefix, ensure_suffix, trim_space, to_lower, to_upper, replace, regex_replace, return_error, prune_objects, set_header, delete_header, copy_header, move_header, pass_headers, sync_fields
+	Mode       string               `json:"mode"` // delete, set, move, copy, prepend, append, trim_prefix, trim_suffix, ensure_prefix, ensure_suffix, trim_space, to_lower, to_upper, replace, regex_replace, return_error, prune_objects, ensure_tool_ids, set_header, delete_header, copy_header, move_header, pass_headers, sync_fields
 	Value      any                  `json:"value"`
 	KeepOrigin bool                 `json:"keep_origin"`
 	From       string               `json:"from,omitempty"`
@@ -1011,6 +1011,14 @@ func applyOperations(jsonData []byte, operations []ParamOperation, conditionCont
 					break
 				}
 			}
+		case "ensure_tool_ids", "fix_tool_ids":
+			for _, path := range opPaths {
+				result, err = ensureToolIDs(result, path)
+				if err != nil {
+					break
+				}
+				auditRecorder.recordOperation("ensure_tool_ids", path, "", "", nil)
+			}
 		case "set_header":
 			err = setHeaderOverrideInContext(context, op.Path, op.Value, op.KeepOrigin)
 			if err == nil {
@@ -1683,7 +1691,7 @@ func copyValue(data []byte, fromPath, toPath string) ([]byte, error) {
 
 func isPathBasedOperation(mode string) bool {
 	switch mode {
-	case "delete", "set", "prepend", "append", "trim_prefix", "trim_suffix", "ensure_prefix", "ensure_suffix", "trim_space", "to_lower", "to_upper", "replace", "regex_replace", "prune_objects":
+	case "delete", "set", "prepend", "append", "trim_prefix", "trim_suffix", "ensure_prefix", "ensure_suffix", "trim_space", "to_lower", "to_upper", "replace", "regex_replace", "prune_objects", "ensure_tool_ids", "fix_tool_ids":
 		return true
 	default:
 		return false
@@ -2227,4 +2235,81 @@ func BuildParamOverrideContext(info *RelayInfo) map[string]any {
 
 	ctx["is_channel_test"] = info.IsChannelTest
 	return ctx
+}
+
+func EnsureClaudeToolIDs(data []byte) ([]byte, error) {
+	return ensureToolIDs(data, "messages")
+}
+
+func ensureToolIDs(data []byte, path string) ([]byte, error) {
+	if strings.TrimSpace(path) == "" {
+		path = "messages"
+	}
+	target := gjson.GetBytes(data, path)
+	if !target.Exists() {
+		return data, nil
+	}
+	var targetNode any
+	if err := common.UnmarshalJsonStr(target.Raw, &targetNode); err != nil {
+		targetNode = target.Value()
+	}
+
+	repaired, modified := repairToolIDsInNode(targetNode)
+	if !modified {
+		return data, nil
+	}
+	repairedBytes, err := common.Marshal(repaired)
+	if err != nil {
+		return nil, err
+	}
+	return sjson.SetRawBytes(data, path, repairedBytes)
+}
+
+func repairToolIDsInNode(node any) (any, bool) {
+	modified := false
+	switch val := node.(type) {
+	case []any:
+		for i, item := range val {
+			repaired, m := repairToolIDsInNode(item)
+			if m {
+				val[i] = repaired
+				modified = true
+			}
+		}
+		return val, modified
+	case map[string]any:
+		// 1. 检查 Claude 协议的 tool_use block
+		if blockType, ok := val["type"].(string); ok && strings.EqualFold(strings.TrimSpace(blockType), "tool_use") {
+			curID := strings.TrimSpace(fmt.Sprintf("%v", val["id"]))
+			if val["id"] == nil || curID == "" || curID == "<nil>" || curID == "null" {
+				val["id"] = "toolu_" + common.GetUUID()[:24]
+				modified = true
+			}
+		}
+		// 2. 检查 OpenAI 协议的 tool_calls 列表
+		if rawCalls, ok := val["tool_calls"].([]any); ok {
+			for _, rc := range rawCalls {
+				if callMap, ok := rc.(map[string]any); ok {
+					curID := strings.TrimSpace(fmt.Sprintf("%v", callMap["id"]))
+					if callMap["id"] == nil || curID == "" || curID == "<nil>" || curID == "null" {
+						callMap["id"] = "call_" + common.GetUUID()[:24]
+						modified = true
+					}
+				}
+			}
+		}
+		// 3. 递归遍历 content / parts / messages 等常见字段
+		for k, child := range val {
+			if k == "content" || k == "parts" || k == "messages" {
+				repaired, m := repairToolIDsInNode(child)
+				if m {
+					val[k] = repaired
+					modified = true
+				}
+			}
+		}
+		return val, modified
+	default:
+		return node, false
+	}
 }
