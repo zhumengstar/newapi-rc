@@ -427,6 +427,9 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 	if strings.Contains(adminRejectReason, "gemini_block_reason=") {
 		extraContent = append(extraContent, "触发安全审查拦截，仅结算输入 Token")
 	}
+	if common.GetContextKeyBool(ctx, "context_pruned") || (ctx != nil && ctx.GetBool("context_pruned")) {
+		extraContent = append(extraContent, "历史上下文超限，已自动滑动裁剪早期对话")
+	}
 	summary := calculateTextQuotaSummary(ctx, relayInfo, billingUsage)
 
 	var tieredResult *billingexpr.TieredResult

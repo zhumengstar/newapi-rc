@@ -88,8 +88,16 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		}
 	}
 
+	// 使用 ConvertGeminiRequest 转换请求格式（包含 ResponseSchema 清洗与历史对话滑动裁剪）
+	convertedRequest, err := adaptor.ConvertGeminiRequest(c, info, request)
+	if err != nil {
+		return newConvertRequestFailedError(c, info, err)
+	}
+	relaycommon.AppendRequestConversionFromRequest(info, convertedRequest)
+
 	var requestBody io.Reader
-	if model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled {
+	isPruned := common.GetContextKeyBool(c, "context_pruned") || (c != nil && c.GetBool("context_pruned"))
+	if !isPruned && (model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled) {
 		storage, err := common.GetBodyStorage(c)
 		if err != nil {
 			return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
@@ -108,12 +116,6 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		defer closer.Close()
 		requestBody = body
 	} else {
-		// 使用 ConvertGeminiRequest 转换请求格式
-		convertedRequest, err := adaptor.ConvertGeminiRequest(c, info, request)
-		if err != nil {
-			return newConvertRequestFailedError(c, info, err)
-		}
-		relaycommon.AppendRequestConversionFromRequest(info, convertedRequest)
 		jsonData, err := common.Marshal(convertedRequest)
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())

@@ -58,6 +58,7 @@ func (a *Adaptor) ConvertGeminiRequest(c *gin.Context, info *relaycommon.RelayIn
 	if request.GenerationConfig.ResponseSchema != nil {
 		request.GenerationConfig.ResponseSchema = relayconvert.CleanGeminiSchema(request.GenerationConfig.ResponseSchema)
 	}
+	AutoPruneGeminiChatRequest(c, info, request)
 	return request, nil
 }
 
@@ -70,6 +71,7 @@ func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, info *relaycommon.RelayIn
 	if !ok {
 		return nil, fmt.Errorf("expected Gemini generateContent request, got %T", result.Value)
 	}
+	AutoPruneGeminiChatRequest(c, info, geminiRequest)
 	return geminiRequest, nil
 }
 
@@ -279,6 +281,9 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 	if err != nil {
 		return nil, err
 	}
+	if geminiReq, ok := result.Value.(*dto.GeminiChatRequest); ok {
+		AutoPruneGeminiChatRequest(c, info, geminiReq)
+	}
 	return result.Value, nil
 }
 
@@ -339,6 +344,7 @@ func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommo
 	if !ok {
 		return nil, fmt.Errorf("expected Gemini generateContent request, got %T", result.Value)
 	}
+	AutoPruneGeminiChatRequest(c, info, geminiRequest)
 	return geminiRequest, nil
 }
 
