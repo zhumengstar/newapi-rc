@@ -2659,6 +2659,30 @@ func TestEnsureGeminiSchemaCleanliness(t *testing.T) {
 	assert.NotContains(t, cleanedStr, `"empty_only":{"enum"`)
 	assert.NotContains(t, cleanedStr, "availableArgs")
 	assert.NotContains(t, cleanedStr, "validTargetCharacterIds")
+
+	// 测试 2: contents 包含 thought: true 无 text，顶层 id，损坏 inlineData
+	partJSON := `{
+		"contents": [
+			{
+				"role": "model",
+				"parts": [
+					{"thought": true, "id": "part-id-123"},
+					{"inlineData": {"mimeType": "image/png"}}
+				]
+			},
+			{
+				"role": "user",
+				"parts": []
+			}
+		]
+	}`
+	cleanedPartBytes, err := EnsureGeminiSchemaCleanliness([]byte(partJSON))
+	require.NoError(t, err)
+	cleanedPartStr := string(cleanedPartBytes)
+	assert.Contains(t, cleanedPartStr, `"thought":true`)
+	assert.Contains(t, cleanedPartStr, `"text":" "`)
+	assert.NotContains(t, cleanedPartStr, `"id":"part-id-123"`)
+	assert.NotContains(t, cleanedPartStr, `"inlineData"`)
 }
 
 func TestApplyParamOverrideRecursiveDelete(t *testing.T) {

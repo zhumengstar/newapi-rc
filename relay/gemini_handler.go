@@ -278,6 +278,44 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 				}
 			}
 
+			// 只要出现 Gemini Part 数据未初始化或非标准 Part 顶层字段报错，则深度自愈并立即重试！
+			if !c.GetBool("gemini_part_data_retried") && relaycommon.IsGeminiPartDataError(newAPIError.Error()) {
+				c.Set("gemini_part_data_retried", true)
+				rawBytes, _ := relaycommon.GetPrunedRequestBody(c, info)
+				if len(rawBytes) == 0 {
+					rawBytes, _ = common.Marshal(request)
+				}
+				cleanedBytes, cErr := relaycommon.EnsureGeminiSchemaCleanliness(rawBytes)
+				if cErr == nil && len(cleanedBytes) > 0 {
+					logger.LogWarn(c, fmt.Sprintf("收到 Gemini 上游 Part 数据格式报错 (%s)，已自动深度自愈并填充有效 data 字段，正在立即重试请求...", newAPIError.Error()))
+					if len(info.ParamOverride) > 0 {
+						cleanedBytes, _ = relaycommon.ApplyParamOverrideWithRelayInfo(cleanedBytes, info)
+					}
+					_ = relaycommon.UpdatePrunedRequestBody(c, info)
+					newBody, closer, bErr := relaycommon.NewOutboundJSONBody(cleanedBytes)
+					if bErr == nil {
+						defer closer.Close()
+						retryResp, rErr := adaptor.DoRequest(c, info, newBody)
+						if rErr == nil && retryResp != nil {
+							retryHttpResp := retryResp.(*http.Response)
+							if retryHttpResp.StatusCode == http.StatusOK {
+								logger.LogInfo(c, "Gemini Part 数据深度自愈重试成功，已拿到上游 200 OK 响应")
+								usage, openaiErr := adaptor.DoResponse(c, retryHttpResp, info)
+								if openaiErr != nil {
+									service.ResetStatusCode(openaiErr, statusCodeMappingStr)
+									service.SettleInterruptedRequestIfNeeded(c, info, usage, openaiErr)
+									return openaiErr
+								}
+								service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
+								return nil
+							}
+							newAPIError = service.RelayErrorHandler(c.Request.Context(), retryHttpResp, false)
+							service.ResetStatusCode(newAPIError, statusCodeMappingStr)
+						}
+					}
+				}
+			}
+
 			return newAPIError
 		}
 	}
