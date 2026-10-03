@@ -71,6 +71,7 @@ type ParamOperation struct {
 	To         string               `json:"to,omitempty"`
 	Conditions []ConditionOperation `json:"conditions,omitempty"` // 条件列表
 	Logic      string               `json:"logic,omitempty"`      // AND, OR (默认OR)
+	Recursive  bool                 `json:"recursive,omitempty"`  // 支持递归匹配/删除
 }
 
 type ParamOverrideReturnError struct {
@@ -602,6 +603,9 @@ func tryParseOperations(paramOverride map[string]any) ([]ParamOperation, bool) {
 		if keepOrigin, ok := opMap["keep_origin"].(bool); ok {
 			operation.KeepOrigin = keepOrigin
 		}
+		if recursive, ok := opMap["recursive"].(bool); ok {
+			operation.Recursive = recursive
+		}
 		if from, ok := opMap["from"].(string); ok {
 			operation.From = from
 		}
@@ -863,17 +867,33 @@ func applyOperations(jsonData []byte, operations []ParamOperation, conditionCont
 		opPath := processNegativeIndex(result, op.Path)
 		var opPaths []string
 		if isPathBasedOperation(op.Mode) {
-			opPaths, err = resolveOperationPaths(result, opPath)
-			if err != nil {
-				return nil, err
-			}
-			if len(opPaths) == 0 {
-				continue
+			if op.Mode == "delete" && (op.Recursive || strings.HasPrefix(op.Path, "**.") || strings.HasPrefix(op.Path, "**")) {
+				opPaths = []string{op.Path}
+			} else {
+				opPaths, err = resolveOperationPaths(result, opPath)
+				if err != nil {
+					return nil, err
+				}
+				if len(opPaths) == 0 {
+					continue
+				}
 			}
 		}
 
 		switch op.Mode {
 		case "delete":
+			if op.Recursive || strings.HasPrefix(op.Path, "**.") || strings.HasPrefix(op.Path, "**") {
+				targetKey := strings.TrimPrefix(op.Path, "**.")
+				targetKey = strings.TrimPrefix(targetKey, "**")
+				targetKey = strings.TrimSpace(targetKey)
+				if targetKey != "" {
+					result, err = deleteKeyRecursively(result, targetKey)
+					if err == nil {
+						auditRecorder.recordOperation("delete", op.Path, "", "", nil)
+					}
+					break
+				}
+			}
 			for _, path := range opPaths {
 				result, err = deleteValue(result, path)
 				if err != nil {
@@ -1775,6 +1795,51 @@ func deleteValue(data []byte, path string) ([]byte, error) {
 	return sjson.DeleteBytes(data, path)
 }
 
+func deleteKeyRecursively(data []byte, targetKey string) ([]byte, error) {
+	if len(data) == 0 || targetKey == "" {
+		return data, nil
+	}
+	var root any
+	if err := common.Unmarshal(data, &root); err != nil {
+		return data, err
+	}
+	cleaned, modified := removeKeyInJSONNode(root, targetKey)
+	if !modified {
+		return data, nil
+	}
+	return common.Marshal(cleaned)
+}
+
+func removeKeyInJSONNode(node any, targetKey string) (any, bool) {
+	modified := false
+	switch val := node.(type) {
+	case map[string]any:
+		if _, exists := val[targetKey]; exists {
+			delete(val, targetKey)
+			modified = true
+		}
+		for k, child := range val {
+			cleaned, m := removeKeyInJSONNode(child, targetKey)
+			if m {
+				val[k] = cleaned
+				modified = true
+			}
+		}
+		return val, modified
+	case []any:
+		for i, item := range val {
+			cleaned, m := removeKeyInJSONNode(item, targetKey)
+			if m {
+				val[i] = cleaned
+				modified = true
+			}
+		}
+		return val, modified
+	default:
+		return node, false
+	}
+}
+
 func modifyValue(data []byte, path string, value any, keepOrigin, isPrepend bool) ([]byte, error) {
 	current := gjson.GetBytes(data, path)
 	switch {
@@ -2390,6 +2455,15 @@ func cleanEmptyEnumsInJSONNode(node any) (any, bool) {
 		}
 		return val, modified
 	case map[string]any:
+		// 剔除 Gemini 不支持的已知非标准业务扩展字段，避免上游 400 Unknown name ...: Cannot find field
+		unsupportedKeys := []string{"availableArgs", "validTargetCharacterIds"}
+		for _, key := range unsupportedKeys {
+			if _, exists := val[key]; exists {
+				delete(val, key)
+				modified = true
+			}
+		}
+
 		if rawEnum, hasEnum := val["enum"]; hasEnum && rawEnum != nil {
 			if enumSlice, ok := rawEnum.([]any); ok {
 				newSlice := make([]any, 0, len(enumSlice))

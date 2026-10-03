@@ -2637,6 +2637,16 @@ func TestEnsureGeminiSchemaCleanliness(t *testing.T) {
 					"empty_only": {
 						"type": "string",
 						"enum": ["", "  "]
+					},
+					"deep_nested": {
+						"type": "object",
+						"properties": {
+							"val": {
+								"type": "string",
+								"availableArgs": ["arg1", "arg2"],
+								"validTargetCharacterIds": [1, 2, 3]
+							}
+						}
 					}
 				}
 			}
@@ -2647,6 +2657,54 @@ func TestEnsureGeminiSchemaCleanliness(t *testing.T) {
 	cleanedStr := string(cleanedBytes)
 	assert.Contains(t, cleanedStr, `"enum":["A","B","C"]`)
 	assert.NotContains(t, cleanedStr, `"empty_only":{"enum"`)
+	assert.NotContains(t, cleanedStr, "availableArgs")
+	assert.NotContains(t, cleanedStr, "validTargetCharacterIds")
+}
+
+func TestApplyParamOverrideRecursiveDelete(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-2.5-flash",
+		"generationConfig": {
+			"responseSchema": {
+				"properties": [
+					{
+						"sub": {
+							"properties": [
+								{
+									"value": {
+										"type": "string",
+										"availableArgs": ["foo"],
+										"validTargetCharacterIds": ["id1"]
+									}
+								}
+							]
+						}
+					}
+				]
+			}
+		}
+	}`
+
+	override := map[string]any{
+		"operations": []any{
+			map[string]any{
+				"mode":      "delete",
+				"path":      "availableArgs",
+				"recursive": true,
+			},
+			map[string]any{
+				"mode": "delete",
+				"path": "**.validTargetCharacterIds",
+			},
+		},
+	}
+
+	result, err := ApplyParamOverride([]byte(inputJSON), override, nil)
+	require.NoError(t, err)
+	resStr := string(result)
+	assert.NotContains(t, resStr, "availableArgs")
+	assert.NotContains(t, resStr, "validTargetCharacterIds")
+	assert.Contains(t, resStr, `"type":"string"`)
 }
 
 func TestEnsureClaudeRequestCleanliness(t *testing.T) {
