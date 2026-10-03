@@ -76,7 +76,7 @@ func ValidateSSRFProtectedFetchURL(urlStr string) error {
 // time.Duration without overflowing (~292 years).
 const maxTimeoutSeconds = int(math.MaxInt64 / int64(time.Second))
 
-func newRelayHTTPTransport() *http.Transport {
+func newRelayHTTPTransport(isStream bool) *http.Transport {
 	var transport *http.Transport
 	if defaultTransport, ok := http.DefaultTransport.(*http.Transport); ok && defaultTransport != nil {
 		transport = defaultTransport.Clone()
@@ -96,23 +96,19 @@ func newRelayHTTPTransport() *http.Transport {
 	transport.MaxIdleConns = common.RelayMaxIdleConns
 	transport.MaxIdleConnsPerHost = common.RelayMaxIdleConnsPerHost
 	transport.IdleConnTimeout = time.Duration(common.RelayIdleConnTimeout) * time.Second
-	// Bound the wait for upstream response headers. Without it, an upstream that
-	// accepts the connection but never responds (and never sends FIN/RST) parks the
-	// goroutine forever, and every buffer that request owns -- the raw body read by
-	// io.ReadAll, the decoded messages, and the re-marshalled upstream body -- stays
-	// reachable for the lifetime of the process.
-	//
-	// This only covers the wait for the headers; streaming after the headers arrive
-	// is not affected. Set RELAY_RESPONSE_HEADER_TIMEOUT=0 to restore the old
-	// unbounded behaviour.
-	if seconds := common.RelayResponseHeaderTimeout; seconds > 0 {
-		// Clamp before converting: seconds beyond maxTimeoutSeconds overflow
-		// time.Duration and can wrap into a tiny positive timeout, which would cut
-		// every relay request instead of only the stuck ones.
-		if seconds > maxTimeoutSeconds {
-			seconds = maxTimeoutSeconds
+	// Bound the wait for upstream response headers.
+	// Only apply ResponseHeaderTimeout for streaming requests (isStream = true).
+	// For non-streaming requests, large reasoning models or large context requests
+	// take minutes before sending headers/body, so no header timeout should be set.
+	if isStream {
+		if seconds := common.RelayResponseHeaderTimeout; seconds > 0 {
+			if seconds > maxTimeoutSeconds {
+				seconds = maxTimeoutSeconds
+			}
+			transport.ResponseHeaderTimeout = time.Duration(seconds) * time.Second
 		}
-		transport.ResponseHeaderTimeout = time.Duration(seconds) * time.Second
+	} else {
+		transport.ResponseHeaderTimeout = 0
 	}
 	transport.ForceAttemptHTTP2 = true
 	if common.TLSInsecureSkipVerify {
@@ -310,16 +306,16 @@ func configureProxyTransport(transport *http.Transport, proxyURL *url.URL) error
 	}
 }
 
-func newTransportFactory(proxyURL *url.URL, tlsConfig *tls.Config) (func() *http.Transport, error) {
+func newTransportFactory(policy HTTPTransportPolicy, proxyURL *url.URL, tlsConfig *tls.Config) (func() *http.Transport, error) {
 	// Validate proxy configuration once before creating shard transports.
 	if proxyURL != nil {
-		probe := newRelayHTTPTransport()
+		probe := newRelayHTTPTransport(policy.IsStream)
 		if err := configureProxyTransport(probe, proxyURL); err != nil {
 			return nil, err
 		}
 	}
 	return func() *http.Transport {
-		transport := newRelayHTTPTransport()
+		transport := newRelayHTTPTransport(policy.IsStream)
 		if proxyURL != nil {
 			_ = configureProxyTransport(transport, proxyURL)
 		} else {
@@ -333,7 +329,7 @@ func newTransportFactory(proxyURL *url.URL, tlsConfig *tls.Config) (func() *http
 }
 
 func newHTTPClientFromPolicy(policy HTTPTransportPolicy, proxyURL *url.URL, tlsConfig *tls.Config) (*http.Client, error) {
-	factory, err := newTransportFactory(proxyURL, tlsConfig)
+	factory, err := newTransportFactory(policy, proxyURL, tlsConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -361,7 +357,7 @@ func newDirectHTTPClient(policy HTTPTransportPolicy, tlsConfig *tls.Config) *htt
 	client, err := newHTTPClientFromPolicy(policy, nil, tlsConfig)
 	if err != nil {
 		// Direct clients cannot fail proxy configuration.
-		transport := newRelayHTTPTransport()
+		transport := newRelayHTTPTransport(policy.IsStream)
 		applyHTTPTransportPolicy(transport, policy)
 		return newRelayHTTPClient(transport)
 	}
@@ -384,10 +380,15 @@ func GetHttpClientWithProxy(rawProxyURL string) (*http.Client, error) {
 }
 
 // GetHttpClientWithProxySettings returns a cached HTTP client for the proxy URL and
-// channel transport settings. Default auto + 1 shard shares the same client pool as
-// GetHttpClientWithProxy / GetHttpClient for the empty-proxy case.
+// channel transport settings (stream=true by default).
 func GetHttpClientWithProxySettings(rawProxyURL string, settings dto.ChannelSettings) (*http.Client, error) {
-	policy := NormalizeHTTPTransportPolicy(settings)
+	return GetHttpClientWithProxySettingsAndStream(rawProxyURL, settings, true)
+}
+
+// GetHttpClientWithProxySettingsAndStream returns a cached HTTP client for the proxy URL,
+// channel transport settings, and stream requirement.
+func GetHttpClientWithProxySettingsAndStream(rawProxyURL string, settings dto.ChannelSettings, isStream bool) (*http.Client, error) {
+	policy := NormalizeHTTPTransportPolicyWithStream(settings, isStream)
 	trimmedProxyURL := strings.TrimSpace(rawProxyURL)
 
 	if trimmedProxyURL == "" {

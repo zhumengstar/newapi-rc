@@ -61,7 +61,7 @@ func newAwsInvokeError(requestContext context.Context, err error, operation stri
 }
 
 func newAwsClient(c *gin.Context, info *relaycommon.RelayInfo) (*bedrockruntime.Client, error) {
-	httpClient, err := service.GetHttpClientWithProxySettings(info.ChannelSetting.Proxy, info.ChannelSetting)
+	httpClient, err := service.GetHttpClientWithProxySettingsAndStream(info.ChannelSetting.Proxy, info.ChannelSetting, info.IsStream)
 	if err != nil {
 		return nil, fmt.Errorf("new proxy http client failed: %w", err)
 	}

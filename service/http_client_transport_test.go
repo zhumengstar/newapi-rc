@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -483,9 +484,34 @@ func TestCloseIdleConnectionsRedialsHTTP2(t *testing.T) {
 
 func TestNormalizeHTTPTransportPolicyClampsWithoutPanic(t *testing.T) {
 	assert.Equal(t, defaultHTTPTransportPolicy(), NormalizeHTTPTransportPolicy(dto.ChannelSettings{}))
-	assert.Equal(t, HTTPTransportPolicy{Protocol: dto.HTTPProtocolAuto, Shards: 1}, NormalizeHTTPTransportPolicy(dto.ChannelSettings{HTTPProtocol: "AUTO"}))
-	assert.Equal(t, HTTPTransportPolicy{Protocol: dto.HTTPProtocolHTTP1, Shards: 1}, NormalizeHTTPTransportPolicy(dto.ChannelSettings{HTTPProtocol: "HTTP1", HTTP2ConnectionShards: 8}))
-	assert.Equal(t, HTTPTransportPolicy{Protocol: dto.HTTPProtocolAuto, Shards: 1}, NormalizeHTTPTransportPolicy(dto.ChannelSettings{HTTPProtocol: "http3"}))
-	assert.Equal(t, HTTPTransportPolicy{Protocol: dto.HTTPProtocolAuto, Shards: 1}, NormalizeHTTPTransportPolicy(dto.ChannelSettings{HTTP2ConnectionShards: -3}))
-	assert.Equal(t, HTTPTransportPolicy{Protocol: dto.HTTPProtocolAuto, Shards: 8}, NormalizeHTTPTransportPolicy(dto.ChannelSettings{HTTP2ConnectionShards: 99}))
+	assert.Equal(t, HTTPTransportPolicy{Protocol: dto.HTTPProtocolAuto, Shards: 1, IsStream: true}, NormalizeHTTPTransportPolicy(dto.ChannelSettings{HTTPProtocol: "AUTO"}))
+	assert.Equal(t, HTTPTransportPolicy{Protocol: dto.HTTPProtocolHTTP1, Shards: 1, IsStream: true}, NormalizeHTTPTransportPolicy(dto.ChannelSettings{HTTPProtocol: "HTTP1", HTTP2ConnectionShards: 8}))
+	assert.Equal(t, HTTPTransportPolicy{Protocol: dto.HTTPProtocolAuto, Shards: 1, IsStream: true}, NormalizeHTTPTransportPolicy(dto.ChannelSettings{HTTPProtocol: "http3"}))
+	assert.Equal(t, HTTPTransportPolicy{Protocol: dto.HTTPProtocolAuto, Shards: 1, IsStream: true}, NormalizeHTTPTransportPolicy(dto.ChannelSettings{HTTP2ConnectionShards: -3}))
+	assert.Equal(t, HTTPTransportPolicy{Protocol: dto.HTTPProtocolAuto, Shards: 8, IsStream: true}, NormalizeHTTPTransportPolicy(dto.ChannelSettings{HTTP2ConnectionShards: 99}))
+
+	// Non-stream policy
+	nonStream := NormalizeHTTPTransportPolicyWithStream(dto.ChannelSettings{}, false)
+	assert.Equal(t, HTTPTransportPolicy{Protocol: dto.HTTPProtocolAuto, Shards: 1, IsStream: false}, nonStream)
+}
+
+func TestStreamVsNonStreamResponseHeaderTimeout(t *testing.T) {
+	prevTimeout := common.RelayResponseHeaderTimeout
+	common.RelayResponseHeaderTimeout = 120
+	defer func() {
+		common.RelayResponseHeaderTimeout = prevTimeout
+	}()
+
+	streamTransport := newRelayHTTPTransport(true)
+	assert.Equal(t, 120*time.Second, streamTransport.ResponseHeaderTimeout)
+
+	nonStreamTransport := newRelayHTTPTransport(false)
+	assert.Equal(t, time.Duration(0), nonStreamTransport.ResponseHeaderTimeout)
+
+	// Stream and non-stream clients get distinct cached instances
+	streamClient, err := GetHttpClientWithProxySettingsAndStream("", dto.ChannelSettings{}, true)
+	require.NoError(t, err)
+	nonStreamClient, err := GetHttpClientWithProxySettingsAndStream("", dto.ChannelSettings{}, false)
+	require.NoError(t, err)
+	assert.NotSame(t, streamClient, nonStreamClient)
 }

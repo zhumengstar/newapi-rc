@@ -15,6 +15,7 @@ import (
 type HTTPTransportPolicy struct {
 	Protocol string // dto.HTTPProtocolAuto or dto.HTTPProtocolHTTP1
 	Shards   int    // 1..dto.MaxHTTP2ConnectionShards
+	IsStream bool   // Whether the request is streaming; non-stream requests have no ResponseHeaderTimeout
 }
 
 var httpTransportPolicyWarnings sync.Map
@@ -23,13 +24,20 @@ func defaultHTTPTransportPolicy() HTTPTransportPolicy {
 	return HTTPTransportPolicy{
 		Protocol: dto.HTTPProtocolAuto,
 		Shards:   1,
+		IsStream: true,
 	}
 }
 
-// NormalizeHTTPTransportPolicy converts channel settings into a safe runtime policy.
+// NormalizeHTTPTransportPolicy converts channel settings into a safe runtime policy with IsStream defaulting to true.
 // Invalid stored values never panic; they clamp to defaults and warn once per bad value.
 func NormalizeHTTPTransportPolicy(settings dto.ChannelSettings) HTTPTransportPolicy {
+	return NormalizeHTTPTransportPolicyWithStream(settings, true)
+}
+
+// NormalizeHTTPTransportPolicyWithStream converts channel settings and stream flag into a safe runtime policy.
+func NormalizeHTTPTransportPolicyWithStream(settings dto.ChannelSettings, isStream bool) HTTPTransportPolicy {
 	policy := defaultHTTPTransportPolicy()
+	policy.IsStream = isStream
 
 	protocol := strings.ToLower(strings.TrimSpace(settings.HTTPProtocol))
 	switch protocol {
@@ -83,7 +91,7 @@ func warnHTTPTransportPolicyOnce(field, value string) {
 }
 
 func (p HTTPTransportPolicy) cacheKeyPart() string {
-	return fmt.Sprintf("%s|%d", p.Protocol, p.Shards)
+	return fmt.Sprintf("%s|%d|stream:%t", p.Protocol, p.Shards, p.IsStream)
 }
 
 func (p HTTPTransportPolicy) String() string {

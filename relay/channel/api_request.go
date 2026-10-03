@@ -488,7 +488,7 @@ func keepUpstreamRedirectResponse(_ *http.Request, _ []*http.Request) error {
 }
 
 func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http.Response, error) {
-	client, err := service.GetHttpClientWithProxySettings(info.ChannelSetting.Proxy, info.ChannelSetting)
+	client, err := service.GetHttpClientWithProxySettingsAndStream(info.ChannelSetting.Proxy, info.ChannelSetting, info.IsStream)
 	if err != nil {
 		return nil, fmt.Errorf("new proxy http client failed: %w", err)
 	}
@@ -499,12 +499,13 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 	relayClient := *client
 	relayClient.CheckRedirect = keepUpstreamRedirectResponse
 	if common2.DebugEnabled && req != nil && req.URL != nil {
-		policy := service.NormalizeHTTPTransportPolicy(info.ChannelSetting)
+		policy := service.NormalizeHTTPTransportPolicyWithStream(info.ChannelSetting, info.IsStream)
 		logger.LogDebug(c, fmt.Sprintf(
-			"http transport select: host=%s protocol=%s shards=%d policy=%s",
+			"http transport select: host=%s protocol=%s shards=%d stream=%t policy=%s",
 			req.URL.Host,
 			policy.Protocol,
 			policy.Shards,
+			policy.IsStream,
 			policy.String(),
 		))
 	}
@@ -538,12 +539,13 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 		return nil, errors.New("resp is nil")
 	}
 	if common2.DebugEnabled {
-		policy := service.NormalizeHTTPTransportPolicy(info.ChannelSetting)
+		policy := service.NormalizeHTTPTransportPolicyWithStream(info.ChannelSetting, info.IsStream)
 		logger.LogDebug(c, fmt.Sprintf(
-			"http transport negotiated: host=%s protocol=%s shards=%d policy=%s negotiated=%s",
+			"http transport negotiated: host=%s protocol=%s shards=%d stream=%t policy=%s negotiated=%s",
 			req.URL.Host,
 			policy.Protocol,
 			policy.Shards,
+			policy.IsStream,
 			policy.String(),
 			resp.Proto,
 		))
