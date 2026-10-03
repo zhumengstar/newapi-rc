@@ -28,7 +28,18 @@ func (a *Adaptor) ConvertGeminiRequest(c *gin.Context, info *relaycommon.RelayIn
 	if err := relayconvert.ApplyGeminiThinkingConfigChecked(request, info); err != nil {
 		return nil, err
 	}
-	if len(request.Contents) > 0 {
+	if len(request.Contents) == 0 {
+		request.Contents = []dto.GeminiChatContent{
+			{
+				Role: "user",
+				Parts: []dto.GeminiPart{
+					{
+						Text: " ",
+					},
+				},
+			},
+		}
+	} else {
 		for i, content := range request.Contents {
 			if i == 0 {
 				if request.Contents[0].Role == "" {

@@ -57,6 +57,14 @@ func cleanGeminiFunctionParametersWithDepth(params interface{}, depth int) inter
 
 		normalizeGeminiSchemaTypeAndNullable(cleanedMap)
 
+		if rawEnum, exists := cleanedMap["enum"]; exists {
+			if cleaned := cleanEnumSlice(rawEnum); len(cleaned) > 0 {
+				cleanedMap["enum"] = cleaned
+			} else {
+				delete(cleanedMap, "enum")
+			}
+		}
+
 		if props, ok := cleanedMap["properties"].(map[string]interface{}); ok && props != nil {
 			cleanedProps := make(map[string]interface{})
 			for propName, propValue := range props {
@@ -89,6 +97,33 @@ func cleanGeminiFunctionParametersWithDepth(params interface{}, depth int) inter
 		return cleanedArray
 	default:
 		return params
+	}
+}
+
+func cleanEnumSlice(raw any) []any {
+	switch v := raw.(type) {
+	case []any:
+		cleaned := make([]any, 0, len(v))
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				if strings.TrimSpace(s) != "" {
+					cleaned = append(cleaned, s)
+				}
+			} else if item != nil {
+				cleaned = append(cleaned, item)
+			}
+		}
+		return cleaned
+	case []string:
+		cleaned := make([]any, 0, len(v))
+		for _, s := range v {
+			if strings.TrimSpace(s) != "" {
+				cleaned = append(cleaned, s)
+			}
+		}
+		return cleaned
+	default:
+		return nil
 	}
 }
 
@@ -186,6 +221,15 @@ func RemoveAdditionalProperties(schema interface{}, depth int) interface{} {
 	}
 	delete(value, "title")
 	delete(value, "$schema")
+
+	if rawEnum, exists := value["enum"]; exists {
+		if cleaned := cleanEnumSlice(rawEnum); len(cleaned) > 0 {
+			value["enum"] = cleaned
+		} else {
+			delete(value, "enum")
+		}
+	}
+
 	if typeVal, exists := value["type"]; !exists || (typeVal != "object" && typeVal != "array") {
 		return schema
 	}

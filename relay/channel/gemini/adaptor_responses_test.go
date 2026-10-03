@@ -174,3 +174,17 @@ func mustGeminiRawMessage(t *testing.T, value any) []byte {
 	require.NoError(t, err)
 	return raw
 }
+
+func TestConvertGeminiRequestEmptyContentsFallback(t *testing.T) {
+	adaptor := &Adaptor{}
+	info := &relaycommon.RelayInfo{}
+	req := &dto.GeminiChatRequest{}
+	converted, err := adaptor.ConvertGeminiRequest(nil, info, req)
+	require.NoError(t, err)
+	res, ok := converted.(*dto.GeminiChatRequest)
+	require.True(t, ok)
+	require.Len(t, res.Contents, 1)
+	assert.Equal(t, "user", res.Contents[0].Role)
+	require.Len(t, res.Contents[0].Parts, 1)
+	assert.Equal(t, " ", res.Contents[0].Parts[0].Text)
+}

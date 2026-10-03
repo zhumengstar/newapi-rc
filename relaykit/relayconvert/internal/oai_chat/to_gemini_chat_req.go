@@ -401,5 +401,18 @@ func OpenAIChatRequestToGeminiGenerateContent(c context.Context, textRequest dto
 		}
 	}
 
+	if len(geminiRequest.Contents) == 0 {
+		geminiRequest.Contents = []dto.GeminiChatContent{
+			{
+				Role: "user",
+				Parts: []dto.GeminiPart{
+					{
+						Text: " ",
+					},
+				},
+			},
+		}
+	}
+
 	return &geminiRequest, nil
 }
