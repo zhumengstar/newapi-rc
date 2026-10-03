@@ -106,9 +106,15 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		if rerr != nil {
 			return types.NewErrorWithStatusCode(rerr, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 		}
+		if len(info.ParamOverride) > 0 {
+			if overridden, oerr := relaycommon.ApplyParamOverrideWithRelayInfo(rawBytes, info); oerr == nil && len(overridden) > 0 {
+				rawBytes = overridden
+			}
+		}
 		if cleaned, cerr := relaycommon.EnsureGeminiSchemaCleanliness(rawBytes); cerr == nil && len(cleaned) > 0 {
 			rawBytes = cleaned
 		}
+		_ = relaycommon.UpdatePrunedRequestBody(c, info)
 		body, closer, berr := relaycommon.NewOutboundJSONBody(rawBytes)
 		if berr != nil {
 			return types.NewError(berr, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
@@ -283,6 +289,11 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 				c.Set("gemini_part_data_retried", true)
 				rawBytes, _ := relaycommon.GetPrunedRequestBody(c, info)
 				if len(rawBytes) == 0 {
+					if storage, sErr := common.GetBodyStorage(c); sErr == nil {
+						rawBytes, _ = storage.Bytes()
+					}
+				}
+				if len(rawBytes) == 0 && request != nil {
 					rawBytes, _ = common.Marshal(request)
 				}
 				cleanedBytes, cErr := relaycommon.EnsureGeminiSchemaCleanliness(rawBytes)
@@ -290,6 +301,9 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 					logger.LogWarn(c, fmt.Sprintf("收到 Gemini 上游 Part 数据格式报错 (%s)，已自动深度自愈并填充有效 data 字段，正在立即重试请求...", newAPIError.Error()))
 					if len(info.ParamOverride) > 0 {
 						cleanedBytes, _ = relaycommon.ApplyParamOverrideWithRelayInfo(cleanedBytes, info)
+					}
+					if reCleaned, rcErr := relaycommon.EnsureGeminiSchemaCleanliness(cleanedBytes); rcErr == nil && len(reCleaned) > 0 {
+						cleanedBytes = reCleaned
 					}
 					_ = relaycommon.UpdatePrunedRequestBody(c, info)
 					newBody, closer, bErr := relaycommon.NewOutboundJSONBody(cleanedBytes)

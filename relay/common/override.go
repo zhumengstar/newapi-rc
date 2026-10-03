@@ -2314,6 +2314,9 @@ func EnsureClaudeToolIDs(data []byte) ([]byte, error) {
 		if err != nil {
 			return data, err
 		}
+		if cleaned, cerr := EnsureGeminiSchemaCleanliness(data); cerr == nil && len(cleaned) > 0 {
+			data = cleaned
+		}
 	}
 	if gjson.GetBytes(data, "tools").Exists() {
 		data, err = ensureToolIDs(data, "tools")
@@ -2416,7 +2419,11 @@ func repairToolIDsInNode(node any) (any, bool) {
 					curID = "toolu_" + common.GetUUID()[:24]
 				}
 				fc["id"] = curID
-				val["id"] = curID
+				modified = true
+			}
+			// Gemini Part 顶层绝对不能包含 id 字段，否则触发上游 400 Unknown name "id" at 'request.contents[X].parts[Y]'
+			if _, hasID := val["id"]; hasID {
+				delete(val, "id")
 				modified = true
 			}
 		}
@@ -2432,7 +2439,11 @@ func repairToolIDsInNode(node any) (any, bool) {
 					curID = "toolu_" + common.GetUUID()[:24]
 				}
 				fr["id"] = curID
-				val["id"] = curID
+				modified = true
+			}
+			// Gemini Part 顶层绝对不能包含 id 字段，否则触发上游 400 Unknown name "id" at 'request.contents[X].parts[Y]'
+			if _, hasID := val["id"]; hasID {
+				delete(val, "id")
 				modified = true
 			}
 		}
@@ -2567,170 +2578,144 @@ func cleanEmptyEnumsInJSONNode(node any) (any, bool) {
 }
 
 func cleanGeminiContentsAndParts(root any) bool {
-	modified := false
-	m, ok := root.(map[string]any)
-	if !ok {
-		return false
+	return recursiveCleanGeminiParts(root)
+}
+
+func cleanPartsList(rawParts any) ([]any, bool) {
+	partsList, ok := rawParts.([]any)
+	if !ok || len(partsList) == 0 {
+		return []any{map[string]any{"text": " "}}, true
 	}
-
-	cleanPartsList := func(rawParts any) ([]any, bool) {
-		partsList, ok := rawParts.([]any)
-		if !ok || len(partsList) == 0 {
-			return []any{map[string]any{"text": " "}}, true
+	pModified := false
+	newParts := make([]any, 0, len(partsList))
+	for _, p := range partsList {
+		if pStr, isStr := p.(string); isStr {
+			newParts = append(newParts, map[string]any{"text": pStr})
+			pModified = true
+			continue
 		}
-		pModified := false
-		newParts := make([]any, 0, len(partsList))
-		for _, p := range partsList {
-			if pStr, isStr := p.(string); isStr {
-				newParts = append(newParts, map[string]any{"text": pStr})
-				pModified = true
-				continue
-			}
-			partMap, isMap := p.(map[string]any)
-			if !isMap || partMap == nil {
-				newParts = append(newParts, map[string]any{"text": " "})
-				pModified = true
-				continue
-			}
+		partMap, isMap := p.(map[string]any)
+		if !isMap || partMap == nil {
+			newParts = append(newParts, map[string]any{"text": " "})
+			pModified = true
+			continue
+		}
 
-			// 1. 剔除 Part 顶层非法属性（如 id, returnDirect 等），避免 Unknown name "id" at 'request.contents[X].parts[Y]'
-			if _, hasID := partMap["id"]; hasID {
-				if fc, ok := partMap["functionCall"].(map[string]any); ok {
-					if _, hasFcID := fc["id"]; !hasFcID && partMap["id"] != nil {
-						fc["id"] = partMap["id"]
-					}
+		// 1. 剔除 Part 顶层非法属性（如 id, availableArgs 等），避免 Unknown name "id" at 'request.contents[X].parts[Y]'
+		if _, hasID := partMap["id"]; hasID {
+			if fc, ok := partMap["functionCall"].(map[string]any); ok {
+				if _, hasFcID := fc["id"]; !hasFcID && partMap["id"] != nil {
+					fc["id"] = partMap["id"]
 				}
-				delete(partMap, "id")
+			}
+			delete(partMap, "id")
+			pModified = true
+		}
+		for _, badKey := range []string{"availableArgs", "validTargetCharacterIds", "returnDirect", "return_direct"} {
+			if _, hasBad := partMap[badKey]; hasBad {
+				delete(partMap, badKey)
 				pModified = true
 			}
-			for _, badKey := range []string{"availableArgs", "validTargetCharacterIds", "returnDirect", "return_direct"} {
-				if _, hasBad := partMap[badKey]; hasBad {
-					delete(partMap, badKey)
-					pModified = true
-				}
-			}
+		}
 
-			// 2. 检验 oneof data 候选：text, inlineData, functionCall, functionResponse, fileData, executableCode, codeExecutionResult
-			hasValidData := false
+		// 2. 检验 oneof data 候选：text, inlineData, functionCall, functionResponse, fileData, executableCode, codeExecutionResult
+		hasValidData := false
 
-			// 2.1 检查 functionCall / functionResponse
-			if fc, ok := partMap["functionCall"].(map[string]any); ok && len(fc) > 0 {
-				hasValidData = true
-			}
-			if fr, ok := partMap["functionResponse"].(map[string]any); ok && len(fr) > 0 {
-				hasValidData = true
-			}
+		// 2.1 检查 functionCall / functionResponse
+		if fc, ok := partMap["functionCall"].(map[string]any); ok && len(fc) > 0 {
+			hasValidData = true
+		}
+		if fr, ok := partMap["functionResponse"].(map[string]any); ok && len(fr) > 0 {
+			hasValidData = true
+		}
 
-			// 2.2 检查 inlineData / inline_data
-			for _, ik := range []string{"inlineData", "inline_data"} {
-				if idata, ok := partMap[ik].(map[string]any); ok {
-					if dataStr, hasData := idata["data"].(string); hasData && strings.TrimSpace(dataStr) != "" {
-						hasValidData = true
-					} else {
-						// 损坏的 inlineData，删除之
-						delete(partMap, ik)
-						pModified = true
-					}
-				}
-			}
-
-			// 2.3 检查 fileData / file_data
-			for _, fk := range []string{"fileData", "file_data"} {
-				if fdata, ok := partMap[fk].(map[string]any); ok {
-					fileURI := ""
-					if u, ok := fdata["fileUri"].(string); ok {
-						fileURI = u
-					} else if u, ok := fdata["file_uri"].(string); ok {
-						fileURI = u
-					}
-					if strings.TrimSpace(fileURI) != "" {
-						hasValidData = true
-					} else {
-						delete(partMap, fk)
-						pModified = true
-					}
-				}
-			}
-
-			// 2.4 检查 text
-			if tVal, hasText := partMap["text"]; hasText {
-				if tVal == nil {
-					partMap["text"] = " "
-					pModified = true
-					hasValidData = true
-				} else if s, isStr := tVal.(string); isStr {
-					// 如果只有 text 而没有其它，且全为空格/空串，安全规范化为 " "
-					if !hasValidData && strings.TrimSpace(s) == "" {
-						partMap["text"] = " "
-						pModified = true
-					}
+		// 2.2 检查 inlineData / inline_data
+		for _, ik := range []string{"inlineData", "inline_data"} {
+			if idata, ok := partMap[ik].(map[string]any); ok {
+				if dataStr, hasData := idata["data"].(string); hasData && strings.TrimSpace(dataStr) != "" {
 					hasValidData = true
 				} else {
-					partMap["text"] = fmt.Sprintf("%v", tVal)
+					delete(partMap, ik)
 					pModified = true
-					hasValidData = true
 				}
 			}
+		}
 
-			// 2.5 核心保底：若仍没有任何有效 oneof data（例如只有 {"thought": true} 或空 map）
-			// 必须注入 text: " "，使 Protobuf oneof data 满足初始化约束，彻底根治 400 报错
-			if !hasValidData {
+		// 2.3 检查 fileData / file_data
+		for _, fk := range []string{"fileData", "file_data"} {
+			if fdata, ok := partMap[fk].(map[string]any); ok {
+				fileURI := ""
+				if u, ok := fdata["fileUri"].(string); ok {
+					fileURI = u
+				} else if u, ok := fdata["file_uri"].(string); ok {
+					fileURI = u
+				}
+				if strings.TrimSpace(fileURI) != "" {
+					hasValidData = true
+				} else {
+					delete(partMap, fk)
+					pModified = true
+				}
+			}
+		}
+
+		// 2.4 检查 text
+		if tVal, hasText := partMap["text"]; hasText {
+			if tVal == nil {
 				partMap["text"] = " "
 				pModified = true
-			}
-
-			newParts = append(newParts, partMap)
-		}
-
-		if len(newParts) == 0 {
-			return []any{map[string]any{"text": " "}}, true
-		}
-		return newParts, pModified
-	}
-
-	cleanContentsList := func(rawContents any) ([]any, bool) {
-		contentsList, ok := rawContents.([]any)
-		if !ok || len(contentsList) == 0 {
-			return nil, false
-		}
-		cModified := false
-		for i, c := range contentsList {
-			if cMap, ok := c.(map[string]any); ok {
-				if rawParts, hasParts := cMap["parts"]; hasParts {
-					cleanedParts, pMod := cleanPartsList(rawParts)
-					if pMod {
-						cMap["parts"] = cleanedParts
-						contentsList[i] = cMap
-						cModified = true
-					}
+				hasValidData = true
+			} else if s, isStr := tVal.(string); isStr {
+				if !hasValidData && strings.TrimSpace(s) == "" {
+					partMap["text"] = " "
+					pModified = true
 				}
+				hasValidData = true
+			} else {
+				partMap["text"] = fmt.Sprintf("%v", tVal)
+				pModified = true
+				hasValidData = true
 			}
 		}
-		return contentsList, cModified
-	}
 
-	// 清洗顶层 contents
-	if rawContents, has := m["contents"]; has {
-		if cleaned, cMod := cleanContentsList(rawContents); cMod {
-			m["contents"] = cleaned
-			modified = true
+		// 2.5 核心保底：若仍没有任何有效 oneof data（例如只有 {"thought": true} 或空 map）
+		if !hasValidData {
+			partMap["text"] = " "
+			pModified = true
 		}
+
+		newParts = append(newParts, partMap)
 	}
 
-	// 清洗顶层 systemInstruction / system_instruction
-	for _, sysKey := range []string{"systemInstruction", "system_instruction"} {
-		if sysMap, ok := m[sysKey].(map[string]any); ok {
-			if rawParts, hasParts := sysMap["parts"]; hasParts {
-				cleanedParts, pMod := cleanPartsList(rawParts)
-				if pMod {
-					sysMap["parts"] = cleanedParts
-					m[sysKey] = sysMap
-					modified = true
-				}
+	if len(newParts) == 0 {
+		return []any{map[string]any{"text": " "}}, true
+	}
+	return newParts, pModified
+}
+
+func recursiveCleanGeminiParts(node any) bool {
+	modified := false
+	switch val := node.(type) {
+	case []any:
+		for _, item := range val {
+			if recursiveCleanGeminiParts(item) {
+				modified = true
+			}
+		}
+	case map[string]any:
+		if rawParts, hasParts := val["parts"]; hasParts {
+			cleanedParts, pMod := cleanPartsList(rawParts)
+			if pMod {
+				val["parts"] = cleanedParts
+				modified = true
+			}
+		}
+		for _, child := range val {
+			if recursiveCleanGeminiParts(child) {
+				modified = true
 			}
 		}
 	}
-
 	return modified
 }
 
@@ -2742,13 +2727,24 @@ func IsGeminiPartDataError(errStr string) bool {
 		strings.Contains(lower, "unknown name \"id\" at 'request.contents") ||
 		strings.Contains(lower, "unknown name \"id\" at 'contents") ||
 		strings.Contains(lower, "unknown name 'id' at 'request.contents") ||
+		strings.Contains(lower, "unknown name 'id' at 'contents") ||
 		strings.Contains(lower, "unknown name \"thought\" at 'request.contents") ||
 		(strings.Contains(lower, "cannot find field") && strings.Contains(lower, "contents["))
 }
 
-// EnsureClaudeRequestCleanliness 清洗 Claude 请求中的空白 text block、空内容和空白 system，
+// IsClaudeWhitespaceTextError 检测是否为 Claude 上游返回的空白 text content block 或缺少 tool ID 或 thinking top_p 报错
+func IsClaudeWhitespaceTextError(errStr string) bool {
+	lower := strings.ToLower(errStr)
+	return strings.Contains(lower, "text content blocks must contain non-whitespace text") ||
+		strings.Contains(lower, "at least one text, image, or tool_use block is required") ||
+		strings.Contains(lower, "tool_use.id: field required") ||
+		strings.Contains(lower, "tool_result.tool_use_id: field required") ||
+		strings.Contains(lower, "top_p must be greater than or equal to 0.95")
+}
+
+// EnsureClaudeRequestCleanliness 清洗 Claude 请求中的空白 text block、空内容、空白 system 以及 thinking 模式下的 top_p 冲突，
 // 防止上游 Claude / Vertex 返回 400 "messages: text content blocks must contain non-whitespace text"
-// 或 "system: text content blocks must contain non-whitespace text"。
+// 或 "top_p must be greater than or equal to 0.95 or unset when thinking is enabled"。
 func EnsureClaudeRequestCleanliness(data []byte) ([]byte, error) {
 	if len(data) == 0 {
 		return data, nil
@@ -2826,6 +2822,29 @@ func EnsureClaudeRequestCleanliness(data []byte) ([]byte, error) {
 				}
 			}
 			rootMap["messages"] = cleanedMessages
+		}
+	}
+
+	// 3. 校验 thinking 与 top_p 冲突：
+	// Anthropic 官方规范：当 thinking 启用时，top_p 必须 >= 0.95 或直接未设置；若低于 0.95 直接删除 top_p 避免 400 报错
+	if thinkingVal, hasThinking := rootMap["thinking"]; hasThinking && thinkingVal != nil {
+		if tMap, ok := thinkingVal.(map[string]any); ok {
+			if tType, hasType := tMap["type"].(string); hasType && tType == "enabled" {
+				if topPVal, hasTopP := rootMap["top_p"]; hasTopP && topPVal != nil {
+					switch p := topPVal.(type) {
+					case float64:
+						if p < 0.95 {
+							delete(rootMap, "top_p")
+							dirty = true
+						}
+					case int:
+						if float64(p) < 0.95 {
+							delete(rootMap, "top_p")
+							dirty = true
+						}
+					}
+				}
+			}
 		}
 	}
 

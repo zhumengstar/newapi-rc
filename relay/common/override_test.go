@@ -2621,6 +2621,51 @@ func TestEnsureToolIDs(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(toolRepaired), "returnDirect")
 	assert.NotContains(t, string(toolRepaired), "return_direct")
+
+	// 验证 EnsureClaudeToolIDs 处理 Gemini contents 协议时，严禁在 Part 顶层注入 id
+	geminiJSON := `{
+		"contents": [
+			{
+				"role": "model",
+				"parts": [
+					{
+						"id": "polluting_part_id",
+						"functionCall": {
+							"name": "calc"
+						}
+					}
+				]
+			},
+			{
+				"role": "user",
+				"parts": [
+					{
+						"functionResponse": {
+							"name": "calc",
+							"response": {"result": 42}
+						}
+					}
+				]
+			}
+		]
+	}`
+	geminiRepaired, err := EnsureClaudeToolIDs([]byte(geminiJSON))
+	require.NoError(t, err)
+	geminiStr := string(geminiRepaired)
+	assert.Contains(t, geminiStr, `"name":"calc"`)
+	assert.Contains(t, geminiStr, `"toolu_`)
+	// 验证 Part 顶层没有残留 id，而是正确归位到了 functionCall / functionResponse 内
+	var geminiMap map[string]any
+	require.NoError(t, json.Unmarshal(geminiRepaired, &geminiMap))
+	gContents := geminiMap["contents"].([]any)
+	for i, c := range gContents {
+		cm := c.(map[string]any)
+		parts := cm["parts"].([]any)
+		for j, p := range parts {
+			pm := p.(map[string]any)
+			assert.Nil(t, pm["id"], "Turn %d Part %d must NOT have top-level id", i, j)
+		}
+	}
 }
 
 func TestEnsureGeminiSchemaCleanliness(t *testing.T) {
@@ -2787,6 +2832,21 @@ func TestEnsureClaudeRequestCleanliness(t *testing.T) {
 		cleanedBytes, err := EnsureClaudeToolIDs([]byte(inputJSON))
 		require.NoError(t, err)
 		assert.NotContains(t, string(cleanedBytes), b64)
+	})
+
+	t.Run("thinking mode deletes conflicting top_p", func(t *testing.T) {
+		inputJSON := `{"model":"claude-3-7-sonnet-20250219","thinking":{"type":"enabled","budget_tokens":2048},"top_p":0.7,"messages":[{"role":"user","content":"hello"}]}`
+		cleanedBytes, err := EnsureClaudeRequestCleanliness([]byte(inputJSON))
+		require.NoError(t, err)
+		cleanedStr := string(cleanedBytes)
+		assert.NotContains(t, cleanedStr, `"top_p"`)
+		assert.Contains(t, cleanedStr, `"thinking"`)
+
+		// top_p >= 0.95 保持原样
+		inputValidJSON := `{"model":"claude-3-7-sonnet-20250219","thinking":{"type":"enabled","budget_tokens":2048},"top_p":0.95,"messages":[{"role":"user","content":"hello"}]}`
+		cleanedValidBytes, err := EnsureClaudeRequestCleanliness([]byte(inputValidJSON))
+		require.NoError(t, err)
+		assert.Contains(t, string(cleanedValidBytes), `"top_p":0.95`)
 	})
 }
 

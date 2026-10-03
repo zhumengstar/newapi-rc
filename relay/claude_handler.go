@@ -92,7 +92,28 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		if err != nil {
 			return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 		}
-		requestBody = common.NewReplayableBodyReader(storage)
+		rawBytes, rerr := storage.Bytes()
+		if rerr != nil {
+			return types.NewErrorWithStatusCode(rerr, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+		}
+		if len(info.ParamOverride) > 0 {
+			if overridden, oerr := relaycommon.ApplyParamOverrideWithRelayInfo(rawBytes, info); oerr == nil && len(overridden) > 0 {
+				rawBytes = overridden
+			}
+		}
+		if repaired, repErr := relaycommon.EnsureClaudeToolIDs(rawBytes); repErr == nil && len(repaired) > 0 {
+			rawBytes = repaired
+		}
+		if cleaned, cerr := relaycommon.EnsureClaudeRequestCleanliness(rawBytes); cerr == nil && len(cleaned) > 0 {
+			rawBytes = cleaned
+		}
+		_ = relaycommon.UpdatePrunedRequestBody(c, info)
+		body, closer, berr := relaycommon.NewOutboundJSONBody(rawBytes)
+		if berr != nil {
+			return types.NewError(berr, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+		}
+		defer closer.Close()
+		requestBody = body
 	} else {
 		convertedRequest, err := adaptor.ConvertClaudeRequest(c, info, request)
 		if err != nil {
@@ -230,36 +251,51 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 				}
 			}
 
-			// 只要出现缺少 tool_use.id / tool_result.tool_use_id 报错，则深度自愈工具调用 ID 并立即重试！
-			if !c.GetBool("claude_tool_id_retried") && relaycommon.IsToolUseIDError(newAPIError.Error()) {
+			// 只要出现缺少 tool_use.id / tool_result.tool_use_id 或空白 text block 报错，则深度自愈并立即重试！
+			if !c.GetBool("claude_tool_id_retried") && (relaycommon.IsToolUseIDError(newAPIError.Error()) || relaycommon.IsClaudeWhitespaceTextError(newAPIError.Error())) {
 				c.Set("claude_tool_id_retried", true)
 				rawBytes, _ := relaycommon.GetPrunedRequestBody(c, info)
 				if len(rawBytes) == 0 {
+					if storage, sErr := common.GetBodyStorage(c); sErr == nil {
+						rawBytes, _ = storage.Bytes()
+					}
+				}
+				if len(rawBytes) == 0 && request != nil {
 					rawBytes, _ = common.Marshal(request)
 				}
-				if repaired, repOk := relaycommon.RepairToolIDsInRawJSON(rawBytes); repOk {
-					logger.LogWarn(c, fmt.Sprintf("收到 Claude 上游缺少工具ID报错 (%s)，已自动深度自愈补齐 tool_use.id 并立即重试...", newAPIError.Error()))
-					_ = relaycommon.UpdatePrunedRequestBody(c, info)
-					newBody, closer, bErr := relaycommon.NewOutboundJSONBody(repaired)
-					if bErr == nil {
-						defer closer.Close()
-						retryResp, rErr := adaptor.DoRequest(c, info, newBody)
-						if rErr == nil && retryResp != nil {
-							retryHttpResp := retryResp.(*http.Response)
-							if retryHttpResp.StatusCode == http.StatusOK {
-								logger.LogInfo(c, "Claude 缺少工具ID就地自愈重试成功，已拿到上游 200 OK 响应")
-								usage, resErr := adaptor.DoResponse(c, retryHttpResp, info)
-								if resErr != nil {
-									service.ResetStatusCode(resErr, statusCodeMappingStr)
-									service.SettleInterruptedRequestIfNeeded(c, info, usage, resErr)
-									return resErr
-								}
-								service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
-								return nil
+				repaired, repOk := relaycommon.RepairToolIDsInRawJSON(rawBytes)
+				if !repOk {
+					repaired = rawBytes
+				}
+				if cleaned, cerr := relaycommon.EnsureClaudeRequestCleanliness(repaired); cerr == nil && len(cleaned) > 0 {
+					repaired = cleaned
+				}
+				if len(info.ParamOverride) > 0 {
+					if overridden, oerr := relaycommon.ApplyParamOverrideWithRelayInfo(repaired, info); oerr == nil && len(overridden) > 0 {
+						repaired = overridden
+					}
+				}
+				logger.LogWarn(c, fmt.Sprintf("收到 Claude 上游消息格式报错 (%s)，已自动深度自愈补齐 tool ID 与清洗空白 text block，正在立即重试...", newAPIError.Error()))
+				_ = relaycommon.UpdatePrunedRequestBody(c, info)
+				newBody, closer, bErr := relaycommon.NewOutboundJSONBody(repaired)
+				if bErr == nil {
+					defer closer.Close()
+					retryResp, rErr := adaptor.DoRequest(c, info, newBody)
+					if rErr == nil && retryResp != nil {
+						retryHttpResp := retryResp.(*http.Response)
+						if retryHttpResp.StatusCode == http.StatusOK {
+							logger.LogInfo(c, "Claude 消息格式就地自愈重试成功，已拿到上游 200 OK 响应")
+							usage, resErr := adaptor.DoResponse(c, retryHttpResp, info)
+							if resErr != nil {
+								service.ResetStatusCode(resErr, statusCodeMappingStr)
+								service.SettleInterruptedRequestIfNeeded(c, info, usage, resErr)
+								return resErr
 							}
-							newAPIError = service.RelayErrorHandler(c.Request.Context(), retryHttpResp, false)
-							service.ResetStatusCode(newAPIError, statusCodeMappingStr)
+							service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
+							return nil
 						}
+						newAPIError = service.RelayErrorHandler(c.Request.Context(), retryHttpResp, false)
+						service.ResetStatusCode(newAPIError, statusCodeMappingStr)
 					}
 				}
 			}
