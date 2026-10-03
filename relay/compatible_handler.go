@@ -241,6 +241,67 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 				}
 			}
 
+			// 只要出现图片尺寸超限报错，则自动等比例缩放图片并立即重试！
+			if !c.GetBool("image_dimension_retried") && relaycommon.IsImageDimensionExceededError(newApiErr.Error()) {
+				c.Set("image_dimension_retried", true)
+				pruned := false
+				if req, ok := convertedRequest.(*dto.ClaudeRequest); ok && req != nil {
+					pruned = relaycommon.DownscaleOversizedImagesInClaudeRequest(c, req, relaycommon.DefaultSafeImageDimension)
+				} else if req, ok := convertedRequest.(*dto.GeneralOpenAIRequest); ok && req != nil {
+					pruned = relaycommon.DownscaleOversizedImagesInOpenAIRequest(c, req, relaycommon.DefaultSafeImageDimension)
+				}
+				if request != nil && any(request) != convertedRequest {
+					if relaycommon.DownscaleOversizedImagesInOpenAIRequest(c, request, relaycommon.DefaultSafeImageDimension) {
+						pruned = true
+					}
+				}
+				if pruned {
+					logger.LogWarn(c, fmt.Sprintf("收到上游图片尺寸超限报错 (%s)，已自动等比例缩放图片并立即重试...", newApiErr.Error()))
+					targetReq := convertedRequest
+					if targetReq == nil {
+						targetReq = request
+					}
+					newJsonData, mErr := common.Marshal(targetReq)
+					if mErr == nil {
+						newJsonData, _ = relaycommon.RemoveDisabledFields(newJsonData, info.ChannelOtherSettings, info.ChannelSetting.PassThroughBodyEnabled)
+						if len(info.ParamOverride) > 0 {
+							newJsonData, _ = relaycommon.ApplyParamOverrideWithRelayInfo(newJsonData, info)
+						}
+						if repaired, repErr := relaycommon.EnsureClaudeToolIDs(newJsonData); repErr == nil && len(repaired) > 0 {
+							newJsonData = repaired
+						}
+						_ = relaycommon.UpdatePrunedRequestBody(c, info)
+						newBody, closer, bErr := relaycommon.NewOutboundJSONBody(newJsonData)
+						if bErr == nil {
+							defer closer.Close()
+							retryResp, rErr := adaptor.DoRequest(c, info, newBody)
+							if rErr == nil && retryResp != nil {
+								retryHttpResp := retryResp.(*http.Response)
+								if retryHttpResp.StatusCode == http.StatusOK {
+									logger.LogInfo(c, "图片尺寸超限就地缩放重试成功，已拿到上游 200 OK 响应")
+									usage, resErr := adaptor.DoResponse(c, retryHttpResp, info)
+									if resErr != nil {
+										service.ResetStatusCode(resErr, statusCodeMappingStr)
+										service.SettleInterruptedRequestIfNeeded(c, info, usage, resErr)
+										return resErr
+									}
+									var containAudioTokens = usage.(*dto.Usage).CompletionTokenDetails.AudioTokens > 0 || usage.(*dto.Usage).PromptTokensDetails.AudioTokens > 0
+									var containsAudioRatios = ratio_setting.ContainsAudioRatio(info.OriginModelName) || ratio_setting.ContainsAudioCompletionRatio(info.OriginModelName)
+									if containAudioTokens && containsAudioRatios {
+										service.PostAudioConsumeQuota(c, info, usage.(*dto.Usage), "")
+									} else {
+										service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
+									}
+									return nil
+								}
+								newApiErr = service.RelayErrorHandler(c.Request.Context(), retryHttpResp, false)
+								service.ResetStatusCode(newApiErr, statusCodeMappingStr)
+							}
+						}
+					}
+				}
+			}
+
 			return newApiErr
 		}
 	}

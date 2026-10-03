@@ -2527,13 +2527,15 @@ func EnsureClaudeRequestCleanliness(data []byte) ([]byte, error) {
 				dirty = true
 			}
 		case []any:
-			cleanedBlocks := cleanClaudeContentBlocks(s)
+			cleanedBlocks, mod := cleanClaudeContentBlocks(s)
 			if len(cleanedBlocks) > 0 {
 				rootMap["system"] = cleanedBlocks
 			} else {
 				delete(rootMap, "system")
 			}
-			dirty = true
+			if mod || len(cleanedBlocks) != len(s) {
+				dirty = true
+			}
 		}
 	}
 
@@ -2562,13 +2564,15 @@ func EnsureClaudeRequestCleanliness(data []byte) ([]byte, error) {
 					}
 					cleanedMessages = append(cleanedMessages, msgMap)
 				case []any:
-					cleanedBlocks := cleanClaudeContentBlocks(c)
+					cleanedBlocks, mod := cleanClaudeContentBlocks(c)
 					if len(cleanedBlocks) > 0 {
 						msgMap["content"] = cleanedBlocks
 					} else {
 						msgMap["content"] = []any{map[string]any{"type": "text", "text": "."}}
 					}
-					dirty = true
+					if mod || len(cleanedBlocks) != len(c) {
+						dirty = true
+					}
 					cleanedMessages = append(cleanedMessages, msgMap)
 				default:
 					msgMap["content"] = "."
@@ -2586,8 +2590,9 @@ func EnsureClaudeRequestCleanliness(data []byte) ([]byte, error) {
 	return common.Marshal(rootMap)
 }
 
-func cleanClaudeContentBlocks(blocks []any) []any {
+func cleanClaudeContentBlocks(blocks []any) ([]any, bool) {
 	result := make([]any, 0, len(blocks))
+	modifiedAny := false
 	for _, raw := range blocks {
 		block, ok := raw.(map[string]any)
 		if !ok {
@@ -2598,6 +2603,7 @@ func cleanClaudeContentBlocks(blocks []any) []any {
 		if bType == "text" {
 			txt := strings.TrimSpace(fmt.Sprintf("%v", block["text"]))
 			if txt == "" || txt == "<nil>" || txt == "null" {
+				modifiedAny = true
 				continue // 移除纯空白 text block
 			}
 		} else if bType == "tool_result" {
@@ -2606,20 +2612,43 @@ func cleanClaudeContentBlocks(blocks []any) []any {
 				case string:
 					if strings.TrimSpace(tc) == "" {
 						block["content"] = "."
+						modifiedAny = true
 					}
 				case []any:
-					innerCleaned := cleanClaudeContentBlocks(tc)
+					innerCleaned, innerMod := cleanClaudeContentBlocks(tc)
+					if innerMod {
+						modifiedAny = true
+					}
 					if len(innerCleaned) > 0 {
 						block["content"] = innerCleaned
 					} else {
 						block["content"] = []any{map[string]any{"type": "text", "text": "."}}
+						modifiedAny = true
+					}
+				}
+			}
+		} else if bType == "image" {
+			if source, ok := block["source"].(map[string]any); ok && source != nil {
+				if dataStr, ok := source["data"].(string); ok && len(dataStr) > 0 {
+					if newData, imgMod, err := DownscaleImageBase64IfNeeded(dataStr, DefaultSafeImageDimension); err == nil && imgMod {
+						source["data"] = newData
+						modifiedAny = true
+					}
+				}
+			}
+		} else if bType == "image_url" {
+			if imgUrl, ok := block["image_url"].(map[string]any); ok && imgUrl != nil {
+				if urlStr, ok := imgUrl["url"].(string); ok && len(urlStr) > 0 {
+					if newUrl, imgMod, err := DownscaleImageBase64IfNeeded(urlStr, DefaultSafeImageDimension); err == nil && imgMod {
+						imgUrl["url"] = newUrl
+						modifiedAny = true
 					}
 				}
 			}
 		}
 		result = append(result, block)
 	}
-	return result
+	return result, modifiedAny
 }
 
 

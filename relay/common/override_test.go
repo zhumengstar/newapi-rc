@@ -2756,6 +2756,14 @@ func TestEnsureClaudeRequestCleanliness(t *testing.T) {
 		require.NoError(t, err)
 		assert.Contains(t, string(cleanedBytes), `"content":"."`)
 	})
+
+	t.Run("oversized image in content block gets downscaled automatically", func(t *testing.T) {
+		b64 := createTestPNG(8500, 4000)
+		inputJSON := `{"model":"claude-3-7-sonnet-20250219","messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + b64 + `"}}]}]}`
+		cleanedBytes, err := EnsureClaudeToolIDs([]byte(inputJSON))
+		require.NoError(t, err)
+		assert.NotContains(t, string(cleanedBytes), b64)
+	})
 }
 
 

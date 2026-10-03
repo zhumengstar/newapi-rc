@@ -282,6 +282,10 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			relaycommon.UniversalPruneAndRefreshRequest(c, relayInfo, limit)
 		}
 
+		if isImageDimensionExceededError(newAPIError) {
+			relaycommon.UniversalDownscaleImagesInRequest(c, relayInfo, relaycommon.DefaultSafeImageDimension)
+		}
+
 		if !shouldRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry()) {
 			break
 		}
@@ -450,6 +454,10 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 		}
 		return true
 	}
+	if isImageDimensionExceededError(openaiErr) {
+		logger.LogWarn(c, "捕获到上游图片尺寸超限错误（单边>8000px），已自动等比例缩放图片并在重试中执行")
+		return true
+	}
 	if isNonRetryableClientError(openaiErr) {
 		return false
 	}
@@ -546,6 +554,13 @@ func isTokenLimitExceededError(err *types.NewAPIError) bool {
 	}
 	_, isExceeded := relaycommon.ParseUniversalContextLimit(err.Error())
 	return isExceeded
+}
+
+func isImageDimensionExceededError(err *types.NewAPIError) bool {
+	if err == nil {
+		return false
+	}
+	return relaycommon.IsImageDimensionExceededError(err.Error())
 }
 
 func isRetryableUpstreamError(err *types.NewAPIError) bool {
