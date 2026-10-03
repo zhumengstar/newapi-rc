@@ -303,6 +303,50 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 				}
 			}
 
+			// 只要出现缺少 tool_use.id / tool_result.tool_use_id 报错，则深度自愈工具调用 ID 并立即重试！
+			if !c.GetBool("tool_id_retried") && relaycommon.IsToolUseIDError(newApiErr.Error()) {
+				c.Set("tool_id_retried", true)
+				rawBytes, _ := relaycommon.GetPrunedRequestBody(c, info)
+				if len(rawBytes) == 0 {
+					targetReq := convertedRequest
+					if targetReq == nil {
+						targetReq = request
+					}
+					rawBytes, _ = common.Marshal(targetReq)
+				}
+				if repaired, repOk := relaycommon.RepairToolIDsInRawJSON(rawBytes); repOk {
+					logger.LogWarn(c, fmt.Sprintf("收到上游缺少工具ID报错 (%s)，已自动深度自愈补齐 tool_use.id 并立即重试...", newApiErr.Error()))
+					_ = relaycommon.UpdatePrunedRequestBody(c, info)
+					newBody, closer, bErr := relaycommon.NewOutboundJSONBody(repaired)
+					if bErr == nil {
+						defer closer.Close()
+						retryResp, rErr := adaptor.DoRequest(c, info, newBody)
+						if rErr == nil && retryResp != nil {
+							retryHttpResp := retryResp.(*http.Response)
+							if retryHttpResp.StatusCode == http.StatusOK {
+								logger.LogInfo(c, "缺少工具ID就地自愈重试成功，已拿到上游 200 OK 响应")
+								usage, resErr := adaptor.DoResponse(c, retryHttpResp, info)
+								if resErr != nil {
+									service.ResetStatusCode(resErr, statusCodeMappingStr)
+									service.SettleInterruptedRequestIfNeeded(c, info, usage, resErr)
+									return resErr
+								}
+								var containAudioTokens = usage.(*dto.Usage).CompletionTokenDetails.AudioTokens > 0 || usage.(*dto.Usage).PromptTokensDetails.AudioTokens > 0
+								var containsAudioRatios = ratio_setting.ContainsAudioRatio(info.OriginModelName) || ratio_setting.ContainsAudioCompletionRatio(info.OriginModelName)
+								if containAudioTokens && containsAudioRatios {
+									service.PostAudioConsumeQuota(c, info, usage.(*dto.Usage), "")
+								} else {
+									service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
+								}
+								return nil
+							}
+							newApiErr = service.RelayErrorHandler(c.Request.Context(), retryHttpResp, false)
+							service.ResetStatusCode(newApiErr, statusCodeMappingStr)
+						}
+					}
+				}
+			}
+
 			return newApiErr
 		}
 	}

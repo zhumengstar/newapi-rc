@@ -1,6 +1,7 @@
 package common
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"maps"
@@ -2308,6 +2309,12 @@ func EnsureClaudeToolIDs(data []byte) ([]byte, error) {
 	if err != nil {
 		return data, err
 	}
+	if gjson.GetBytes(data, "contents").Exists() {
+		data, err = ensureToolIDs(data, "contents")
+		if err != nil {
+			return data, err
+		}
+	}
 	if gjson.GetBytes(data, "tools").Exists() {
 		data, err = ensureToolIDs(data, "tools")
 		if err != nil {
@@ -2399,6 +2406,36 @@ func repairToolIDsInNode(node any) (any, bool) {
 				modified = true
 			}
 		}
+		// 1.4 检查 Gemini 协议的 functionCall
+		if fc, ok := val["functionCall"].(map[string]any); ok {
+			curID := strings.TrimSpace(fmt.Sprintf("%v", fc["id"]))
+			if fc["id"] == nil || curID == "" || curID == "<nil>" || curID == "null" {
+				if pmID := strings.TrimSpace(fmt.Sprintf("%v", val["id"])); pmID != "" && pmID != "<nil>" && pmID != "null" {
+					curID = pmID
+				} else {
+					curID = "toolu_" + common.GetUUID()[:24]
+				}
+				fc["id"] = curID
+				val["id"] = curID
+				modified = true
+			}
+		}
+		// 1.5 检查 Gemini 协议的 functionResponse
+		if fr, ok := val["functionResponse"].(map[string]any); ok {
+			curID := strings.TrimSpace(fmt.Sprintf("%v", fr["id"]))
+			if fr["id"] == nil || curID == "" || curID == "<nil>" || curID == "null" {
+				if frName := strings.TrimSpace(fmt.Sprintf("%v", fr["name"])); frName != "" && (strings.HasPrefix(frName, "toolu_") || strings.HasPrefix(frName, "call_")) {
+					curID = frName
+				} else if pmID := strings.TrimSpace(fmt.Sprintf("%v", val["id"])); pmID != "" && pmID != "<nil>" && pmID != "null" {
+					curID = pmID
+				} else {
+					curID = "toolu_" + common.GetUUID()[:24]
+				}
+				fr["id"] = curID
+				val["id"] = curID
+				modified = true
+			}
+		}
 		// 2. 检查 OpenAI 协议的 tool_calls 列表
 		if rawCalls, ok := val["tool_calls"].([]any); ok {
 			for _, rc := range rawCalls {
@@ -2423,6 +2460,33 @@ func repairToolIDsInNode(node any) (any, bool) {
 	default:
 		return node, false
 	}
+}
+
+// IsToolUseIDError 识别上游返回的缺少 tool_use.id / tool_result.tool_use_id / functionCall.id 等报错
+func IsToolUseIDError(errMsg string) bool {
+	if errMsg == "" {
+		return false
+	}
+	s := strings.ToLower(errMsg)
+	return strings.Contains(s, "tool_use.id") ||
+		strings.Contains(s, "tool_use_id") ||
+		strings.Contains(s, "tool_result.tool_use_id") ||
+		(strings.Contains(s, "tool_use") && strings.Contains(s, "field required")) ||
+		(strings.Contains(s, "tool_result") && strings.Contains(s, "field required")) ||
+		(strings.Contains(s, "tool_use") && strings.Contains(s, "id: required")) ||
+		(strings.Contains(s, "tool_use") && strings.Contains(s, "missing"))
+}
+
+// RepairToolIDsInRawJSON 深度扫描并修复 JSON 原生请求体中的所有工具调用 ID
+func RepairToolIDsInRawJSON(data []byte) ([]byte, bool) {
+	if len(data) == 0 {
+		return data, false
+	}
+	repaired, err := EnsureClaudeToolIDs(data)
+	if err == nil && len(repaired) > 0 && !bytes.Equal(repaired, data) {
+		return repaired, true
+	}
+	return data, false
 }
 
 // EnsureGeminiSchemaCleanliness 深度清洗 Gemini 请求体中的 schema/enum（例如 generation_config.response_schema.enum 或 tools 中的 enum），

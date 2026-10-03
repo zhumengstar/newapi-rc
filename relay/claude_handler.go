@@ -230,6 +230,40 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 				}
 			}
 
+			// 只要出现缺少 tool_use.id / tool_result.tool_use_id 报错，则深度自愈工具调用 ID 并立即重试！
+			if !c.GetBool("claude_tool_id_retried") && relaycommon.IsToolUseIDError(newAPIError.Error()) {
+				c.Set("claude_tool_id_retried", true)
+				rawBytes, _ := relaycommon.GetPrunedRequestBody(c, info)
+				if len(rawBytes) == 0 {
+					rawBytes, _ = common.Marshal(request)
+				}
+				if repaired, repOk := relaycommon.RepairToolIDsInRawJSON(rawBytes); repOk {
+					logger.LogWarn(c, fmt.Sprintf("收到 Claude 上游缺少工具ID报错 (%s)，已自动深度自愈补齐 tool_use.id 并立即重试...", newAPIError.Error()))
+					_ = relaycommon.UpdatePrunedRequestBody(c, info)
+					newBody, closer, bErr := relaycommon.NewOutboundJSONBody(repaired)
+					if bErr == nil {
+						defer closer.Close()
+						retryResp, rErr := adaptor.DoRequest(c, info, newBody)
+						if rErr == nil && retryResp != nil {
+							retryHttpResp := retryResp.(*http.Response)
+							if retryHttpResp.StatusCode == http.StatusOK {
+								logger.LogInfo(c, "Claude 缺少工具ID就地自愈重试成功，已拿到上游 200 OK 响应")
+								usage, resErr := adaptor.DoResponse(c, retryHttpResp, info)
+								if resErr != nil {
+									service.ResetStatusCode(resErr, statusCodeMappingStr)
+									service.SettleInterruptedRequestIfNeeded(c, info, usage, resErr)
+									return resErr
+								}
+								service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
+								return nil
+							}
+							newAPIError = service.RelayErrorHandler(c.Request.Context(), retryHttpResp, false)
+							service.ResetStatusCode(newAPIError, statusCodeMappingStr)
+						}
+					}
+				}
+			}
+
 			return newAPIError
 		}
 	}

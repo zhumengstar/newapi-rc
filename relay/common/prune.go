@@ -516,3 +516,19 @@ func UniversalPruneAndRefreshRequest(c *gin.Context, info *RelayInfo, targetLimi
 	return false
 }
 
+// GetPrunedRequestBody 从 Context 或 RelayInfo 中提取当前的请求体 []byte
+func GetPrunedRequestBody(c *gin.Context, info *RelayInfo) ([]byte, error) {
+	if c != nil {
+		if raw, exists := c.Get(common.KeyRequestBody); exists && raw != nil {
+			if b, ok := raw.([]byte); ok && len(b) > 0 {
+				return b, nil
+			}
+		}
+	}
+	if info != nil && info.Request != nil {
+		return common.Marshal(info.Request)
+	}
+	return nil, nil
+}
+
+
