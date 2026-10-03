@@ -532,6 +532,10 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 
 	resp, err := relayClient.Do(req)
 	if err != nil {
+		if service.IsClientCanceled(c, err) {
+			logger.LogWarn(c, "client canceled request: "+err.Error())
+			return nil, types.NewErrorWithStatusCode(err, types.ErrorCodeDoRequestFailed, 499, types.ErrOptionWithSkipRetry(), types.ErrOptionWithHideErrMsg("client closed request"))
+		}
 		logger.LogError(c, "do request failed: "+err.Error())
 		return nil, types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithHideErrMsg("upstream error: do request failed"))
 	}

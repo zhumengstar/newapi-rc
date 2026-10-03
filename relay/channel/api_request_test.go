@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -205,3 +206,26 @@ func TestProcessHeaderOverride_PassHeadersTemplateSetsRuntimeHeaders(t *testing.
 	require.Equal(t, "sess-123", upstreamReq.Header.Get("Session_id"))
 	require.Empty(t, upstreamReq.Header.Get("X-Codex-Beta-Features"))
 }
+
+func TestDoRequestClientCanceled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(ctx)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://127.0.0.1:59999", nil)
+	require.NoError(t, err)
+
+	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{}}
+	resp, apiErr := DoRequest(c, req, info)
+	require.Nil(t, resp)
+	require.NotNil(t, apiErr)
+
+	newApiErr, ok := apiErr.(*types.NewAPIError)
+	require.True(t, ok)
+	require.Equal(t, 499, newApiErr.StatusCode)
+	require.True(t, types.IsSkipRetryError(newApiErr))
+}
+

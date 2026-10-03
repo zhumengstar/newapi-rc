@@ -1,7 +1,10 @@
 package service
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -12,6 +15,25 @@ import (
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
 )
+
+// IsClientCanceled 判断请求是否是由下游客户端断开连接或超时主动取消
+func IsClientCanceled(c *gin.Context, err error) bool {
+	if c != nil && c.Request != nil && c.Request.Context() != nil {
+		if errors.Is(c.Request.Context().Err(), context.Canceled) {
+			return true
+		}
+	}
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return true
+		}
+		errStr := strings.ToLower(err.Error())
+		if strings.Contains(errStr, "context canceled") || strings.Contains(errStr, "client_gone") {
+			return true
+		}
+	}
+	return false
+}
 
 // ShouldSettlePartialStream 检查请求是否在流式传输期间已经部分输出，需要按实际已接收/输出的 Token 执行扣费结算（防止长请求中途中断导致 0 元免单）
 func ShouldSettlePartialStream(c *gin.Context, info *relaycommon.RelayInfo, usage any) bool {
@@ -40,6 +62,20 @@ func ShouldSettlePartialStream(c *gin.Context, info *relaycommon.RelayInfo, usag
 	}
 
 	return false
+}
+
+// ShouldSettleClientCanceled 检查是否是客户端主动断连且需要进行计费结算
+func ShouldSettleClientCanceled(c *gin.Context, info *relaycommon.RelayInfo, err error) bool {
+	if info == nil {
+		return false
+	}
+	if c.GetBool("partial_stream_settled") {
+		return false
+	}
+	if info.Billing != nil && info.Billing.IsSettled() {
+		return false
+	}
+	return IsClientCanceled(c, err)
 }
 
 // SettlePartialStream 对中途中断的流式请求按实际产生的 Token 进行强制结算并记录日志
@@ -98,3 +134,56 @@ func SettlePartialStream(c *gin.Context, info *relaycommon.RelayInfo, usage any,
 	common.SetContextKey(c, constant.ContextKeyErrorLogRecorded, true)
 	return true
 }
+
+// SettleClientCanceled 对客户端主动取消/断开连接的请求进行按实扣费结算（防止客户端超时断连导致0元免单）
+func SettleClientCanceled(c *gin.Context, info *relaycommon.RelayInfo, usage any, apiErr *types.NewAPIError) bool {
+	if info == nil {
+		return false
+	}
+	if c.GetBool("partial_stream_settled") {
+		return true
+	}
+	if info.Billing != nil && info.Billing.IsSettled() {
+		return true
+	}
+
+	var u *dto.Usage
+	if usage != nil {
+		if actualUsage, ok := usage.(*dto.Usage); ok && actualUsage != nil {
+			u = actualUsage
+		}
+	}
+	if u == nil {
+		u = &dto.Usage{}
+	}
+
+	if u.PromptTokens == 0 {
+		u.PromptTokens = info.GetEstimatePromptTokens()
+	}
+	if u.CompletionTokens == 0 && info.ReceivedResponseCount > 0 {
+		u.CompletionTokens = info.ReceivedResponseCount * 15
+	}
+	if u.TotalTokens == 0 {
+		u.TotalTokens = u.PromptTokens + u.CompletionTokens
+	}
+
+	extraContent := []string{"客户端主动断开连接，按已消耗Token结算"}
+
+	logger.LogWarn(c, fmt.Sprintf("客户端主动断开连接(499)，执行按实扣费结算: userId=%d, channelId=%d, model=%s, promptTokens=%d, completionTokens=%d, totalTokens=%d",
+		info.UserId, info.ChannelId, info.OriginModelName, u.PromptTokens, u.CompletionTokens, u.TotalTokens))
+
+	var containAudioTokens = u.CompletionTokenDetails.AudioTokens > 0 || u.PromptTokensDetails.AudioTokens > 0
+	var containsAudioRatios = ratio_setting.ContainsAudioRatio(info.OriginModelName) || ratio_setting.ContainsAudioCompletionRatio(info.OriginModelName)
+
+	if containAudioTokens && containsAudioRatios {
+		PostAudioConsumeQuota(c, info, u, "")
+	} else {
+		PostTextConsumeQuota(c, info, u, extraContent)
+	}
+
+	// 标记已结算，确保后续的 defer Refund 不会退费，避免重复记录 0 额度错误日志
+	c.Set("partial_stream_settled", true)
+	common.SetContextKey(c, constant.ContextKeyErrorLogRecorded, true)
+	return true
+}
+

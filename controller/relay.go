@@ -181,7 +181,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		// Only return quota if downstream failed and quota was actually pre-consumed
 		if newAPIError != nil {
 			newAPIError = service.NormalizeViolationFeeError(newAPIError)
-			if relayInfo.Billing != nil {
+			if service.ShouldSettleClientCanceled(c, relayInfo, newAPIError) {
+				service.SettleClientCanceled(c, relayInfo, nil, newAPIError)
+			} else if relayInfo.Billing != nil {
 				relayInfo.Billing.Refund(c)
 			}
 			service.ChargeViolationFeeIfNeeded(c, relayInfo, newAPIError)
@@ -258,7 +260,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		newAPIError = service.NormalizeViolationFeeError(newAPIError)
 		relayInfo.LastError = newAPIError
 
-		if service.ShouldSettlePartialStream(c, relayInfo, nil) {
+		if service.ShouldSettleClientCanceled(c, relayInfo, newAPIError) {
+			service.SettleClientCanceled(c, relayInfo, nil, newAPIError)
+		} else if service.ShouldSettlePartialStream(c, relayInfo, nil) {
 			service.SettlePartialStream(c, relayInfo, nil, newAPIError)
 		}
 
@@ -421,6 +425,9 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 		return false
 	}
 	if service.GetChannelConstraints(c).SuppressesRetry() {
+		return false
+	}
+	if service.IsClientCanceled(c, openaiErr) {
 		return false
 	}
 	if isNonRetryableClientError(openaiErr) {
