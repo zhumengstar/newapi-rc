@@ -9,6 +9,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/relay/channel/gemini"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -161,6 +162,42 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 			newAPIError = service.RelayErrorHandler(c.Request.Context(), httpResp, false)
 			// reset status code 重置状态码
 			service.ResetStatusCode(newAPIError, statusCodeMappingStr)
+
+			// 只要出现 Token 超限报错，则就进行智能裁剪重试请求！
+			if !c.GetBool("gemini_token_limit_retried") && isGeminiTokenLimitError(newAPIError) {
+				c.Set("gemini_token_limit_retried", true)
+				if gemini.PruneOnTokenLimitExceeded(c, info, request, newAPIError.Error()) {
+					logger.LogWarn(c, fmt.Sprintf("收到上游 Token 超限报错 (%s)，已自动智能滑动裁剪历史对话，正在立即重试请求...", newAPIError.Error()))
+					newJsonData, mErr := common.Marshal(request)
+					if mErr == nil {
+						if len(info.ParamOverride) > 0 {
+							newJsonData, _ = relaycommon.ApplyParamOverrideWithRelayInfo(newJsonData, info)
+						}
+						newBody, closer, bErr := relaycommon.NewOutboundJSONBody(newJsonData)
+						if bErr == nil {
+							defer closer.Close()
+							retryResp, rErr := adaptor.DoRequest(c, info, newBody)
+							if rErr == nil && retryResp != nil {
+								retryHttpResp := retryResp.(*http.Response)
+								if retryHttpResp.StatusCode == http.StatusOK {
+									logger.LogInfo(c, "Token 超限就地滑动裁剪重试成功，已拿到上游 200 OK 响应")
+									usage, openaiErr := adaptor.DoResponse(c, retryHttpResp, info)
+									if openaiErr != nil {
+										service.ResetStatusCode(openaiErr, statusCodeMappingStr)
+										service.SettleInterruptedRequestIfNeeded(c, info, usage, openaiErr)
+										return openaiErr
+									}
+									service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
+									return nil
+								}
+								newAPIError = service.RelayErrorHandler(c.Request.Context(), retryHttpResp, false)
+								service.ResetStatusCode(newAPIError, statusCodeMappingStr)
+							}
+						}
+					}
+				}
+			}
+
 			return newAPIError
 		}
 	}
@@ -279,3 +316,13 @@ func GeminiEmbeddingHandler(c *gin.Context, info *relaycommon.RelayInfo) (newAPI
 	service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
 	return nil
 }
+
+func isGeminiTokenLimitError(err *types.NewAPIError) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "exceeds the maximum number of tokens allowed") ||
+		strings.Contains(msg, "the input token count exceeds")
+}
+

@@ -18,6 +18,7 @@ import (
 	pluginruntime "github.com/QuantumNous/new-api/pkg/jsplugin"
 	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
 	"github.com/QuantumNous/new-api/relay"
+	"github.com/QuantumNous/new-api/relay/channel/gemini"
 	"github.com/QuantumNous/new-api/relay/channel/task/taskcommon"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
@@ -424,6 +425,17 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 	if service.IsClientCanceled(c, openaiErr) {
 		return false
 	}
+	if isTokenLimitExceededError(openaiErr) {
+		limit := gemini.ParseExceedTokenLimitFromError(openaiErr.Error())
+		if limit > 0 {
+			c.Set("forced_max_tokens", limit)
+			common.SetContextKey(c, "forced_max_tokens", limit)
+			modelName := c.GetString("model")
+			gemini.RecordModelTokenLimit(modelName, limit)
+			logger.LogWarn(c, fmt.Sprintf("捕获到上游输入 Token 超限错误，检测到上限为 %d tokens，已启用自愈裁剪并在重试中执行", limit))
+		}
+		return true
+	}
 	if isNonRetryableClientError(openaiErr) {
 		return false
 	}
@@ -512,6 +524,15 @@ func isNonRetryableClientError(err *types.NewAPIError) bool {
 	default:
 		return false
 	}
+}
+
+func isTokenLimitExceededError(err *types.NewAPIError) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "exceeds the maximum number of tokens allowed") ||
+		strings.Contains(msg, "the input token count exceeds")
 }
 
 func isRetryableUpstreamError(err *types.NewAPIError) bool {

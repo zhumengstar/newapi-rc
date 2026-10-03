@@ -9,6 +9,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/relay/channel/gemini"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
@@ -97,6 +98,7 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 	}
 
 	var requestBody io.Reader
+	var convertedRequest any
 
 	if passThroughGlobal || info.ChannelSetting.PassThroughBodyEnabled {
 		storage, err := common.GetBodyStorage(c)
@@ -110,9 +112,10 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 		}
 		requestBody = common.NewReplayableBodyReader(storage)
 	} else {
-		convertedRequest, err := adaptor.ConvertOpenAIRequest(c, info, request)
-		if err != nil {
-			return newConvertRequestFailedError(c, info, err)
+		var cErr error
+		convertedRequest, cErr = adaptor.ConvertOpenAIRequest(c, info, request)
+		if cErr != nil {
+			return newConvertRequestFailedError(c, info, cErr)
 		}
 		relaycommon.AppendRequestConversionFromRequest(info, convertedRequest)
 
@@ -170,6 +173,50 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 			newApiErr := service.RelayErrorHandler(c.Request.Context(), httpResp, false)
 			// reset status code 重置状态码
 			service.ResetStatusCode(newApiErr, statusCodeMappingStr)
+
+			// 只要出现 Token 超限报错，则就进行智能裁剪重试请求！
+			if !c.GetBool("gemini_token_limit_retried") && isGeminiTokenLimitError(newApiErr) {
+				c.Set("gemini_token_limit_retried", true)
+				if geminiReq, ok := convertedRequest.(*dto.GeminiChatRequest); ok && geminiReq != nil {
+					if gemini.PruneOnTokenLimitExceeded(c, info, geminiReq, newApiErr.Error()) {
+						logger.LogWarn(c, fmt.Sprintf("收到上游 Token 超限报错 (%s)，已自动智能滑动裁剪历史对话，正在立即重试请求...", newApiErr.Error()))
+						newJsonData, mErr := common.Marshal(geminiReq)
+						if mErr == nil {
+							if len(info.ParamOverride) > 0 {
+								newJsonData, _ = relaycommon.ApplyParamOverrideWithRelayInfo(newJsonData, info)
+							}
+							newBody, closer, bErr := relaycommon.NewOutboundJSONBody(newJsonData)
+							if bErr == nil {
+								defer closer.Close()
+								retryResp, rErr := adaptor.DoRequest(c, info, newBody)
+								if rErr == nil && retryResp != nil {
+									retryHttpResp := retryResp.(*http.Response)
+									if retryHttpResp.StatusCode == http.StatusOK {
+										logger.LogInfo(c, "Token 超限就地滑动裁剪重试成功，已拿到上游 200 OK 响应")
+										usage, resErr := adaptor.DoResponse(c, retryHttpResp, info)
+										if resErr != nil {
+											service.ResetStatusCode(resErr, statusCodeMappingStr)
+											service.SettleInterruptedRequestIfNeeded(c, info, usage, resErr)
+											return resErr
+										}
+										var containAudioTokens = usage.(*dto.Usage).CompletionTokenDetails.AudioTokens > 0 || usage.(*dto.Usage).PromptTokensDetails.AudioTokens > 0
+										var containsAudioRatios = ratio_setting.ContainsAudioRatio(info.OriginModelName) || ratio_setting.ContainsAudioCompletionRatio(info.OriginModelName)
+										if containAudioTokens && containsAudioRatios {
+											service.PostAudioConsumeQuota(c, info, usage.(*dto.Usage), "")
+										} else {
+											service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
+										}
+										return nil
+									}
+									newApiErr = service.RelayErrorHandler(c.Request.Context(), retryHttpResp, false)
+									service.ResetStatusCode(newApiErr, statusCodeMappingStr)
+								}
+							}
+						}
+					}
+				}
+			}
+
 			return newApiErr
 		}
 	}
