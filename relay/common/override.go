@@ -2356,3 +2356,71 @@ func repairToolIDsInNode(node any) (any, bool) {
 		return node, false
 	}
 }
+
+// EnsureGeminiSchemaCleanliness 深度清洗 Gemini 请求体中的 schema/enum（例如 generation_config.response_schema.enum 或 tools 中的 enum），
+// 剔除空字符串等非法元素，防止上游 400 * response_schema...enum[x]: cannot be empty
+func EnsureGeminiSchemaCleanliness(data []byte) ([]byte, error) {
+	if len(data) == 0 {
+		return data, nil
+	}
+	var root any
+	if err := common.UnmarshalJsonStr(string(data), &root); err != nil {
+		return data, nil
+	}
+	cleaned, modified := cleanEmptyEnumsInJSONNode(root)
+	if !modified {
+		return data, nil
+	}
+	return common.Marshal(cleaned)
+}
+
+func cleanEmptyEnumsInJSONNode(node any) (any, bool) {
+	modified := false
+	switch val := node.(type) {
+	case []any:
+		for i, item := range val {
+			cleaned, m := cleanEmptyEnumsInJSONNode(item)
+			if m {
+				val[i] = cleaned
+				modified = true
+			}
+		}
+		return val, modified
+	case map[string]any:
+		if rawEnum, hasEnum := val["enum"]; hasEnum && rawEnum != nil {
+			if enumSlice, ok := rawEnum.([]any); ok {
+				newSlice := make([]any, 0, len(enumSlice))
+				for _, item := range enumSlice {
+					if s, isStr := item.(string); isStr {
+						if strings.TrimSpace(s) != "" {
+							newSlice = append(newSlice, s)
+						} else {
+							modified = true
+						}
+					} else if item != nil {
+						newSlice = append(newSlice, item)
+					} else {
+						modified = true
+					}
+				}
+				if len(newSlice) > 0 {
+					val["enum"] = newSlice
+				} else {
+					delete(val, "enum")
+					modified = true
+				}
+			}
+		}
+		for k, child := range val {
+			cleaned, m := cleanEmptyEnumsInJSONNode(child)
+			if m {
+				val[k] = cleaned
+				modified = true
+			}
+		}
+		return val, modified
+	default:
+		return node, false
+	}
+}
+

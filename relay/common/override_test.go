@@ -2622,3 +2622,30 @@ func TestEnsureToolIDs(t *testing.T) {
 	assert.NotContains(t, string(toolRepaired), "return_direct")
 }
 
+func TestEnsureGeminiSchemaCleanliness(t *testing.T) {
+	inputJSON := `{
+		"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+		"generation_config": {
+			"response_schema": {
+				"type": "object",
+				"properties": {
+					"slot": {
+						"type": "string",
+						"enum": ["A", "B", "", "   ", null, "C"]
+					},
+					"empty_only": {
+						"type": "string",
+						"enum": ["", "  "]
+					}
+				}
+			}
+		}
+	}`
+	cleanedBytes, err := EnsureGeminiSchemaCleanliness([]byte(inputJSON))
+	require.NoError(t, err)
+	cleanedStr := string(cleanedBytes)
+	assert.Contains(t, cleanedStr, `"enum":["A","B","C"]`)
+	assert.NotContains(t, cleanedStr, `"empty_only":{"enum"`)
+}
+
+

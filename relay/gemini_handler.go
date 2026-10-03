@@ -94,7 +94,19 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		if err != nil {
 			return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 		}
-		requestBody = common.NewReplayableBodyReader(storage)
+		rawBytes, rerr := storage.Bytes()
+		if rerr != nil {
+			return types.NewErrorWithStatusCode(rerr, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+		}
+		if cleaned, cerr := relaycommon.EnsureGeminiSchemaCleanliness(rawBytes); cerr == nil && len(cleaned) > 0 {
+			rawBytes = cleaned
+		}
+		body, closer, berr := relaycommon.NewOutboundJSONBody(rawBytes)
+		if berr != nil {
+			return types.NewError(berr, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+		}
+		defer closer.Close()
+		requestBody = body
 	} else {
 		// 使用 ConvertGeminiRequest 转换请求格式
 		convertedRequest, err := adaptor.ConvertGeminiRequest(c, info, request)
@@ -113,6 +125,11 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 			if err != nil {
 				return newAPIErrorFromParamOverride(err)
 			}
+		}
+
+		// 确保清洗空 enum 和非标准 schema
+		if cleaned, cerr := relaycommon.EnsureGeminiSchemaCleanliness(jsonData); cerr == nil && len(cleaned) > 0 {
+			jsonData = cleaned
 		}
 
 		logger.LogDebug(c, "Gemini request body: %s", jsonData)
