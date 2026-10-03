@@ -2286,6 +2286,30 @@ func repairToolIDsInNode(node any) (any, bool) {
 				modified = true
 			}
 		}
+		// 1.1 检查嵌套的 tool_use 对象 (例如 messages.X.content.Y.tool_use.id)
+		if tu, ok := val["tool_use"].(map[string]any); ok {
+			curID := strings.TrimSpace(fmt.Sprintf("%v", tu["id"]))
+			if tu["id"] == nil || curID == "" || curID == "<nil>" || curID == "null" {
+				tu["id"] = "toolu_" + common.GetUUID()[:24]
+				modified = true
+			}
+		}
+		// 1.2 检查 Claude 协议的 tool_result block (解决 tool_result.tool_use_id: Field required)
+		if blockType, ok := val["type"].(string); ok && strings.EqualFold(strings.TrimSpace(blockType), "tool_result") {
+			curID := strings.TrimSpace(fmt.Sprintf("%v", val["tool_use_id"]))
+			if val["tool_use_id"] == nil || curID == "" || curID == "<nil>" || curID == "null" {
+				val["tool_use_id"] = "toolu_" + common.GetUUID()[:24]
+				modified = true
+			}
+		}
+		// 1.3 检查嵌套的 tool_result 对象 (例如 messages.X.content.Y.tool_result.tool_use_id)
+		if tr, ok := val["tool_result"].(map[string]any); ok {
+			curID := strings.TrimSpace(fmt.Sprintf("%v", tr["tool_use_id"]))
+			if tr["tool_use_id"] == nil || curID == "" || curID == "<nil>" || curID == "null" {
+				tr["tool_use_id"] = "toolu_" + common.GetUUID()[:24]
+				modified = true
+			}
+		}
 		// 2. 检查 OpenAI 协议的 tool_calls 列表
 		if rawCalls, ok := val["tool_calls"].([]any); ok {
 			for _, rc := range rawCalls {

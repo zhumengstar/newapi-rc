@@ -181,6 +181,7 @@ func OpenAIChatRequestToClaudeMessages(c context.Context, info convmeta.Meta, te
 		},
 	}
 
+	pendingToolCallIDs := make([]string, 0)
 	for _, message := range formatMessages {
 		if message.Role == "system" {
 			if message.IsStringContent() {
@@ -214,6 +215,15 @@ func OpenAIChatRequestToClaudeMessages(c context.Context, info convmeta.Meta, te
 			Role: message.Role,
 		}
 		if message.Role == "tool" {
+			toolCallID := strings.TrimSpace(message.ToolCallId)
+			if toolCallID == "" || toolCallID == "null" || toolCallID == "<nil>" {
+				if len(pendingToolCallIDs) > 0 {
+					toolCallID = pendingToolCallIDs[0]
+					pendingToolCallIDs = pendingToolCallIDs[1:]
+				} else {
+					toolCallID = "toolu_" + kitutil.GetUUID()[:24]
+				}
+			}
 			if len(claudeMessages) > 0 && claudeMessages[len(claudeMessages)-1].Role == "user" {
 				lastClaudeMessage := claudeMessages[len(claudeMessages)-1]
 				if content, ok := lastClaudeMessage.Content.(string); ok {
@@ -226,7 +236,7 @@ func OpenAIChatRequestToClaudeMessages(c context.Context, info convmeta.Meta, te
 				}
 				lastClaudeMessage.Content = append(lastClaudeMessage.Content.([]dto.ClaudeMediaMessage), dto.ClaudeMediaMessage{
 					Type:      "tool_result",
-					ToolUseId: message.ToolCallId,
+					ToolUseId: toolCallID,
 					Content:   message.Content,
 				})
 				claudeMessages[len(claudeMessages)-1] = lastClaudeMessage
@@ -237,7 +247,7 @@ func OpenAIChatRequestToClaudeMessages(c context.Context, info convmeta.Meta, te
 			claudeMessage.Content = []dto.ClaudeMediaMessage{
 				{
 					Type:      "tool_result",
-					ToolUseId: message.ToolCallId,
+					ToolUseId: toolCallID,
 					Content:   message.Content,
 				},
 			}
@@ -297,6 +307,7 @@ func OpenAIChatRequestToClaudeMessages(c context.Context, info convmeta.Meta, te
 					if callID == "" || callID == "null" || callID == "<nil>" {
 						callID = "toolu_" + kitutil.GetUUID()[:24]
 					}
+					pendingToolCallIDs = append(pendingToolCallIDs, callID)
 					claudeMediaMessages = append(claudeMediaMessages, dto.ClaudeMediaMessage{
 						Type:  "tool_use",
 						Id:    callID,

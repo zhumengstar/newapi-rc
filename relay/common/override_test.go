@@ -2582,5 +2582,21 @@ func TestEnsureToolIDs(t *testing.T) {
 	directRepaired, err := EnsureClaudeToolIDs([]byte(inputJSON))
 	require.NoError(t, err)
 	assert.True(t, strings.Contains(string(directRepaired), "toolu_"))
+
+	// 验证嵌套 tool_use 对象 (例如 messages.X.content.Y.tool_use.id)
+	nestedJSON := `{
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "text", "text": "calling"},
+					{"tool_use": {"name": "search", "input": {}}}
+				]
+			}
+		]
+	}`
+	nestedRepaired, err := EnsureClaudeToolIDs([]byte(nestedJSON))
+	t.Logf("nestedRepaired: %s", string(nestedRepaired))
+	assert.Contains(t, string(nestedRepaired), "toolu_")
 }
 
