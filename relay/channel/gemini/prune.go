@@ -93,14 +93,9 @@ func GetModelSafeTargetTokens(c *gin.Context, info *relaycommon.RelayInfo) int {
 				return calculateSafeTarget(limit)
 			}
 		}
-		// 已知 128k 上限模型（3.7-flash, 3.6-flash, 3.8-flash, flash-high, pro-low 等）
-		if strings.Contains(lower, "3.7-flash") ||
-			strings.Contains(lower, "3.6-flash") ||
-			strings.Contains(lower, "3.8-flash") ||
-			strings.Contains(lower, "flash-high") ||
-			strings.Contains(lower, "pro-low") ||
-			strings.Contains(lower, "128k") {
-			return Gemini128KSafeTargetTokens
+		// 通用规则：根据模型名称中的规格自适应识别窗口（如 128k, 64k, 32k, 1m 等，无需维护具体模型名单）
+		if limit := relaycommon.ParseTokenWindowFromModelName(lower); limit > 0 {
+			return calculateSafeTarget(limit)
 		}
 		return 0
 	}

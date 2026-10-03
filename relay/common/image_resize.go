@@ -9,6 +9,7 @@ import (
 	"image/jpeg"
 	"image/png"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -30,8 +31,16 @@ var (
 	imageDimensionExceededRegexes = []*regexp.Regexp{
 		regexp.MustCompile(`(?i)image dimensions? exceed(?:s)? (?:the )?max(?:imum)? allowed size`),
 		regexp.MustCompile(`(?i)exceed(?:s)? max(?:imum)? allowed size:\s*\d+\s*pixels`),
-		regexp.MustCompile(`(?i)image.*exceeds?.*(?:8000|\d{4,5}).*pixels`),
+		regexp.MustCompile(`(?i)image.*exceeds?.*(?:\d{4,5}).*pixels`),
 		regexp.MustCompile(`(?i)at least one of the image dimensions exceed`),
+		regexp.MustCompile(`(?i)image.*(?:width|height|dimension).*exceed`),
+	}
+
+	maxDimExtractRegexes = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)max(?:imum)? allowed size:\s*(\d+)\s*pixels`),
+		regexp.MustCompile(`(?i)exceed(?:s|ing)?\s*(?:the )?(?:max(?:imum)? )?(?:allowed )?(?:size|limit|resolution)?(?::|\s+of)?\s*(\d+)\s*pixels`),
+		regexp.MustCompile(`(?i)limit of\s*(\d+)\s*pixels`),
+		regexp.MustCompile(`(?i)>\s*(\d+)\s*(?:maximum|pixels)`),
 	}
 )
 
@@ -46,7 +55,24 @@ func IsImageDimensionExceededError(errMsg string) bool {
 		}
 	}
 	lower := strings.ToLower(errMsg)
-	return strings.Contains(lower, "8000 pixels") && strings.Contains(lower, "exceed")
+	return strings.Contains(lower, "pixels") && strings.Contains(lower, "exceed")
+}
+
+// ParseMaxImageDimensionFromError 从报错信息中动态解析允许的最大图片像素限制（如 8000, 4096 等），若无法解析则返回默认 7680
+func ParseMaxImageDimensionFromError(errMsg string) int {
+	for _, reg := range maxDimExtractRegexes {
+		matches := reg.FindStringSubmatch(errMsg)
+		if len(matches) >= 2 {
+			if dim, err := strconv.Atoi(matches[1]); err == nil && dim > 0 {
+				safe := int(float64(dim) * 0.96)
+				if safe < 100 {
+					safe = dim
+				}
+				return safe
+			}
+		}
+	}
+	return DefaultSafeImageDimension
 }
 
 // DownscaleImageBase64IfNeeded 检查 Base64 图片尺寸，如果宽或高超过 maxAllowedDim，则按比例平滑缩小并重新编码
@@ -257,7 +283,32 @@ func DownscaleOversizedImagesInOpenAIRequest(c *gin.Context, req *dto.GeneralOpe
 	}
 
 	if modifiedAny && c != nil {
-		logger.LogWarn(c, fmt.Sprintf("检测到 OpenAI 请求包含超大图片（单边>8000px），已自动等比例缩放至安全尺寸（<=%dpx）", maxAllowedDim))
+		logger.LogWarn(c, fmt.Sprintf("检测到 OpenAI 请求包含超大图片，已自动等比例缩放至安全尺寸（<=%dpx）", maxAllowedDim))
+	}
+	return modifiedAny
+}
+
+// DownscaleOversizedImagesInGeminiRequest 对 Gemini 原生请求对象中的图片进行超限检查与等比缩放
+func DownscaleOversizedImagesInGeminiRequest(c *gin.Context, req *dto.GeminiChatRequest, maxAllowedDim int) bool {
+	if req == nil || len(req.Contents) == 0 {
+		return false
+	}
+	modifiedAny := false
+
+	for i := range req.Contents {
+		for j := range req.Contents[i].Parts {
+			part := &req.Contents[i].Parts[j]
+			if part.InlineData != nil && part.InlineData.Data != "" {
+				if newData, modified, err := DownscaleImageBase64IfNeeded(part.InlineData.Data, maxAllowedDim); err == nil && modified {
+					part.InlineData.Data = newData
+					modifiedAny = true
+				}
+			}
+		}
+	}
+
+	if modifiedAny && c != nil {
+		logger.LogWarn(c, fmt.Sprintf("检测到 Gemini 请求包含超大图片，已自动等比例缩放至安全尺寸（<=%dpx）", maxAllowedDim))
 	}
 	return modifiedAny
 }
@@ -277,6 +328,8 @@ func UniversalDownscaleImagesInRequest(c *gin.Context, info *RelayInfo, maxAllow
 		modified = DownscaleOversizedImagesInClaudeRequest(c, req, maxAllowedDim)
 	case *dto.GeneralOpenAIRequest:
 		modified = DownscaleOversizedImagesInOpenAIRequest(c, req, maxAllowedDim)
+	case *dto.GeminiChatRequest:
+		modified = DownscaleOversizedImagesInGeminiRequest(c, req, maxAllowedDim)
 	}
 
 	if modified {

@@ -196,7 +196,8 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 			// 只要出现图片尺寸超限报错，则自动等比例缩放图片并立即重试！
 			if !c.GetBool("claude_image_dimension_retried") && relaycommon.IsImageDimensionExceededError(newAPIError.Error()) {
 				c.Set("claude_image_dimension_retried", true)
-				if relaycommon.DownscaleOversizedImagesInClaudeRequest(c, request, relaycommon.DefaultSafeImageDimension) {
+				safeDim := relaycommon.ParseMaxImageDimensionFromError(newAPIError.Error())
+				if relaycommon.DownscaleOversizedImagesInClaudeRequest(c, request, safeDim) {
 					logger.LogWarn(c, fmt.Sprintf("收到 Claude 上游图片尺寸超限报错 (%s)，已自动等比例缩放图片并立即重试...", newAPIError.Error()))
 					newJsonData, mErr := common.Marshal(request)
 					if mErr == nil {

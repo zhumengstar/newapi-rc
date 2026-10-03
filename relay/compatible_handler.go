@@ -244,14 +244,15 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 			// 只要出现图片尺寸超限报错，则自动等比例缩放图片并立即重试！
 			if !c.GetBool("image_dimension_retried") && relaycommon.IsImageDimensionExceededError(newApiErr.Error()) {
 				c.Set("image_dimension_retried", true)
+				safeDim := relaycommon.ParseMaxImageDimensionFromError(newApiErr.Error())
 				pruned := false
 				if req, ok := convertedRequest.(*dto.ClaudeRequest); ok && req != nil {
-					pruned = relaycommon.DownscaleOversizedImagesInClaudeRequest(c, req, relaycommon.DefaultSafeImageDimension)
+					pruned = relaycommon.DownscaleOversizedImagesInClaudeRequest(c, req, safeDim)
 				} else if req, ok := convertedRequest.(*dto.GeneralOpenAIRequest); ok && req != nil {
-					pruned = relaycommon.DownscaleOversizedImagesInOpenAIRequest(c, req, relaycommon.DefaultSafeImageDimension)
+					pruned = relaycommon.DownscaleOversizedImagesInOpenAIRequest(c, req, safeDim)
 				}
 				if request != nil && any(request) != convertedRequest {
-					if relaycommon.DownscaleOversizedImagesInOpenAIRequest(c, request, relaycommon.DefaultSafeImageDimension) {
+					if relaycommon.DownscaleOversizedImagesInOpenAIRequest(c, request, safeDim) {
 						pruned = true
 					}
 				}

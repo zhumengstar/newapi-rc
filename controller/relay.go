@@ -283,7 +283,8 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 
 		if isImageDimensionExceededError(newAPIError) {
-			relaycommon.UniversalDownscaleImagesInRequest(c, relayInfo, relaycommon.DefaultSafeImageDimension)
+			safeDim := relaycommon.ParseMaxImageDimensionFromError(newAPIError.Error())
+			relaycommon.UniversalDownscaleImagesInRequest(c, relayInfo, safeDim)
 		}
 
 		if !shouldRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry()) {

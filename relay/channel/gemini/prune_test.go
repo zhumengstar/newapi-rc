@@ -165,11 +165,11 @@ func TestAutoPruneGeminiChatRequest_128KModel(t *testing.T) {
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 
-	// 针对 gemini-3.7-flash (或 gemini-3.7-flash-high) 模型，安全上限为 120,000 tokens
+	// 针对 128k 规格模型（如 gemini-3.7-flash-128k），自适应识别 128k 窗口
 	info := &relaycommon.RelayInfo{
-		OriginModelName: "gemini-3.7-flash",
+		OriginModelName: "gemini-3.7-flash-128k",
 		ChannelMeta: &relaycommon.ChannelMeta{
-			UpstreamModelName: "gemini-3.7-flash-high",
+			UpstreamModelName: "gemini-3.7-flash-128k",
 		},
 	}
 

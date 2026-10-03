@@ -71,6 +71,26 @@ func RecordGlobalModelTokenLimit(modelName string, limit int) {
 	}
 }
 
+var (
+	modelWindowKRegex = regexp.MustCompile(`(?i)(?:^|[-_.])(\d+)[kK](?:[-_.]|$)`)
+	modelWindowMRegex = regexp.MustCompile(`(?i)(?:^|[-_.])(\d+)[mM](?:[-_.]|$)`)
+)
+
+// ParseTokenWindowFromModelName 从任意模型名称中动态识别上下文窗口规格（如 128k, 64k, 32k, 1m, 2m 等，无需维护具体模型名单）
+func ParseTokenWindowFromModelName(name string) int {
+	if matches := modelWindowKRegex.FindStringSubmatch(name); len(matches) >= 2 {
+		if kVal, err := strconv.Atoi(matches[1]); err == nil && kVal > 0 {
+			return kVal * 1024
+		}
+	}
+	if matches := modelWindowMRegex.FindStringSubmatch(name); len(matches) >= 2 {
+		if mVal, err := strconv.Atoi(matches[1]); err == nil && mVal > 0 {
+			return mVal * 1000000
+		}
+	}
+	return 0
+}
+
 // GetGlobalModelTargetLimit 获取任意模型的安全裁剪目标
 func GetGlobalModelTargetLimit(c *gin.Context, info *RelayInfo, defaultTarget int) int {
 	if c != nil {
@@ -91,14 +111,9 @@ func GetGlobalModelTargetLimit(c *gin.Context, info *RelayInfo, defaultTarget in
 				return calculateUniversalSafeTarget(limit)
 			}
 		}
-		// 通用规则：包含 128k、3.7-flash、flash-high 等关键词自动识别为 128K 上限
-		if strings.Contains(lower, "128k") ||
-			strings.Contains(lower, "3.7-flash") ||
-			strings.Contains(lower, "3.6-flash") ||
-			strings.Contains(lower, "3.8-flash") ||
-			strings.Contains(lower, "flash-high") ||
-			strings.Contains(lower, "pro-low") {
-			return 120000
+		// 通用规则：根据模型名称中的规格自适应识别窗口（如 128k, 64k, 32k, 1m 等，无需维护具体模型名单）
+		if limit := ParseTokenWindowFromModelName(lower); limit > 0 {
+			return calculateUniversalSafeTarget(limit)
 		}
 		return 0
 	}
@@ -123,12 +138,12 @@ func GetGlobalModelTargetLimit(c *gin.Context, info *RelayInfo, defaultTarget in
 	if defaultTarget > 0 {
 		return defaultTarget
 	}
-	return 980000
+	return 0
 }
 
 func calculateUniversalSafeTarget(limit int) int {
 	if limit <= 0 {
-		return 980000
+		return 0
 	}
 	margin := limit / 12
 	if margin < 4000 {
@@ -173,10 +188,6 @@ func AutoPruneOpenAIRequest(c *gin.Context, info *RelayInfo, req *dto.GeneralOpe
 		return false
 	}
 
-	if targetLimit <= 0 {
-		targetLimit = GetGlobalModelTargetLimit(c, info, 980000)
-	}
-
 	estimateMessageTokens := func(m *dto.Message) int {
 		tokens := 4
 		if m.Content != nil {
@@ -196,6 +207,17 @@ func AutoPruneOpenAIRequest(c *gin.Context, info *RelayInfo, req *dto.GeneralOpe
 	totalTokens := 0
 	for i := range req.Messages {
 		totalTokens += estimateMessageTokens(&req.Messages[i])
+	}
+
+	if targetLimit <= 0 {
+		targetLimit = GetGlobalModelTargetLimit(c, info, 0)
+	}
+	if targetLimit <= 0 {
+		// 动态自适应目标：若上游报错触发自愈但未明确具体数字，动态将当前估算削减 40%
+		targetLimit = int(float64(totalTokens) * 0.6)
+		if targetLimit < 4000 {
+			targetLimit = 4000
+		}
 	}
 
 	if totalTokens <= targetLimit {
@@ -267,10 +289,6 @@ func AutoPruneClaudeRequest(c *gin.Context, info *RelayInfo, req *dto.ClaudeRequ
 		return false
 	}
 
-	if targetLimit <= 0 {
-		targetLimit = GetGlobalModelTargetLimit(c, info, 980000)
-	}
-
 	estimateClaudeMessageTokens := func(m *dto.ClaudeMessage) int {
 		tokens := 4
 		if m.Content != nil {
@@ -295,6 +313,17 @@ func AutoPruneClaudeRequest(c *gin.Context, info *RelayInfo, req *dto.ClaudeRequ
 	}
 	for i := range req.Messages {
 		totalTokens += estimateClaudeMessageTokens(&req.Messages[i])
+	}
+
+	if targetLimit <= 0 {
+		targetLimit = GetGlobalModelTargetLimit(c, info, 0)
+	}
+	if targetLimit <= 0 {
+		// 动态自适应目标：若上游报错触发自愈但未明确具体数字，动态将当前估算削减 40%
+		targetLimit = int(float64(totalTokens) * 0.6)
+		if targetLimit < 4000 {
+			targetLimit = 4000
+		}
 	}
 
 	if totalTokens <= targetLimit {
@@ -369,10 +398,6 @@ func AutoPruneGeminiChatRequest(c *gin.Context, info *RelayInfo, req *dto.Gemini
 		return false
 	}
 
-	if targetLimit <= 0 {
-		targetLimit = GetGlobalModelTargetLimit(c, info, 980000)
-	}
-
 	estimateGeminiTokens := func(content *dto.GeminiChatContent) int {
 		if content == nil {
 			return 0
@@ -395,6 +420,17 @@ func AutoPruneGeminiChatRequest(c *gin.Context, info *RelayInfo, req *dto.Gemini
 	}
 	for i := range req.Contents {
 		totalTokens += estimateGeminiTokens(&req.Contents[i])
+	}
+
+	if targetLimit <= 0 {
+		targetLimit = GetGlobalModelTargetLimit(c, info, 0)
+	}
+	if targetLimit <= 0 {
+		// 动态自适应目标：若上游报错触发自愈但未明确具体数字，动态将当前估算削减 40%
+		targetLimit = int(float64(totalTokens) * 0.6)
+		if targetLimit < 4000 {
+			targetLimit = 4000
+		}
 	}
 
 	if totalTokens <= targetLimit {

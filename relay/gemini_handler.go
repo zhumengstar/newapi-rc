@@ -9,7 +9,6 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
-	"github.com/QuantumNous/new-api/relay/channel/gemini"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -163,11 +162,57 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 			// reset status code 重置状态码
 			service.ResetStatusCode(newAPIError, statusCodeMappingStr)
 
-			// 只要出现 Token 超限报错，则就进行智能裁剪重试请求！
-			if !c.GetBool("gemini_token_limit_retried") && isGeminiTokenLimitError(newAPIError) {
-				c.Set("gemini_token_limit_retried", true)
-				if gemini.PruneOnTokenLimitExceeded(c, info, request, newAPIError.Error()) {
-					logger.LogWarn(c, fmt.Sprintf("收到上游 Token 超限报错 (%s)，已自动智能滑动裁剪历史对话，正在立即重试请求...", newAPIError.Error()))
+			// 只要出现 Token 超限报错，则就进行智能裁剪重试请求（通用自愈）！
+			if !c.GetBool("gemini_token_limit_retried") {
+				limit, isExceeded := relaycommon.ParseUniversalContextLimit(newAPIError.Error())
+				if isExceeded {
+					c.Set("gemini_token_limit_retried", true)
+					if limit > 0 {
+						c.Set("forced_max_tokens", limit)
+						common.SetContextKey(c, "forced_max_tokens", limit)
+						relaycommon.RecordGlobalModelTokenLimit(info.GetOriginModelName(), limit)
+						relaycommon.RecordGlobalModelTokenLimit(info.GetUpstreamModelName(), limit)
+					}
+					if relaycommon.AutoPruneGeminiChatRequest(c, info, request, limit) {
+						logger.LogWarn(c, fmt.Sprintf("收到 Gemini 上游 Token 超限报错 (%s)，已自动通用智能滑动裁剪历史对话，正在立即重试请求...", newAPIError.Error()))
+						newJsonData, mErr := common.Marshal(request)
+						if mErr == nil {
+							if len(info.ParamOverride) > 0 {
+								newJsonData, _ = relaycommon.ApplyParamOverrideWithRelayInfo(newJsonData, info)
+							}
+							_ = relaycommon.UpdatePrunedRequestBody(c, info)
+							newBody, closer, bErr := relaycommon.NewOutboundJSONBody(newJsonData)
+							if bErr == nil {
+								defer closer.Close()
+								retryResp, rErr := adaptor.DoRequest(c, info, newBody)
+								if rErr == nil && retryResp != nil {
+									retryHttpResp := retryResp.(*http.Response)
+									if retryHttpResp.StatusCode == http.StatusOK {
+										logger.LogInfo(c, "Gemini Token 超限就地滑动裁剪重试成功，已拿到上游 200 OK 响应")
+										usage, openaiErr := adaptor.DoResponse(c, retryHttpResp, info)
+										if openaiErr != nil {
+											service.ResetStatusCode(openaiErr, statusCodeMappingStr)
+											service.SettleInterruptedRequestIfNeeded(c, info, usage, openaiErr)
+											return openaiErr
+										}
+										service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
+										return nil
+									}
+									newAPIError = service.RelayErrorHandler(c.Request.Context(), retryHttpResp, false)
+									service.ResetStatusCode(newAPIError, statusCodeMappingStr)
+								}
+							}
+						}
+					}
+				}
+			}
+
+			// 只要出现图片尺寸超限报错，则自动等比例缩放图片并立即重试！
+			if !c.GetBool("gemini_image_dimension_retried") && relaycommon.IsImageDimensionExceededError(newAPIError.Error()) {
+				c.Set("gemini_image_dimension_retried", true)
+				safeDim := relaycommon.ParseMaxImageDimensionFromError(newAPIError.Error())
+				if relaycommon.DownscaleOversizedImagesInGeminiRequest(c, request, safeDim) {
+					logger.LogWarn(c, fmt.Sprintf("收到 Gemini 上游图片尺寸超限报错 (%s)，已自动等比例缩放图片并立即重试...", newAPIError.Error()))
 					newJsonData, mErr := common.Marshal(request)
 					if mErr == nil {
 						if len(info.ParamOverride) > 0 {
@@ -181,7 +226,7 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 							if rErr == nil && retryResp != nil {
 								retryHttpResp := retryResp.(*http.Response)
 								if retryHttpResp.StatusCode == http.StatusOK {
-									logger.LogInfo(c, "Token 超限就地滑动裁剪重试成功，已拿到上游 200 OK 响应")
+									logger.LogInfo(c, "Gemini 图片尺寸超限就地缩放重试成功，已拿到上游 200 OK 响应")
 									usage, openaiErr := adaptor.DoResponse(c, retryHttpResp, info)
 									if openaiErr != nil {
 										service.ResetStatusCode(openaiErr, statusCodeMappingStr)
@@ -316,13 +361,5 @@ func GeminiEmbeddingHandler(c *gin.Context, info *relaycommon.RelayInfo) (newAPI
 
 	service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
 	return nil
-}
-
-func isGeminiTokenLimitError(err *types.NewAPIError) bool {
-	if err == nil {
-		return false
-	}
-	_, isExceeded := relaycommon.ParseUniversalContextLimit(err.Error())
-	return isExceeded
 }
 
