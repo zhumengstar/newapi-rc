@@ -300,6 +300,10 @@ func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 		}
 	})
 	if err != nil {
+		if info.ReceivedResponseCount > 0 || claudeInfo.ResponseText.Len() > 0 || (claudeInfo.Usage != nil && (claudeInfo.Usage.PromptTokens > 0 || claudeInfo.Usage.CompletionTokens > 0)) {
+			HandleStreamFinalResponse(c, info, claudeInfo)
+			return claudeInfo.Usage, err
+		}
 		return nil, err
 	}
 

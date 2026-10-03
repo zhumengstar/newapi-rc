@@ -258,6 +258,10 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		newAPIError = service.NormalizeViolationFeeError(newAPIError)
 		relayInfo.LastError = newAPIError
 
+		if service.ShouldSettlePartialStream(c, relayInfo, nil) {
+			service.SettlePartialStream(c, relayInfo, nil, newAPIError)
+		}
+
 		processChannelAttemptError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, false, relayInfo)
 
 		if shouldStopRetryAfterSlowImageAttempt(relayInfo, time.Since(attemptStartedAt)) {

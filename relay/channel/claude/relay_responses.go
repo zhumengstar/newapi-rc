@@ -155,6 +155,10 @@ func ClaudeResponsesStreamHandler(c *gin.Context, resp *http.Response, info *rel
 		}
 	})
 	if streamErr != nil {
+		if info.ReceivedResponseCount > 0 || claudeInfo.ResponseText.Len() > 0 || (claudeInfo.Usage != nil && (claudeInfo.Usage.PromptTokens > 0 || claudeInfo.Usage.CompletionTokens > 0)) {
+			HandleStreamFinalResponse(c, info, claudeInfo)
+			return claudeInfo.Usage, streamErr
+		}
 		return nil, streamErr
 	}
 	if streamFailed {
