@@ -51,6 +51,7 @@ func TestShouldRetryRecoverableUpstreamFailures(t *testing.T) {
 		types.NewOpenAIError(errors.New("rate limited"), types.ErrorCodeBadResponseStatusCode, http.StatusTooManyRequests),
 		types.NewOpenAIError(errors.New("insufficient credit"), types.ErrorCodeBadResponseStatusCode, http.StatusForbidden),
 		types.NewErrorWithStatusCode(errors.New("no available capacity"), types.ErrorCodeBadResponseStatusCode, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry()),
+		types.NewOpenAIError(errors.New("Unable to process input image. Please retry or report in https://..."), types.ErrorCodeBadResponseStatusCode, http.StatusBadRequest),
 	}
 	for _, testErr := range tests {
 		require.True(t, shouldRetry(ctx, testErr, 1), testErr.Error())

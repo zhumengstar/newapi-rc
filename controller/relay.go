@@ -426,7 +426,7 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 	if isNonRetryableClientError(openaiErr) {
 		return false
 	}
-	if isCapacityUnavailableError(openaiErr) || isChannelBalanceExhaustedError(openaiErr) || isRetryableUpstreamError(openaiErr) {
+	if isCapacityUnavailableError(openaiErr) || isChannelBalanceExhaustedError(openaiErr) || isRetryableUpstreamError(openaiErr) || isRetryableImageDecodingError(openaiErr) {
 		return true
 	}
 	if types.IsSkipRetryError(openaiErr) {
@@ -571,6 +571,22 @@ func isCapacityUnavailableError(err *types.NewAPIError) bool {
 	}
 	message := strings.ToLower(err.Error())
 	for _, marker := range []string{"容量", "capacity", "no available", "暂时无可用"} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func isRetryableImageDecodingError(err *types.NewAPIError) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"unable to process input image",
+		"unable to process the input image",
+	} {
 		if strings.Contains(message, marker) {
 			return true
 		}
