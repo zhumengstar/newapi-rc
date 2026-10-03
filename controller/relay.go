@@ -18,7 +18,6 @@ import (
 	pluginruntime "github.com/QuantumNous/new-api/pkg/jsplugin"
 	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
 	"github.com/QuantumNous/new-api/relay"
-	"github.com/QuantumNous/new-api/relay/channel/gemini"
 	"github.com/QuantumNous/new-api/relay/channel/task/taskcommon"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
@@ -272,6 +271,17 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			break
 		}
 
+		if isTokenLimitExceededError(newAPIError) {
+			limit, _ := relaycommon.ParseUniversalContextLimit(newAPIError.Error())
+			if limit > 0 {
+				c.Set("forced_max_tokens", limit)
+				common.SetContextKey(c, "forced_max_tokens", limit)
+				relaycommon.RecordGlobalModelTokenLimit(relayInfo.GetOriginModelName(), limit)
+				relaycommon.RecordGlobalModelTokenLimit(relayInfo.GetUpstreamModelName(), limit)
+			}
+			relaycommon.UniversalPruneAndRefreshRequest(c, relayInfo, limit)
+		}
+
 		if !shouldRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry()) {
 			break
 		}
@@ -426,13 +436,17 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 		return false
 	}
 	if isTokenLimitExceededError(openaiErr) {
-		limit := gemini.ParseExceedTokenLimitFromError(openaiErr.Error())
+		limit, _ := relaycommon.ParseUniversalContextLimit(openaiErr.Error())
 		if limit > 0 {
 			c.Set("forced_max_tokens", limit)
 			common.SetContextKey(c, "forced_max_tokens", limit)
 			modelName := c.GetString("model")
-			gemini.RecordModelTokenLimit(modelName, limit)
-			logger.LogWarn(c, fmt.Sprintf("捕获到上游输入 Token 超限错误，检测到上限为 %d tokens，已启用自愈裁剪并在重试中执行", limit))
+			relaycommon.RecordGlobalModelTokenLimit(modelName, limit)
+			logger.LogWarn(c, fmt.Sprintf("捕获到上游输入 Token 超限错误，检测到上限为 %d tokens，已启用通用自愈裁剪并在重试中执行", limit))
+		} else {
+			c.Set("forced_max_tokens", -1)
+			common.SetContextKey(c, "forced_max_tokens", -1)
+			logger.LogWarn(c, "捕获到上游输入 Token 超限错误，已启用通用自愈裁剪并在重试中执行")
 		}
 		return true
 	}
@@ -530,9 +544,8 @@ func isTokenLimitExceededError(err *types.NewAPIError) bool {
 	if err == nil {
 		return false
 	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "exceeds the maximum number of tokens allowed") ||
-		strings.Contains(msg, "the input token count exceeds")
+	_, isExceeded := relaycommon.ParseUniversalContextLimit(err.Error())
+	return isExceeded
 }
 
 func isRetryableUpstreamError(err *types.NewAPIError) bool {

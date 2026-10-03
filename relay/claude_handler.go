@@ -147,6 +147,52 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 			newAPIError = service.RelayErrorHandler(c.Request.Context(), httpResp, false)
 			// reset status code 重置状态码
 			service.ResetStatusCode(newAPIError, statusCodeMappingStr)
+
+			// 只要出现 Token 超限报错，则就进行智能裁剪重试请求！
+			if !c.GetBool("claude_token_limit_retried") {
+				limit, isExceeded := relaycommon.ParseUniversalContextLimit(newAPIError.Error())
+				if isExceeded {
+					c.Set("claude_token_limit_retried", true)
+					if limit > 0 {
+						c.Set("forced_max_tokens", limit)
+						common.SetContextKey(c, "forced_max_tokens", limit)
+						relaycommon.RecordGlobalModelTokenLimit(info.GetOriginModelName(), limit)
+						relaycommon.RecordGlobalModelTokenLimit(info.GetUpstreamModelName(), limit)
+					}
+					if relaycommon.AutoPruneClaudeRequest(c, info, request, limit) {
+						logger.LogWarn(c, fmt.Sprintf("收到 Claude 上游 Token 超限报错 (%s)，已自动滑动裁剪历史对话并立即重试...", newAPIError.Error()))
+						newJsonData, mErr := common.Marshal(request)
+						if mErr == nil {
+							if repaired, repErr := relaycommon.EnsureClaudeToolIDs(newJsonData); repErr == nil && len(repaired) > 0 {
+								newJsonData = repaired
+							}
+							_ = relaycommon.UpdatePrunedRequestBody(c, info)
+							newBody, closer, bErr := relaycommon.NewOutboundJSONBody(newJsonData)
+							if bErr == nil {
+								defer closer.Close()
+								retryResp, rErr := adaptor.DoRequest(c, info, newBody)
+								if rErr == nil && retryResp != nil {
+									retryHttpResp := retryResp.(*http.Response)
+									if retryHttpResp.StatusCode == http.StatusOK {
+										logger.LogInfo(c, "Claude Token 超限就地滑动裁剪重试成功，已拿到上游 200 OK 响应")
+										usage, resErr := adaptor.DoResponse(c, retryHttpResp, info)
+										if resErr != nil {
+											service.ResetStatusCode(resErr, statusCodeMappingStr)
+											service.SettleInterruptedRequestIfNeeded(c, info, usage, resErr)
+											return resErr
+										}
+										service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
+										return nil
+									}
+									newAPIError = service.RelayErrorHandler(c.Request.Context(), retryHttpResp, false)
+									service.ResetStatusCode(newAPIError, statusCodeMappingStr)
+								}
+							}
+						}
+					}
+				}
+			}
+
 			return newAPIError
 		}
 	}

@@ -173,6 +173,7 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 						if len(info.ParamOverride) > 0 {
 							newJsonData, _ = relaycommon.ApplyParamOverrideWithRelayInfo(newJsonData, info)
 						}
+						_ = relaycommon.UpdatePrunedRequestBody(c, info)
 						newBody, closer, bErr := relaycommon.NewOutboundJSONBody(newJsonData)
 						if bErr == nil {
 							defer closer.Close()
@@ -321,8 +322,7 @@ func isGeminiTokenLimitError(err *types.NewAPIError) bool {
 	if err == nil {
 		return false
 	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "exceeds the maximum number of tokens allowed") ||
-		strings.Contains(msg, "the input token count exceeds")
+	_, isExceeded := relaycommon.ParseUniversalContextLimit(err.Error())
+	return isExceeded
 }
 

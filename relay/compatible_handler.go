@@ -9,7 +9,6 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
-	"github.com/QuantumNous/new-api/relay/channel/gemini"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
@@ -174,17 +173,42 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 			// reset status code 重置状态码
 			service.ResetStatusCode(newApiErr, statusCodeMappingStr)
 
-			// 只要出现 Token 超限报错，则就进行智能裁剪重试请求！
-			if !c.GetBool("gemini_token_limit_retried") && isGeminiTokenLimitError(newApiErr) {
-				c.Set("gemini_token_limit_retried", true)
-				if geminiReq, ok := convertedRequest.(*dto.GeminiChatRequest); ok && geminiReq != nil {
-					if gemini.PruneOnTokenLimitExceeded(c, info, geminiReq, newApiErr.Error()) {
-						logger.LogWarn(c, fmt.Sprintf("收到上游 Token 超限报错 (%s)，已自动智能滑动裁剪历史对话，正在立即重试请求...", newApiErr.Error()))
-						newJsonData, mErr := common.Marshal(geminiReq)
+			// 只要出现 Token 超限报错，则就进行智能裁剪重试请求（通用自愈，覆盖 OpenAI、Gemini、Claude、DeepSeek 等所有模型）！
+			if !c.GetBool("universal_token_limit_retried") {
+				limit, isExceeded := relaycommon.ParseUniversalContextLimit(newApiErr.Error())
+				if isExceeded {
+					c.Set("universal_token_limit_retried", true)
+					if limit > 0 {
+						c.Set("forced_max_tokens", limit)
+						common.SetContextKey(c, "forced_max_tokens", limit)
+						relaycommon.RecordGlobalModelTokenLimit(info.GetOriginModelName(), limit)
+						relaycommon.RecordGlobalModelTokenLimit(info.GetUpstreamModelName(), limit)
+					}
+					pruned := false
+					if convertedRequest != nil {
+						pruned = relaycommon.UniversalPruneAnyRequest(c, info, convertedRequest, limit)
+					}
+					if request != nil && any(request) != convertedRequest {
+						if relaycommon.AutoPruneOpenAIRequest(c, info, request, limit) {
+							pruned = true
+						}
+					}
+					if pruned {
+						logger.LogWarn(c, fmt.Sprintf("收到上游 Token 超限报错 (%s)，已自动通用智能滑动裁剪历史对话，正在立即重试请求...", newApiErr.Error()))
+						targetReq := convertedRequest
+						if targetReq == nil {
+							targetReq = request
+						}
+						newJsonData, mErr := common.Marshal(targetReq)
 						if mErr == nil {
+							newJsonData, _ = relaycommon.RemoveDisabledFields(newJsonData, info.ChannelOtherSettings, info.ChannelSetting.PassThroughBodyEnabled)
 							if len(info.ParamOverride) > 0 {
 								newJsonData, _ = relaycommon.ApplyParamOverrideWithRelayInfo(newJsonData, info)
 							}
+							if repaired, repErr := relaycommon.EnsureClaudeToolIDs(newJsonData); repErr == nil && len(repaired) > 0 {
+								newJsonData = repaired
+							}
+							_ = relaycommon.UpdatePrunedRequestBody(c, info)
 							newBody, closer, bErr := relaycommon.NewOutboundJSONBody(newJsonData)
 							if bErr == nil {
 								defer closer.Close()
@@ -192,7 +216,7 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 								if rErr == nil && retryResp != nil {
 									retryHttpResp := retryResp.(*http.Response)
 									if retryHttpResp.StatusCode == http.StatusOK {
-										logger.LogInfo(c, "Token 超限就地滑动裁剪重试成功，已拿到上游 200 OK 响应")
+										logger.LogInfo(c, "Token 超限就地通用滑动裁剪重试成功，已拿到上游 200 OK 响应")
 										usage, resErr := adaptor.DoResponse(c, retryHttpResp, info)
 										if resErr != nil {
 											service.ResetStatusCode(resErr, statusCodeMappingStr)
