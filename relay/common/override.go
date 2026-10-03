@@ -2249,6 +2249,9 @@ func EnsureClaudeToolIDs(data []byte) ([]byte, error) {
 			return data, err
 		}
 	}
+	if cleaned, cerr := EnsureClaudeRequestCleanliness(data); cerr == nil && len(cleaned) > 0 {
+		data = cleaned
+	}
 	return data, nil
 }
 
@@ -2423,4 +2426,126 @@ func cleanEmptyEnumsInJSONNode(node any) (any, bool) {
 		return node, false
 	}
 }
+
+// EnsureClaudeRequestCleanliness 清洗 Claude 请求中的空白 text block、空内容和空白 system，
+// 防止上游 Claude / Vertex 返回 400 "messages: text content blocks must contain non-whitespace text"
+// 或 "system: text content blocks must contain non-whitespace text"。
+func EnsureClaudeRequestCleanliness(data []byte) ([]byte, error) {
+	if len(data) == 0 {
+		return data, nil
+	}
+	var root any
+	if err := common.UnmarshalJsonStr(string(data), &root); err != nil {
+		return data, nil
+	}
+	rootMap, ok := root.(map[string]any)
+	if !ok {
+		return data, nil
+	}
+	dirty := false
+
+	// 1. 清洗 system 字段（字符串或 block 数组）
+	if sysVal, exists := rootMap["system"]; exists && sysVal != nil {
+		switch s := sysVal.(type) {
+		case string:
+			if strings.TrimSpace(s) == "" {
+				delete(rootMap, "system")
+				dirty = true
+			}
+		case []any:
+			cleanedBlocks := cleanClaudeContentBlocks(s)
+			if len(cleanedBlocks) > 0 {
+				rootMap["system"] = cleanedBlocks
+			} else {
+				delete(rootMap, "system")
+			}
+			dirty = true
+		}
+	}
+
+	// 2. 清洗 messages 数组
+	if msgVal, exists := rootMap["messages"]; exists && msgVal != nil {
+		if messages, ok := msgVal.([]any); ok && len(messages) > 0 {
+			cleanedMessages := make([]any, 0, len(messages))
+			for _, item := range messages {
+				msgMap, ok := item.(map[string]any)
+				if !ok {
+					cleanedMessages = append(cleanedMessages, item)
+					continue
+				}
+				content := msgMap["content"]
+				if content == nil {
+					msgMap["content"] = "."
+					dirty = true
+					cleanedMessages = append(cleanedMessages, msgMap)
+					continue
+				}
+				switch c := content.(type) {
+				case string:
+					if strings.TrimSpace(c) == "" {
+						msgMap["content"] = "."
+						dirty = true
+					}
+					cleanedMessages = append(cleanedMessages, msgMap)
+				case []any:
+					cleanedBlocks := cleanClaudeContentBlocks(c)
+					if len(cleanedBlocks) > 0 {
+						msgMap["content"] = cleanedBlocks
+					} else {
+						msgMap["content"] = []any{map[string]any{"type": "text", "text": "."}}
+					}
+					dirty = true
+					cleanedMessages = append(cleanedMessages, msgMap)
+				default:
+					msgMap["content"] = "."
+					dirty = true
+					cleanedMessages = append(cleanedMessages, msgMap)
+				}
+			}
+			rootMap["messages"] = cleanedMessages
+		}
+	}
+
+	if !dirty {
+		return data, nil
+	}
+	return common.Marshal(rootMap)
+}
+
+func cleanClaudeContentBlocks(blocks []any) []any {
+	result := make([]any, 0, len(blocks))
+	for _, raw := range blocks {
+		block, ok := raw.(map[string]any)
+		if !ok {
+			result = append(result, raw)
+			continue
+		}
+		bType := strings.ToLower(fmt.Sprintf("%v", block["type"]))
+		if bType == "text" {
+			txt := strings.TrimSpace(fmt.Sprintf("%v", block["text"]))
+			if txt == "" || txt == "<nil>" || txt == "null" {
+				continue // 移除纯空白 text block
+			}
+		} else if bType == "tool_result" {
+			if trContent, has := block["content"]; has && trContent != nil {
+				switch tc := trContent.(type) {
+				case string:
+					if strings.TrimSpace(tc) == "" {
+						block["content"] = "."
+					}
+				case []any:
+					innerCleaned := cleanClaudeContentBlocks(tc)
+					if len(innerCleaned) > 0 {
+						block["content"] = innerCleaned
+					} else {
+						block["content"] = []any{map[string]any{"type": "text", "text": "."}}
+					}
+				}
+			}
+		}
+		result = append(result, block)
+	}
+	return result
+}
+
 

@@ -15,6 +15,7 @@ import (
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 func TestApplyParamOverrideTrimPrefix(t *testing.T) {
@@ -2647,5 +2648,57 @@ func TestEnsureGeminiSchemaCleanliness(t *testing.T) {
 	assert.Contains(t, cleanedStr, `"enum":["A","B","C"]`)
 	assert.NotContains(t, cleanedStr, `"empty_only":{"enum"`)
 }
+
+func TestEnsureClaudeRequestCleanliness(t *testing.T) {
+	t.Run("whitespace string content fallback to dot", func(t *testing.T) {
+		inputJSON := `{"model":"claude-opus-4-6","messages":[{"role":"user","content":"   "}]}`
+		cleanedBytes, err := EnsureClaudeRequestCleanliness([]byte(inputJSON))
+		require.NoError(t, err)
+		assert.Contains(t, string(cleanedBytes), `"content":"."`)
+	})
+
+	t.Run("empty text block array content fallback to dot", func(t *testing.T) {
+		inputJSON := `{"model":"claude-opus-4-6","messages":[{"role":"user","content":[{"type":"text","text":""},{"type":"text","text":"   "}]}]}`
+		cleanedBytes, err := EnsureClaudeRequestCleanliness([]byte(inputJSON))
+		require.NoError(t, err)
+		assert.Equal(t, ".", gjson.Get(string(cleanedBytes), "messages.0.content.0.text").String())
+	})
+
+	t.Run("mixed empty text block with valid text skips empty block", func(t *testing.T) {
+		inputJSON := `{"model":"claude-opus-4-6","messages":[{"role":"user","content":[{"type":"text","text":""},{"type":"text","text":"hello"}]}]}`
+		cleanedBytes, err := EnsureClaudeRequestCleanliness([]byte(inputJSON))
+		require.NoError(t, err)
+		assert.Contains(t, string(cleanedBytes), `"content":[{"text":"hello","type":"text"}]`)
+	})
+
+	t.Run("whitespace system prompt removed", func(t *testing.T) {
+		inputJSON := `{"model":"claude-opus-4-6","system":"   ","messages":[{"role":"user","content":"hi"}]}`
+		cleanedBytes, err := EnsureClaudeRequestCleanliness([]byte(inputJSON))
+		require.NoError(t, err)
+		assert.NotContains(t, string(cleanedBytes), `"system"`)
+	})
+
+	t.Run("empty system array removed", func(t *testing.T) {
+		inputJSON := `{"model":"claude-opus-4-6","system":[{"type":"text","text":""},{"type":"text","text":"   "}],"messages":[{"role":"user","content":"hi"}]}`
+		cleanedBytes, err := EnsureClaudeRequestCleanliness([]byte(inputJSON))
+		require.NoError(t, err)
+		assert.NotContains(t, string(cleanedBytes), `"system"`)
+	})
+
+	t.Run("tool_result with empty content cleaned", func(t *testing.T) {
+		inputJSON := `{"model":"claude-opus-4-6","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_123","content":[{"type":"text","text":""}]}]}]}`
+		cleanedBytes, err := EnsureClaudeRequestCleanliness([]byte(inputJSON))
+		require.NoError(t, err)
+		assert.Contains(t, string(cleanedBytes), `"text":"."`)
+	})
+
+	t.Run("integrated into EnsureClaudeToolIDs", func(t *testing.T) {
+		inputJSON := `{"model":"claude-opus-4-6","messages":[{"role":"user","content":"   "}]}`
+		cleanedBytes, err := EnsureClaudeToolIDs([]byte(inputJSON))
+		require.NoError(t, err)
+		assert.Contains(t, string(cleanedBytes), `"content":"."`)
+	})
+}
+
 
 
