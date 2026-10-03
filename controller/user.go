@@ -474,6 +474,15 @@ func GetAllUsers(c *gin.Context) {
 	return
 }
 
+func GetTodayConsumptionUsers(c *gin.Context) {
+	candidates, err := model.GetTodayConsumptionUsers()
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, candidates)
+}
+
 func SearchUsers(c *gin.Context) {
 	keyword := c.Query("keyword")
 	group := c.Query("group")

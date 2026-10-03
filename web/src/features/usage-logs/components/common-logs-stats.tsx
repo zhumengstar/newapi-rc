@@ -25,7 +25,7 @@ import { formatLogQuota } from '@/lib/format'
 import { requireServerSuccess } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
 
-import { getCurrentMinuteIncome, getLogStats, getUserLogStats } from '../api'
+import { getLogStats, getUserLogStats } from '../api'
 import { DEFAULT_LOG_STATS } from '../constants'
 import { buildApiParams, getDefaultTimeRange } from '../lib/utils'
 import { useLogsViewScope, useUsageLogsContext } from './usage-logs-provider'
@@ -63,17 +63,15 @@ export function CommonLogsStats() {
     queryKey: ['usage-logs-stats', isAdmin, searchParams, refreshTrigger],
     queryFn: async () => {
       let effectiveSearchParams = searchParams
-      if (autoRefresh) {
-        const nowMs = Date.now()
-        const endParam = searchParams.endTime ? Number(searchParams.endTime) : 0
-        const isHistorical = endParam > 0 && endParam < nowMs - 60 * 1000
-        if (!isHistorical) {
-          const defaultRange = getDefaultTimeRange()
-          effectiveSearchParams = {
-            ...searchParams,
-            startTime: searchParams.startTime ?? defaultRange.start.getTime(),
-            endTime: nowMs + 3600 * 1000,
-          }
+      const nowMs = Date.now()
+      const endParam = searchParams.endTime ? Number(searchParams.endTime) : 0
+      const isHistorical = endParam > 0 && endParam < nowMs - 60 * 1000
+      if (!isHistorical) {
+        const defaultRange = getDefaultTimeRange()
+        effectiveSearchParams = {
+          ...searchParams,
+          startTime: searchParams.startTime ?? defaultRange.start.getTime(),
+          endTime: nowMs + 3600 * 1000,
         }
       }
 
@@ -93,18 +91,6 @@ export function CommonLogsStats() {
         ? result.data || DEFAULT_LOG_STATS
         : DEFAULT_LOG_STATS
     },
-    refetchInterval: autoRefresh ? refreshInterval : false,
-    refetchIntervalInBackground: false,
-    placeholderData: (previousData) => previousData,
-  })
-
-  const { data: incomeData } = useQuery({
-    queryKey: ['usage-logs-current-minute-income', refreshTrigger],
-    queryFn: async () => {
-      const result = await getCurrentMinuteIncome()
-      return result.success ? result.data : null
-    },
-    enabled: isAdmin,
     refetchInterval: autoRefresh ? refreshInterval : false,
     refetchIntervalInBackground: false,
     placeholderData: (previousData) => previousData,
@@ -143,15 +129,11 @@ export function CommonLogsStats() {
           label={t('MPM')}
           value={
             sensitiveVisible
-              ? formatLogQuota(incomeData?.minute_quota ?? 0)
+              ? formatLogQuota(stats?.mpm ?? 0)
               : '••••'
           }
           accent='bg-emerald-500/70'
-          title={
-            incomeData?.hour_quota
-              ? `${t('Current Minute Income')}: ${formatLogQuota(incomeData.minute_quota)} (${t('Last Hour')}: ${formatLogQuota(incomeData.hour_quota)})`
-              : t('Current Minute Income')
-          }
+          title={t('Current Minute Spend (MPM)') || '最近一分钟消耗金额 (MPM)'}
         />
       )}
     </div>

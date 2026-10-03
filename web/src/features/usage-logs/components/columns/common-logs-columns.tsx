@@ -32,7 +32,6 @@ import {
 import {
   Tooltip,
   TooltipContent,
-  TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { usePricingData } from '@/features/pricing/hooks/use-pricing-data'
@@ -411,8 +410,7 @@ export function useCommonLogsColumns(
             Number.isFinite(multiKeyIndex)
 
           return (
-            <TooltipProvider>
-              <Tooltip>
+            <Tooltip>
                 <TooltipTrigger
                   render={
                     <div className='flex max-w-[160px] flex-col gap-0.5' />
@@ -531,7 +529,6 @@ export function useCommonLogsColumns(
                   </div>
                 </TooltipContent>
               </Tooltip>
-            </TooltipProvider>
           )
         },
       },
@@ -571,20 +568,18 @@ export function useCommonLogsColumns(
                   {sensitiveVisible ? getUserAvatarFallback(log.username) : '•'}
                 </AvatarFallback>
               </Avatar>
-              <TooltipProvider delay={300}>
-                <Tooltip>
-                  <TooltipTrigger
-                    render={
-                      <span className='text-muted-foreground max-w-[100px] truncate text-sm hover:underline' />
-                    }
-                  >
-                    {sensitiveVisible ? log.username : '••••'}
-                  </TooltipTrigger>
-                  {sensitiveVisible && log.username.length > 12 && (
-                    <TooltipContent side='top'>{log.username}</TooltipContent>
-                  )}
-                </Tooltip>
-              </TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <span className='text-muted-foreground max-w-[100px] truncate text-sm hover:underline' />
+                  }
+                >
+                  {sensitiveVisible ? log.username : '••••'}
+                </TooltipTrigger>
+                {sensitiveVisible && log.username.length > 12 && (
+                  <TooltipContent side='top'>{log.username}</TooltipContent>
+                )}
+              </Tooltip>
             </button>
           )
         },
@@ -611,25 +606,23 @@ export function useCommonLogsColumns(
 
       return (
         <div className='flex max-w-[200px] flex-col gap-0.5'>
-          <TooltipProvider delay={300}>
-            <Tooltip>
-              <TooltipTrigger render={<div className='max-w-full' />}>
-                <StatusBadge
-                  label={displayName}
-                  icon={KeyRound}
-                  copyText={sensitiveVisible ? tokenName : undefined}
-                  size='sm'
-                  showDot={false}
-                  className='border-border/60 bg-muted/30 text-foreground h-6 max-w-full gap-1.5 overflow-hidden rounded-md border px-2 py-0.5 [font-family:var(--font-body)]'
-                />
-              </TooltipTrigger>
-              {sensitiveVisible && tokenName.length > 16 && (
-                <TooltipContent side='top' className='max-w-xs break-all'>
-                  {tokenName}
-                </TooltipContent>
-              )}
-            </Tooltip>
-          </TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger render={<div className='max-w-full' />}>
+              <StatusBadge
+                label={displayName}
+                icon={KeyRound}
+                copyText={sensitiveVisible ? tokenName : undefined}
+                size='sm'
+                showDot={false}
+                className='border-border/60 bg-muted/30 text-foreground h-6 max-w-full gap-1.5 overflow-hidden rounded-md border px-2 py-0.5 [font-family:var(--font-body)]'
+              />
+            </TooltipTrigger>
+            {sensitiveVisible && tokenName.length > 16 && (
+              <TooltipContent side='top' className='max-w-xs break-all'>
+                {tokenName}
+              </TooltipContent>
+            )}
+          </Tooltip>
           {(group || groupRatio != null) && (
             <span className='block max-w-full truncate text-xs leading-none'>
               {group ? (

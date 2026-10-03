@@ -27,7 +27,6 @@ import {
 import {
   Tooltip,
   TooltipContent,
-  TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { formatUseTime } from '@/lib/format'
@@ -195,26 +194,24 @@ export function StreamTpsCell(props: StreamTpsCellProps) {
       >
         {streamLabel}
         {showStreamError && (
-          <TooltipProvider>
-            <Tooltip>
-              <TooltipTrigger
-                render={<CircleAlert className='text-destructive size-3' />}
-              />
-              <TooltipContent>
-                <div className='space-y-0.5 text-xs'>
+          <Tooltip>
+            <TooltipTrigger
+              render={<CircleAlert className='text-destructive size-3' />}
+            />
+            <TooltipContent>
+              <div className='space-y-0.5 text-xs'>
+                <p>
+                  {t('Stream Status')}: {t('Error')}
+                </p>
+                <p>{props.streamStatus?.end_reason || 'unknown'}</p>
+                {(props.streamStatus?.error_count ?? 0) > 0 && (
                   <p>
-                    {t('Stream Status')}: {t('Error')}
+                    {t('Soft Errors')}: {props.streamStatus?.error_count}
                   </p>
-                  <p>{props.streamStatus?.end_reason || 'unknown'}</p>
-                  {(props.streamStatus?.error_count ?? 0) > 0 && (
-                    <p>
-                      {t('Soft Errors')}: {props.streamStatus?.error_count}
-                    </p>
-                  )}
-                </div>
-              </TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
+                )}
+              </div>
+            </TooltipContent>
+          </Tooltip>
         )}
       </span>
       {(!props.compact ||

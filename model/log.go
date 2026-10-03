@@ -563,7 +563,7 @@ func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName
 	}
 	countKey := buildLogCountCacheKey(
 		"all",
-		strconv.Itoa(logType), strconv.FormatInt(startTimestamp, 10), strconv.FormatInt(endTimestamp, 10),
+		strconv.Itoa(logType), normalizeTimestampForCountCache(startTimestamp), normalizeTimestampForCountCache(endTimestamp),
 		modelName, username, tokenName, strconv.Itoa(channel), group, requestId, upstreamRequestId, code,
 	)
 	countTx := tx.Session(&gorm.Session{})
@@ -678,7 +678,7 @@ func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int
 	}
 	countKey := buildLogCountCacheKey(
 		"user", strconv.Itoa(userId), strconv.Itoa(logType),
-		strconv.FormatInt(startTimestamp, 10), strconv.FormatInt(endTimestamp, 10),
+		normalizeTimestampForCountCache(startTimestamp), normalizeTimestampForCountCache(endTimestamp),
 		modelName, tokenName, group, requestId, upstreamRequestId, code,
 	)
 	countTx := tx.Session(&gorm.Session{})
@@ -707,9 +707,10 @@ func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int
 }
 
 type Stat struct {
-	Quota int `json:"quota"`
-	Rpm   int `json:"rpm"`
-	Tpm   int `json:"tpm"`
+	Quota int   `json:"quota"`
+	Rpm   int   `json:"rpm"`
+	Tpm   int   `json:"tpm"`
+	Mpm   int64 `json:"mpm"`
 }
 
 type logStatCacheItem struct {
@@ -749,7 +750,7 @@ func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelNa
 			return Stat{}, queryErr
 		}
 
-		ttl := 10 * time.Second
+		ttl := 2 * time.Second
 		if endTimestamp > 0 && endTimestamp < now.Unix()-60 {
 			ttl = 5 * time.Minute
 		}
@@ -780,8 +781,8 @@ func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelNa
 func sumUsedQuotaFromDB(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string) (stat Stat, err error) {
 	tx := LOG_DB.Table("logs").Select("COALESCE(sum(quota), 0) quota")
 
-	// 为rpm和tpm创建单独的查询
-	rpmTpmQuery := LOG_DB.Table("logs").Select("count(*) rpm, COALESCE(sum(prompt_tokens), 0) + COALESCE(sum(completion_tokens), 0) tpm")
+	// 为rpm、tpm和mpm创建单独的查询
+	rpmTpmQuery := LOG_DB.Table("logs").Select("count(*) rpm, COALESCE(sum(prompt_tokens), 0) + COALESCE(sum(completion_tokens), 0) tpm, COALESCE(sum(quota), 0) mpm")
 
 	if tx, err = applyExplicitLogTextFilter(tx, "username", username); err != nil {
 		return stat, err
@@ -817,13 +818,14 @@ func sumUsedQuotaFromDB(logType int, startTimestamp int64, endTimestamp int64, m
 	tx = tx.Where("type = ?", LogTypeConsume)
 	rpmTpmQuery = rpmTpmQuery.Where("type = ?", LogTypeConsume)
 
-	// 只统计最近60秒的rpm和tpm
+	// 只统计最近60秒的rpm、tpm和mpm
 	rpmTpmQuery = rpmTpmQuery.Where("created_at >= ?", time.Now().Add(-60*time.Second).Unix())
 
 	var (
 		rateStat struct {
 			Rpm int
 			Tpm int
+			Mpm int64
 		}
 		wg       sync.WaitGroup
 		quotaErr error
@@ -848,6 +850,7 @@ func sumUsedQuotaFromDB(logType int, startTimestamp int64, endTimestamp int64, m
 	}()
 
 	wg.Wait()
+
 	if quotaErr != nil {
 		return stat, quotaErr
 	}
@@ -857,6 +860,7 @@ func sumUsedQuotaFromDB(logType int, startTimestamp int64, endTimestamp int64, m
 
 	stat.Rpm = rateStat.Rpm
 	stat.Tpm = rateStat.Tpm
+	stat.Mpm = rateStat.Mpm
 
 	return stat, nil
 }

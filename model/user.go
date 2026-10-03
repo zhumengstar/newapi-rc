@@ -498,6 +498,84 @@ func getTodayUserConsumptionMap() (map[int]int64, []int, error) {
 	return quotaMap, sortedIDs, nil
 }
 
+type UserConsumptionCandidate struct {
+	Username           string `json:"username"`
+	TodayConsumedQuota int64  `json:"today_consumed_quota"`
+}
+
+var (
+	todayConsumptionUsersCache    []UserConsumptionCandidate
+	todayConsumptionUsersCacheExp time.Time
+	todayConsumptionUsersCacheMu  sync.RWMutex
+)
+
+func GetTodayConsumptionUsers() ([]UserConsumptionCandidate, error) {
+	now := time.Now()
+	todayConsumptionUsersCacheMu.RLock()
+	if now.Before(todayConsumptionUsersCacheExp) && todayConsumptionUsersCache != nil {
+		res := todayConsumptionUsersCache
+		todayConsumptionUsersCacheMu.RUnlock()
+		return res, nil
+	}
+	todayConsumptionUsersCacheMu.RUnlock()
+
+	todayStart := shanghaiTodayStartUnix()
+
+	var quotaDB *gorm.DB = LOG_DB
+	if quotaDB == nil {
+		quotaDB = DB
+	}
+
+	type userQuotaRow struct {
+		Username string `gorm:"column:username"`
+		Quota    int64  `gorm:"column:today_quota"`
+	}
+	var rows []userQuotaRow
+	err := quotaDB.Table("logs").
+		Select("username, COALESCE(SUM(quota), 0) AS today_quota").
+		Where("type = ? AND created_at >= ? AND username != ''", LogTypeConsume, todayStart).
+		Group("username").
+		Having("SUM(quota) > 0").
+		Order("today_quota DESC").
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+
+	seenUsernames := make(map[string]bool, len(rows)+100)
+	candidates := make([]UserConsumptionCandidate, 0, len(rows)+50)
+
+	for _, row := range rows {
+		if row.Username != "" && !seenUsernames[row.Username] {
+			seenUsernames[row.Username] = true
+			candidates = append(candidates, UserConsumptionCandidate{
+				Username:           row.Username,
+				TodayConsumedQuota: row.Quota,
+			})
+		}
+	}
+
+	var allUsernames []string
+	if err := DB.Unscoped().Model(&User{}).Where("status = 1 AND username != ''").Order("id DESC").Pluck("username", &allUsernames).Error; err == nil {
+		for _, name := range allUsernames {
+			if !seenUsernames[name] {
+				seenUsernames[name] = true
+				candidates = append(candidates, UserConsumptionCandidate{
+					Username:           name,
+					TodayConsumedQuota: 0,
+				})
+			}
+		}
+	}
+
+	todayConsumptionUsersCacheMu.Lock()
+	todayConsumptionUsersCache = candidates
+	todayConsumptionUsersCacheExp = now.Add(15 * time.Second)
+	todayConsumptionUsersCacheMu.Unlock()
+
+	return candidates, nil
+}
+
 func applyUserConsumedQuota(users []*User) {
 	if len(users) == 0 {
 		return

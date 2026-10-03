@@ -31,6 +31,7 @@ import type {
   ManageUserQuotaPayload,
   ApiResponse,
   UserConsumptionStats,
+  UserConsumptionCandidate,
 } from './types'
 
 // ============================================================================
@@ -261,3 +262,14 @@ export async function getUserConsumptionStats(): Promise<
   const res = await api.get('/api/user/income_stats')
   return res.data
 }
+
+/**
+ * Get users ranked by today's consumption for selection
+ */
+export async function getTodayConsumptionUsers(): Promise<
+  ApiResponse<UserConsumptionCandidate[]>
+> {
+  const res = await api.get('/api/user/today_consumption_candidates')
+  return res.data
+}
+

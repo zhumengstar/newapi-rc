@@ -25,7 +25,6 @@ import { Badge } from '@/components/ui/badge'
 import {
   Tooltip,
   TooltipContent,
-  TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { formatLogQuota } from '@/lib/format'
@@ -130,15 +129,13 @@ export function LogCostDisplay(props: LogCostDisplayProps) {
   }
 
   return (
-    <TooltipProvider>
-      <div className='inline-flex items-center gap-1'>
-        {isSubscription ? (
-          <SubscriptionBadge quota={props.quota} />
-        ) : (
-          <QuotaBadge quota={props.quota} />
-        )}
-        {showToolSurcharge ? <ToolSurchargeMarker /> : null}
-      </div>
-    </TooltipProvider>
+    <div className='inline-flex items-center gap-1'>
+      {isSubscription ? (
+        <SubscriptionBadge quota={props.quota} />
+      ) : (
+        <QuotaBadge quota={props.quota} />
+      )}
+      {showToolSurcharge ? <ToolSurchargeMarker /> : null}
+    </div>
   )
 }

@@ -178,3 +178,8 @@ export interface ManageUserQuotaPayload {
 // ============================================================================
 
 export type UsersDialogType = 'create' | 'update' | 'delete'
+
+export interface UserConsumptionCandidate {
+  username: string
+  today_consumed_quota: number
+}

@@ -146,6 +146,7 @@ func SetApiRouter(router *gin.Engine) {
 			adminRoute.Use(middleware.AdminAuth())
 			{
 				adminRoute.GET("/", controller.GetAllUsers)
+				adminRoute.GET("/today_consumption_candidates", controller.GetTodayConsumptionUsers)
 				adminRoute.GET("/income_stats", controller.GetRecentDailyIncomeStats)
 				adminRoute.GET("/per_call_model_prices", controller.GetPerCallModelPrices)
 				adminRoute.GET("/topup", controller.GetAllTopUps)

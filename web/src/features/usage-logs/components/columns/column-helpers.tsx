@@ -26,7 +26,6 @@ import { StatusBadge } from '@/components/status-badge'
 import {
   Tooltip,
   TooltipContent,
-  TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { formatTimestampToDate, formatTokens } from '@/lib/format'
@@ -50,18 +49,16 @@ export function CacheTooltip({
   if (tokens <= 0) return null
 
   return (
-    <TooltipProvider>
-      <Tooltip>
-        <TooltipTrigger
-          render={<Zap className={`size-3 flex-shrink-0 ${color}`} />}
-        ></TooltipTrigger>
-        <TooltipContent side='top'>
-          <p className='text-xs'>
-            {label}: {formatTokens(tokens)}
-          </p>
-        </TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
+    <Tooltip>
+      <TooltipTrigger
+        render={<Zap className={`size-3 flex-shrink-0 ${color}`} />}
+      ></TooltipTrigger>
+      <TooltipContent side='top'>
+        <p className='text-xs'>
+          {label}: {formatTokens(tokens)}
+        </p>
+      </TooltipContent>
+    </Tooltip>
   )
 }
 

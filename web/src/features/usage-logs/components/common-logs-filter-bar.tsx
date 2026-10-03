@@ -40,7 +40,8 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import { getGroups } from '@/features/users/api'
+import { getGroups, getTodayConsumptionUsers } from '@/features/users/api'
+import { formatLogQuota } from '@/lib/format'
 import { useMediaQuery } from '@/hooks'
 import { getUserGroups } from '@/lib/api'
 import { requireServerSuccess } from '@/lib/server-error-message'
@@ -160,6 +161,24 @@ export function CommonLogsFilterBar<TData>(
       .filter((group) => group !== 'auto')
       .map((group) => ({ label: group, value: group }))
   }, [isAdmin, adminGroups, userGroups])
+
+  const { data: userCandidatesData } = useQuery({
+    queryKey: ['today-consumption-users'],
+    queryFn: async () => requireServerSuccess(await getTodayConsumptionUsers()),
+    enabled: isAdmin,
+    staleTime: 60 * 1000,
+  })
+
+  const userOptions = useMemo(() => {
+    const users = userCandidatesData?.data ?? []
+    return users.map((u) => ({
+      value: u.username,
+      label:
+        u.today_consumed_quota > 0
+          ? `${u.username} (${formatLogQuota(u.today_consumed_quota)})`
+          : u.username,
+    }))
+  }, [userCandidatesData])
 
   const searchState = useMemo<CommonLogDraft>(() => {
     const { start, end } = getDefaultTimeRange()
@@ -501,12 +520,20 @@ export function CommonLogsFilterBar<TData>(
         />
       </LogsFilterField>
       {isAdmin && (
-        <LogsFilterField flex className={cn('min-w-[80px]', sensitiveInputClass)}>
-          <LogsFilterInput
+        <LogsFilterField flex className={cn('min-w-[120px]', sensitiveInputClass)}>
+          <Combobox
+            options={userOptions}
+            allowCustomValue
+            aria-label={t('Username')}
+            emptyText={t('No user found.')}
             placeholder={t('Username')}
-            className={sensitiveInputClass}
+            className={cn('h-8 min-w-0 text-sm leading-5', sensitiveInputClass)}
             value={filters.username || ''}
-            onChange={(e) => handleChange('username', e.target.value)}
+            onValueChange={(value) => {
+              const userVal = value || undefined
+              handleChange('username', userVal)
+              handleApply({ ...filters, username: userVal }, logType)
+            }}
             onKeyDown={handleKeyDown}
           />
         </LogsFilterField>

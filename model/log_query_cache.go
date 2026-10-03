@@ -23,11 +23,19 @@ var logCountCache = struct {
 var logCountGroup singleflight.Group
 
 func logCountCacheTTL() time.Duration {
-	seconds := common.GetEnvOrDefault("LOG_COUNT_CACHE_TTL_SECONDS", 5)
+	seconds := common.GetEnvOrDefault("LOG_COUNT_CACHE_TTL_SECONDS", 10)
 	if seconds < 0 {
 		seconds = 0
 	}
 	return time.Duration(seconds) * time.Second
+}
+
+func normalizeTimestampForCountCache(ts int64) string {
+	if ts <= 0 {
+		return "0"
+	}
+	// 归一化到 10 秒窗口，避免高频轮询/实时查询中的时间微小漂移导致 COUNT(*) 击穿缓存
+	return strconv.FormatInt((ts/10)*10, 10)
 }
 
 func buildLogCountCacheKey(prefix string, values ...string) string {
