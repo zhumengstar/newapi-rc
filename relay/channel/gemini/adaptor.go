@@ -55,6 +55,9 @@ func (a *Adaptor) ConvertGeminiRequest(c *gin.Context, info *relaycommon.RelayIn
 			}
 		}
 	}
+	if request.GenerationConfig.ResponseSchema != nil {
+		request.GenerationConfig.ResponseSchema = relayconvert.CleanGeminiSchema(request.GenerationConfig.ResponseSchema)
+	}
 	return request, nil
 }
 

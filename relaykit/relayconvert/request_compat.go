@@ -60,6 +60,10 @@ func OpenAIResponsesRequestToGeminiChat(c context.Context, req *dto.OpenAIRespon
 	return convertCompatRequest[dto.GeminiChatRequest](c, info, types.RelayFormatGemini, req)
 }
 
+func CleanGeminiSchema(schema any) any {
+	return sharedgemini.RemoveAdditionalProperties(schema, 0)
+}
+
 func convertCompatRequest[T any](c context.Context, info convmeta.Meta, target types.RelayFormat, request any) (*T, error) {
 	result, err := ConvertRequest(c, info, target, request)
 	if err != nil {
