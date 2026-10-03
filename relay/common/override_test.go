@@ -2598,5 +2598,27 @@ func TestEnsureToolIDs(t *testing.T) {
 	nestedRepaired, err := EnsureClaudeToolIDs([]byte(nestedJSON))
 	t.Logf("nestedRepaired: %s", string(nestedRepaired))
 	assert.Contains(t, string(nestedRepaired), "toolu_")
+
+	// 验证 EnsureClaudeToolIDs 清理 tools 中 LangChain 注入的 returnDirect / return_direct
+	toolJSON := `{
+		"tools": [
+			{
+				"name": "search",
+				"input_schema": {
+					"type": "object",
+					"returnDirect": true,
+					"return_direct": true,
+					"properties": {
+						"q": {"type": "string", "returnDirect": false}
+					}
+				}
+			}
+		],
+		"messages": [{"role": "user", "content": "hello"}]
+	}`
+	toolRepaired, err := EnsureClaudeToolIDs([]byte(toolJSON))
+	require.NoError(t, err)
+	assert.NotContains(t, string(toolRepaired), "returnDirect")
+	assert.NotContains(t, string(toolRepaired), "return_direct")
 }
 

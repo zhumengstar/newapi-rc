@@ -2238,7 +2238,18 @@ func BuildParamOverrideContext(info *RelayInfo) map[string]any {
 }
 
 func EnsureClaudeToolIDs(data []byte) ([]byte, error) {
-	return ensureToolIDs(data, "messages")
+	var err error
+	data, err = ensureToolIDs(data, "messages")
+	if err != nil {
+		return data, err
+	}
+	if gjson.GetBytes(data, "tools").Exists() {
+		data, err = ensureToolIDs(data, "tools")
+		if err != nil {
+			return data, err
+		}
+	}
+	return data, nil
 }
 
 func ensureToolIDs(data []byte, path string) ([]byte, error) {
@@ -2278,6 +2289,16 @@ func repairToolIDsInNode(node any) (any, bool) {
 		}
 		return val, modified
 	case map[string]any:
+		// 0. 剔除 LangChain 等框架注入的非标准字段 (例如 returnDirect, return_direct)
+		if _, has := val["returnDirect"]; has {
+			delete(val, "returnDirect")
+			modified = true
+		}
+		if _, has := val["return_direct"]; has {
+			delete(val, "return_direct")
+			modified = true
+		}
+
 		// 1. 检查 Claude 协议的 tool_use block
 		if blockType, ok := val["type"].(string); ok && strings.EqualFold(strings.TrimSpace(blockType), "tool_use") {
 			curID := strings.TrimSpace(fmt.Sprintf("%v", val["id"]))
@@ -2322,14 +2343,12 @@ func repairToolIDsInNode(node any) (any, bool) {
 				}
 			}
 		}
-		// 3. 递归遍历 content / parts / messages 等常见字段
+		// 3. 递归遍历所有子字段
 		for k, child := range val {
-			if k == "content" || k == "parts" || k == "messages" {
-				repaired, m := repairToolIDsInNode(child)
-				if m {
-					val[k] = repaired
-					modified = true
-				}
+			repaired, m := repairToolIDsInNode(child)
+			if m {
+				val[k] = repaired
+				modified = true
 			}
 		}
 		return val, modified
