@@ -81,9 +81,7 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 		applySystemPromptIfNeeded(c, info, request)
 		usage, newApiErr := textRequestViaResponses(c, info, adaptor, request)
 		if newApiErr != nil {
-			if service.ShouldSettlePartialStream(c, info, usage) {
-				service.SettlePartialStream(c, info, usage, newApiErr)
-			}
+			service.SettleInterruptedRequestIfNeeded(c, info, usage, newApiErr)
 			return newApiErr
 		}
 
@@ -180,9 +178,7 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 	if newApiErr != nil {
 		// reset status code 重置状态码
 		service.ResetStatusCode(newApiErr, statusCodeMappingStr)
-		if service.ShouldSettlePartialStream(c, info, usage) {
-			service.SettlePartialStream(c, info, usage, newApiErr)
-		}
+		service.SettleInterruptedRequestIfNeeded(c, info, usage, newApiErr)
 		return newApiErr
 	}
 

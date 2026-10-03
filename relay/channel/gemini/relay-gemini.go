@@ -312,7 +312,10 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		if info.ReceivedResponseCount > 0 {
 			usage = service.ResponseText2Usage(c, responseText.String(), info.UpstreamModelName, info.GetEstimatePromptTokens())
 		} else {
-			usage = &dto.Usage{}
+			usage = &dto.Usage{
+				PromptTokens: info.GetEstimatePromptTokens(),
+				TotalTokens:  info.GetEstimatePromptTokens(),
+			}
 		}
 		if imageCount != 0 && usage.CompletionTokens == 0 {
 			usage.CompletionTokens = imageCount * 1400

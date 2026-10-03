@@ -1500,3 +1500,65 @@ func TestAppendToolSurchargeLogInfoWritesOnlyStructuredFields(t *testing.T) {
 	assert.NotContains(t, fields, "image_generation_call")
 	assert.NotContains(t, fields, "image_generation_call_price")
 }
+
+func TestPostTextConsumeQuota_Scenario5_FallbackOnMissingOrZeroUsage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("nil usage falls back to estimate prompt tokens", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(w)
+		ctx.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+		ctx.Set("token_name", "test-token")
+
+		relayInfo := &relaycommon.RelayInfo{
+			UserId:          10,
+			ChannelMeta:     &relaycommon.ChannelMeta{ChannelId: 1},
+			OriginModelName: "gpt-4o",
+			StartTime:       time.Now().Add(-2 * time.Second),
+		}
+		relayInfo.PriceData.GroupRatioInfo.GroupRatio = 1
+		relayInfo.PriceData.ModelRatio = 1
+		relayInfo.PriceData.CompletionRatio = 1
+		relayInfo.SetEstimatePromptTokens(500)
+
+		var extraContent []string
+		PostTextConsumeQuota(ctx, relayInfo, nil, extraContent)
+
+		summary := calculateTextQuotaSummary(ctx, relayInfo, &dto.Usage{PromptTokens: 500, TotalTokens: 500})
+		assert.True(t, summary.hasBillableUsage())
+		assert.Greater(t, summary.Quota, 0)
+	})
+
+	t.Run("zero tokens usage (upstream timeout) falls back to estimate prompt tokens", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(w)
+		ctx.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+		ctx.Set("token_name", "test-token")
+
+		relayInfo := &relaycommon.RelayInfo{
+			UserId:          10,
+			ChannelMeta:     &relaycommon.ChannelMeta{ChannelId: 1},
+			OriginModelName: "claude-3-5-sonnet-20241022",
+			StartTime:       time.Now().Add(-2 * time.Second),
+		}
+		relayInfo.PriceData.GroupRatioInfo.GroupRatio = 1
+		relayInfo.PriceData.ModelRatio = 1
+		relayInfo.PriceData.CompletionRatio = 1
+		relayInfo.SetEstimatePromptTokens(800)
+
+		// 上游超时返回了空对象
+		zeroUsage := &dto.Usage{
+			PromptTokens:     0,
+			CompletionTokens: 0,
+			TotalTokens:      0,
+		}
+
+		var extraContent []string
+		PostTextConsumeQuota(ctx, relayInfo, zeroUsage, extraContent)
+
+		// 验证 zeroUsage 被保底赋上了 PromptTokens
+		assert.Equal(t, 800, zeroUsage.PromptTokens)
+		assert.Equal(t, 800, zeroUsage.TotalTokens)
+	})
+}
+

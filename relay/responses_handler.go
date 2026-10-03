@@ -144,9 +144,7 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 	if newAPIError != nil {
 		// reset status code 重置状态码
 		service.ResetStatusCode(newAPIError, statusCodeMappingStr)
-		if service.ShouldSettlePartialStream(c, info, usage) {
-			service.SettlePartialStream(c, info, usage, newAPIError)
-		}
+		service.SettleInterruptedRequestIfNeeded(c, info, usage, newAPIError)
 		return newAPIError
 	}
 

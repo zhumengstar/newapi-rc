@@ -398,6 +398,27 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 	if usage == nil {
 		extraContent = append(extraContent, "上游无计费信息")
 	}
+
+	// 场景 5 保底：上游超时或未返回 Usage（或返回空 usage / 0 tokens）时，按本地估算 Prompt Tokens 兜底扣费，避免免单
+	if relayInfo != nil && (billingUsage == nil || (billingUsage.TotalTokens == 0 && billingUsage.PromptTokens == 0 && billingUsage.CompletionTokens == 0)) {
+		estimatePrompt := relayInfo.GetEstimatePromptTokens()
+		if estimatePrompt > 0 {
+			if billingUsage == nil {
+				billingUsage = &dto.Usage{
+					PromptTokens: estimatePrompt,
+					TotalTokens:  estimatePrompt,
+				}
+				usage = billingUsage
+			} else {
+				billingUsage.PromptTokens = estimatePrompt
+				billingUsage.TotalTokens = estimatePrompt
+			}
+			extraContent = append(extraContent, "上游未返回有效计费信息（可能超时），按输入估算Token保底扣费")
+			logger.LogWarn(ctx, fmt.Sprintf("upstream usage missing or 0, fallback to estimate prompt tokens: %d, model: %s, userId: %d",
+				estimatePrompt, relayInfo.GetBillingModelName(), relayInfo.UserId))
+		}
+	}
+
 	if originUsage != nil {
 		ObserveChannelAffinityUsageCacheByRelayFormat(ctx, billingUsage, relayInfo.GetFinalRequestRelayFormat())
 	}

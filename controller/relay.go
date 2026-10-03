@@ -181,9 +181,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		// Only return quota if downstream failed and quota was actually pre-consumed
 		if newAPIError != nil {
 			newAPIError = service.NormalizeViolationFeeError(newAPIError)
-			if service.ShouldSettleClientCanceled(c, relayInfo, newAPIError) {
-				service.SettleClientCanceled(c, relayInfo, nil, newAPIError)
-			} else if relayInfo.Billing != nil {
+			if !service.SettleInterruptedRequestIfNeeded(c, relayInfo, nil, newAPIError) && relayInfo.Billing != nil {
 				relayInfo.Billing.Refund(c)
 			}
 			service.ChargeViolationFeeIfNeeded(c, relayInfo, newAPIError)
@@ -260,11 +258,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		newAPIError = service.NormalizeViolationFeeError(newAPIError)
 		relayInfo.LastError = newAPIError
 
-		if service.ShouldSettleClientCanceled(c, relayInfo, newAPIError) {
-			service.SettleClientCanceled(c, relayInfo, nil, newAPIError)
-		} else if service.ShouldSettlePartialStream(c, relayInfo, nil) {
-			service.SettlePartialStream(c, relayInfo, nil, newAPIError)
-		}
+		service.SettleInterruptedRequestIfNeeded(c, relayInfo, nil, newAPIError)
 
 		processChannelAttemptError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, false, relayInfo)
 

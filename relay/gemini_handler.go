@@ -166,9 +166,7 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 	usage, openaiErr := adaptor.DoResponse(c, resp.(*http.Response), info)
 	if openaiErr != nil {
 		service.ResetStatusCode(openaiErr, statusCodeMappingStr)
-		if service.ShouldSettlePartialStream(c, info, usage) {
-			service.SettlePartialStream(c, info, usage, openaiErr)
-		}
+		service.SettleInterruptedRequestIfNeeded(c, info, usage, openaiErr)
 		return openaiErr
 	}
 
@@ -272,9 +270,7 @@ func GeminiEmbeddingHandler(c *gin.Context, info *relaycommon.RelayInfo) (newAPI
 	usage, openaiErr := adaptor.DoResponse(c, resp.(*http.Response), info)
 	if openaiErr != nil {
 		service.ResetStatusCode(openaiErr, statusCodeMappingStr)
-		if service.ShouldSettlePartialStream(c, info, usage) {
-			service.SettlePartialStream(c, info, usage, openaiErr)
-		}
+		service.SettleInterruptedRequestIfNeeded(c, info, usage, openaiErr)
 		return openaiErr
 	}
 

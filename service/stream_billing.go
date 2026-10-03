@@ -27,8 +27,12 @@ func IsClientCanceled(c *gin.Context, err error) bool {
 		if errors.Is(err, context.Canceled) {
 			return true
 		}
+		var apiErr *types.NewAPIError
+		if errors.As(err, &apiErr) && apiErr != nil && apiErr.StatusCode == 499 {
+			return true
+		}
 		errStr := strings.ToLower(err.Error())
-		if strings.Contains(errStr, "context canceled") || strings.Contains(errStr, "client_gone") {
+		if strings.Contains(errStr, "context canceled") || strings.Contains(errStr, "client_gone") || strings.Contains(errStr, "client closed") || strings.Contains(errStr, "broken pipe") || strings.Contains(errStr, "connection reset by peer") {
 			return true
 		}
 	}
@@ -75,68 +79,25 @@ func ShouldSettleClientCanceled(c *gin.Context, info *relaycommon.RelayInfo, err
 	if info.Billing != nil && info.Billing.IsSettled() {
 		return false
 	}
+	if info.StreamStatus != nil && info.StreamStatus.EndReason == relaycommon.StreamEndReasonClientGone {
+		return true
+	}
 	return IsClientCanceled(c, err)
 }
 
-// SettlePartialStream 对中途中断的流式请求按实际产生的 Token 进行强制结算并记录日志
-func SettlePartialStream(c *gin.Context, info *relaycommon.RelayInfo, usage any, apiErr *types.NewAPIError) bool {
-	if info == nil {
-		return false
+// SettleInterruptedRequestIfNeeded 统一检查并结算因客户端断连或流式中途中断的请求
+func SettleInterruptedRequestIfNeeded(c *gin.Context, info *relaycommon.RelayInfo, usage any, apiErr *types.NewAPIError) bool {
+	if ShouldSettleClientCanceled(c, info, apiErr) {
+		return SettleClientCanceled(c, info, usage, apiErr)
 	}
-	if c.GetBool("partial_stream_settled") {
-		return true
+	if ShouldSettlePartialStream(c, info, usage) {
+		return SettlePartialStream(c, info, usage, apiErr)
 	}
-	if info.Billing != nil && info.Billing.IsSettled() {
-		return true
-	}
-
-	var u *dto.Usage
-	if usage != nil {
-		if actualUsage, ok := usage.(*dto.Usage); ok && actualUsage != nil {
-			u = actualUsage
-		}
-	}
-	if u == nil {
-		u = &dto.Usage{}
-	}
-
-	if u.PromptTokens == 0 {
-		u.PromptTokens = info.GetEstimatePromptTokens()
-	}
-	// 如果经过流式传输但未统计到 completion tokens，按接收到的 chunk 数进行保底统计（每个 chunk 估算 15 tokens）
-	if u.CompletionTokens == 0 && info.ReceivedResponseCount > 0 {
-		u.CompletionTokens = info.ReceivedResponseCount * 15
-	}
-	if u.TotalTokens == 0 {
-		u.TotalTokens = u.PromptTokens + u.CompletionTokens
-	}
-
-	errMsg := "上游中途异常中断"
-	if apiErr != nil {
-		errMsg = fmt.Sprintf("上游异常中断(%d): %s", apiErr.StatusCode, common.LocalLogPreview(apiErr.Error()))
-	}
-	extraContent := []string{fmt.Sprintf("流式中途异常中断，已按实际输出结算 [%s]", errMsg)}
-
-	logger.LogWarn(c, fmt.Sprintf("流式请求中途中断但已输出内容，执行保底按实结算: userId=%d, channelId=%d, model=%s, promptTokens=%d, completionTokens=%d, reason=%s",
-		info.UserId, info.ChannelId, info.OriginModelName, u.PromptTokens, u.CompletionTokens, errMsg))
-
-	var containAudioTokens = u.CompletionTokenDetails.AudioTokens > 0 || u.PromptTokensDetails.AudioTokens > 0
-	var containsAudioRatios = ratio_setting.ContainsAudioRatio(info.OriginModelName) || ratio_setting.ContainsAudioCompletionRatio(info.OriginModelName)
-
-	if containAudioTokens && containsAudioRatios {
-		PostAudioConsumeQuota(c, info, u, "")
-	} else {
-		PostTextConsumeQuota(c, info, u, extraContent)
-	}
-
-	// 标记已结算，避免外层再记录重复的 0 额度错误日志
-	c.Set("partial_stream_settled", true)
-	common.SetContextKey(c, constant.ContextKeyErrorLogRecorded, true)
-	return true
+	return false
 }
 
-// SettleClientCanceled 对客户端主动取消/断开连接的请求进行按实扣费结算（防止客户端超时断连导致0元免单）
-func SettleClientCanceled(c *gin.Context, info *relaycommon.RelayInfo, usage any, apiErr *types.NewAPIError) bool {
+// settleInterruptedRequest 统一执行中断请求的扣费结算与日志记录
+func settleInterruptedRequest(c *gin.Context, info *relaycommon.RelayInfo, usage any, logMsg string, extraContent []string) bool {
 	if info == nil {
 		return false
 	}
@@ -158,19 +119,17 @@ func SettleClientCanceled(c *gin.Context, info *relaycommon.RelayInfo, usage any
 	}
 
 	if u.PromptTokens == 0 {
-		u.PromptTokens = info.GetEstimatePromptTokens()
+		u.PromptTokens = max(0, info.GetEstimatePromptTokens())
 	}
+	// 如果经过流式传输但未统计到 completion tokens，按接收到的 chunk 数进行保底统计（每个 chunk 估算 15 tokens），并防止溢出
 	if u.CompletionTokens == 0 && info.ReceivedResponseCount > 0 {
-		u.CompletionTokens = info.ReceivedResponseCount * 15
+		u.CompletionTokens = max(0, min(info.ReceivedResponseCount*15, 1<<30))
 	}
 	if u.TotalTokens == 0 {
 		u.TotalTokens = u.PromptTokens + u.CompletionTokens
 	}
 
-	extraContent := []string{"客户端主动断开连接，按已消耗Token结算"}
-
-	logger.LogWarn(c, fmt.Sprintf("客户端主动断开连接(499)，执行按实扣费结算: userId=%d, channelId=%d, model=%s, promptTokens=%d, completionTokens=%d, totalTokens=%d",
-		info.UserId, info.ChannelId, info.OriginModelName, u.PromptTokens, u.CompletionTokens, u.TotalTokens))
+	logger.LogWarn(c, logMsg)
 
 	var containAudioTokens = u.CompletionTokenDetails.AudioTokens > 0 || u.PromptTokensDetails.AudioTokens > 0
 	var containsAudioRatios = ratio_setting.ContainsAudioRatio(info.OriginModelName) || ratio_setting.ContainsAudioCompletionRatio(info.OriginModelName)
@@ -185,5 +144,33 @@ func SettleClientCanceled(c *gin.Context, info *relaycommon.RelayInfo, usage any
 	c.Set("partial_stream_settled", true)
 	common.SetContextKey(c, constant.ContextKeyErrorLogRecorded, true)
 	return true
+}
+
+// SettlePartialStream 对中途中断的流式请求按实际产生的 Token 进行强制结算并记录日志
+func SettlePartialStream(c *gin.Context, info *relaycommon.RelayInfo, usage any, apiErr *types.NewAPIError) bool {
+	if info == nil {
+		return false
+	}
+	errMsg := "上游中途异常中断"
+	if apiErr != nil {
+		errMsg = fmt.Sprintf("上游异常中断(%d): %s", apiErr.StatusCode, common.LocalLogPreview(apiErr.Error()))
+	}
+	extraContent := []string{fmt.Sprintf("流式中途异常中断，已按实际输出结算 [%s]", errMsg)}
+	logMsg := fmt.Sprintf("流式请求中途中断但已输出内容，执行保底按实结算: userId=%d, channelId=%d, model=%s, reason=%s",
+		info.UserId, info.ChannelId, info.OriginModelName, errMsg)
+
+	return settleInterruptedRequest(c, info, usage, logMsg, extraContent)
+}
+
+// SettleClientCanceled 对客户端主动取消/断开连接的请求进行按实扣费结算（防止客户端超时断连导致0元免单）
+func SettleClientCanceled(c *gin.Context, info *relaycommon.RelayInfo, usage any, apiErr *types.NewAPIError) bool {
+	if info == nil {
+		return false
+	}
+	extraContent := []string{"客户端主动断开连接，按已消耗Token结算"}
+	logMsg := fmt.Sprintf("客户端主动断开连接(499)，执行按实扣费结算: userId=%d, channelId=%d, model=%s",
+		info.UserId, info.ChannelId, info.OriginModelName)
+
+	return settleInterruptedRequest(c, info, usage, logMsg, extraContent)
 }
 

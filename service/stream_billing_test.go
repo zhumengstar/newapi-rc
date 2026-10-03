@@ -141,6 +141,7 @@ func TestIsClientCanceled(t *testing.T) {
 
 		assert.True(t, IsClientCanceled(c, context.Canceled))
 		assert.True(t, IsClientCanceled(c, fmt.Errorf("Post http://upstream: context canceled")))
+		assert.True(t, IsClientCanceled(c, types.NewErrorWithStatusCode(fmt.Errorf("client closed"), types.ErrorCodeDoRequestFailed, 499)))
 		assert.False(t, IsClientCanceled(c, fmt.Errorf("connection refused")))
 	})
 }
@@ -198,4 +199,96 @@ func TestSettleClientCanceled(t *testing.T) {
 	assert.True(t, c.GetBool("partial_stream_settled"))
 	assert.True(t, common.GetContextKeyBool(c, constant.ContextKeyErrorLogRecorded))
 }
+
+func TestSettleInterruptedRequestIfNeeded(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("settles client canceled request", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		c.Set("token_name", "test-token")
+
+		info := &relaycommon.RelayInfo{
+			IsStream:        false,
+			UserId:          1,
+			ChannelMeta:     &relaycommon.ChannelMeta{ChannelId: 1},
+			OriginModelName: "claude-opus-4-6",
+			StartTime:       time.Now().Add(-5 * time.Second),
+		}
+		info.SetEstimatePromptTokens(100)
+
+		apiErr := types.NewErrorWithStatusCode(context.Canceled, types.ErrorCodeDoRequestFailed, 499)
+		ok := SettleInterruptedRequestIfNeeded(c, info, nil, apiErr)
+		assert.True(t, ok)
+		assert.True(t, c.GetBool("partial_stream_settled"))
+	})
+
+	t.Run("settles partial stream output request", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		c.Set("token_name", "test-token")
+
+		info := &relaycommon.RelayInfo{
+			IsStream:              true,
+			UserId:                1,
+			ChannelMeta:           &relaycommon.ChannelMeta{ChannelId: 1},
+			OriginModelName:       "claude-opus-4-6",
+			ReceivedResponseCount: 3,
+			StartTime:             time.Now().Add(-5 * time.Second),
+		}
+		info.SetEstimatePromptTokens(100)
+
+		apiErr := types.NewErrorWithStatusCode(fmt.Errorf("stream chunk read error"), types.ErrorCodeDoRequestFailed, 500)
+		ok := SettleInterruptedRequestIfNeeded(c, info, nil, apiErr)
+		assert.True(t, ok)
+		assert.True(t, c.GetBool("partial_stream_settled"))
+	})
+
+	t.Run("returns false when nothing to settle", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+		info := &relaycommon.RelayInfo{
+			IsStream: false,
+		}
+
+		apiErr := types.NewErrorWithStatusCode(fmt.Errorf("upstream 500"), types.ErrorCodeDoRequestFailed, 500)
+		ok := SettleInterruptedRequestIfNeeded(c, info, nil, apiErr)
+		assert.False(t, ok)
+		assert.False(t, c.GetBool("partial_stream_settled"))
+	})
+
+	t.Run("Scenario 2: settles client canceled before first stream chunk (ReceivedResponseCount == 0)", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // 模拟客户端在首个 chunk 前断连挂断
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(ctx)
+		c.Set("token_name", "test-token")
+
+		status := relaycommon.NewStreamStatus()
+		status.SetEndReason(relaycommon.StreamEndReasonClientGone, context.Canceled)
+
+		info := &relaycommon.RelayInfo{
+			IsStream:              true,
+			UserId:                1,
+			ChannelMeta:           &relaycommon.ChannelMeta{ChannelId: 1},
+			OriginModelName:       "claude-opus-4-6",
+			ReceivedResponseCount: 0, // 首个 chunk 尚未收到
+			StreamStatus:          status,
+			StartTime:             time.Now().Add(-5 * time.Second),
+		}
+		info.SetEstimatePromptTokens(250)
+
+		apiErr := types.NewErrorWithStatusCode(context.Canceled, types.ErrorCodeDoRequestFailed, 499)
+		ok := SettleInterruptedRequestIfNeeded(c, info, nil, apiErr)
+		assert.True(t, ok)
+		assert.True(t, c.GetBool("partial_stream_settled"))
+		assert.True(t, common.GetContextKeyBool(c, constant.ContextKeyErrorLogRecorded))
+	})
+}
+
 

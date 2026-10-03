@@ -78,9 +78,7 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		service.ShouldChatCompletionsUseResponsesGlobal(info.ChannelId, info.ChannelType, info.OriginModelName) {
 		usage, newApiErr := textRequestViaResponses(c, info, adaptor, request)
 		if newApiErr != nil {
-			if service.ShouldSettlePartialStream(c, info, usage) {
-				service.SettlePartialStream(c, info, usage, newApiErr)
-			}
+			service.SettleInterruptedRequestIfNeeded(c, info, usage, newApiErr)
 			return newApiErr
 		}
 
@@ -157,9 +155,7 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 	if newAPIError != nil {
 		// reset status code 重置状态码
 		service.ResetStatusCode(newAPIError, statusCodeMappingStr)
-		if service.ShouldSettlePartialStream(c, info, usage) {
-			service.SettlePartialStream(c, info, usage, newAPIError)
-		}
+		service.SettleInterruptedRequestIfNeeded(c, info, usage, newAPIError)
 		return newAPIError
 	}
 
