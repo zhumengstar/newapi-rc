@@ -52,6 +52,7 @@ func (b *taskSubmissionTestBilling) Refund(*gin.Context) {
 }
 
 func (b *taskSubmissionTestBilling) NeedsRefund() bool        { return b.refunds == 0 }
+func (b *taskSubmissionTestBilling) IsSettled() bool          { return false }
 func (b *taskSubmissionTestBilling) GetPreConsumedQuota() int { return 0 }
 func (b *taskSubmissionTestBilling) Reserve(int) error {
 	*b.events = append(*b.events, "reserve")

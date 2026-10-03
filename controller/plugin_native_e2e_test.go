@@ -50,6 +50,10 @@ func (b *nativeRouteBilling) NeedsRefund() bool {
 	return !b.settled && b.preConsumed > 0
 }
 
+func (b *nativeRouteBilling) IsSettled() bool {
+	return b.settled
+}
+
 func (b *nativeRouteBilling) GetPreConsumedQuota() int {
 	return b.preConsumed
 }

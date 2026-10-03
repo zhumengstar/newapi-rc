@@ -74,6 +74,19 @@ func TestShouldSettlePartialStream(t *testing.T) {
 		}
 		assert.False(t, ShouldSettlePartialStream(c, info, nil))
 	})
+
+	t.Run("Trusted user with 0 preconsume should settle when stream has responses", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		mockBilling := &recordingBillingSettler{preConsumedQuota: 0}
+		info := &relaycommon.RelayInfo{
+			IsStream:              true,
+			ReceivedResponseCount: 10,
+			Billing:               mockBilling,
+		}
+		assert.True(t, ShouldSettlePartialStream(c, info, nil))
+	})
 }
 
 func TestSettlePartialStreamMarksErrorLogRecorded(t *testing.T) {

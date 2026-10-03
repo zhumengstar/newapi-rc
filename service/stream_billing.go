@@ -21,7 +21,7 @@ func ShouldSettlePartialStream(c *gin.Context, info *relaycommon.RelayInfo, usag
 	if c.GetBool("partial_stream_settled") {
 		return false
 	}
-	if info.Billing != nil && !info.Billing.NeedsRefund() {
+	if info.Billing != nil && info.Billing.IsSettled() {
 		return false
 	}
 
@@ -35,7 +35,7 @@ func ShouldSettlePartialStream(c *gin.Context, info *relaycommon.RelayInfo, usag
 	}
 
 	// 2. 如果流式已接收到 chunks 并转发给客户端，或者客户端已经收到了 response 数据
-	if info.ReceivedResponseCount > 0 || (c.Writer != nil && c.Writer.Written() && !info.FirstResponseTime.IsZero()) {
+	if info.ReceivedResponseCount > 0 || (c.Writer != nil && c.Writer.Written()) {
 		return true
 	}
 
@@ -48,6 +48,9 @@ func SettlePartialStream(c *gin.Context, info *relaycommon.RelayInfo, usage any,
 		return false
 	}
 	if c.GetBool("partial_stream_settled") {
+		return true
+	}
+	if info.Billing != nil && info.Billing.IsSettled() {
 		return true
 	}
 
