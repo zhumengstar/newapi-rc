@@ -462,7 +462,7 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 	if isNonRetryableClientError(openaiErr) {
 		return false
 	}
-	if isCapacityUnavailableError(openaiErr) || isChannelBalanceExhaustedError(openaiErr) || isRetryableUpstreamError(openaiErr) || isRetryableImageDecodingError(openaiErr) {
+	if isCapacityUnavailableError(openaiErr) || isChannelBalanceExhaustedError(openaiErr) || isRetryableUpstreamError(openaiErr) || isRetryableImageDecodingError(openaiErr) || relaycommon.IsClaudeUnavailablePrompt(openaiErr.Error()) {
 		return true
 	}
 	if types.IsSkipRetryError(openaiErr) {

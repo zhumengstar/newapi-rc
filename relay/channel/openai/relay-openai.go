@@ -122,7 +122,7 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	var streamFunctionCallNames []string
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
-		if lastStreamData != "" {
+		if lastStreamData != "" && !info.ConvertNonStreamToStream {
 			if err := HandleStreamFormat(c, info, lastStreamData, info.ChannelSetting.ForceFormat, info.ChannelSetting.ThinkingToContent); err != nil {
 				common.SysLog("error handling stream format: " + err.Error())
 				sr.Error(err)
@@ -172,7 +172,7 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 		}
 	}
 
-	if info.RelayFormat == types.RelayFormatOpenAI {
+	if info.RelayFormat == types.RelayFormatOpenAI && !info.ConvertNonStreamToStream {
 		if shouldSendLastResp {
 			_ = sendStreamData(c, info, lastStreamData, info.ChannelSetting.ForceFormat, info.ChannelSetting.ThinkingToContent)
 		}
@@ -189,7 +189,35 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 		info.CountBillableToolCall(dto.BuildInCallFunctionCall, name)
 	}
 
-	HandleFinalResponse(c, info, lastStreamData, responseId, createAt, model, systemFingerprint, usage, containStreamUsage)
+	if !info.ConvertNonStreamToStream {
+		HandleFinalResponse(c, info, lastStreamData, responseId, createAt, model, systemFingerprint, usage, containStreamUsage)
+	} else {
+		content := responseTextBuilder.String()
+		chatResponse := dto.OpenAITextResponse{
+			Id:      responseId,
+			Object:  "chat.completion",
+			Created: createAt,
+			Model:   model,
+			Choices: []dto.OpenAITextResponseChoice{
+				{
+					Index: 0,
+					Message: dto.Message{
+						Role:    "assistant",
+						Content: content,
+					},
+					FinishReason: "stop",
+				},
+			},
+			Usage: *usage,
+		}
+		if chatResponse.Id == "" {
+			chatResponse.Id = helper.GetResponseID(c)
+		}
+		if chatResponse.Created == 0 {
+			chatResponse.Created = common.GetTimestamp()
+		}
+		c.JSON(http.StatusOK, chatResponse)
+	}
 
 	return usage, nil
 }

@@ -47,6 +47,22 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 		return newConvertRequestFailedError(c, info, err)
 	}
 
+	// 清洗输入消息中的模型不可用提示废话，避免历史对话诱发模型复读
+	for i := range request.Messages {
+		if request.Messages[i].IsStringContent() {
+			if cleaned, modified := relaycommon.CleanUnavailablePromptFromText(request.Messages[i].StringContent()); modified {
+				request.Messages[i].SetStringContent(cleaned)
+			}
+		}
+	}
+
+	clientIsStream := lo.FromPtrOr(request.Stream, false)
+	if info.ShouldConvertNonStreamToStream(clientIsStream) {
+		info.ConvertNonStreamToStream = true
+		info.IsStream = true
+		request.Stream = lo.ToPtr(true)
+	}
+
 	includeUsage := true
 	// 判断用户是否需要返回使用情况
 	if request.StreamOptions != nil {
@@ -99,7 +115,7 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 	var requestBody io.Reader
 	var convertedRequest any
 
-	if passThroughGlobal || info.ChannelSetting.PassThroughBodyEnabled {
+	if !info.ConvertNonStreamToStream && (passThroughGlobal || info.ChannelSetting.PassThroughBodyEnabled) {
 		storage, err := common.GetBodyStorage(c)
 		if err != nil {
 			return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
@@ -349,6 +365,11 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 
 			return newApiErr
 		}
+	}
+
+	if unavailErr := relaycommon.CheckAndInterceptUnavailableResponse(httpResp); unavailErr != nil {
+		logger.LogWarn(c, "上游响应检测到模型不可用提示 (Claude Opus 4.6 is no longer available)，拦截并触发渠道重试...")
+		return unavailErr
 	}
 
 	usage, newApiErr := adaptor.DoResponse(c, httpResp, info)

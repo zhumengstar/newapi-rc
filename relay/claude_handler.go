@@ -42,6 +42,23 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		return newConvertRequestFailedError(c, info, err)
 	}
 
+	// 清洗输入消息中的模型不可用提示废话，避免历史对话诱发模型复读
+	for i := range request.Messages {
+		if request.Messages[i].IsStringContent() {
+			if cleaned, modified := relaycommon.CleanUnavailablePromptFromText(request.Messages[i].GetStringContent()); modified {
+				request.Messages[i].SetStringContent(cleaned)
+			}
+		}
+	}
+
+	clientIsStream := claudeReq.Stream != nil && *claudeReq.Stream
+	if info.ShouldConvertNonStreamToStream(clientIsStream) {
+		trueVal := true
+		info.ConvertNonStreamToStream = true
+		info.IsStream = true
+		request.Stream = &trueVal
+	}
+
 	adaptor := GetAdaptor(info.ApiType)
 	if adaptor == nil {
 		return types.NewError(fmt.Errorf("invalid api type: %d", info.ApiType), types.ErrorCodeInvalidApiType, types.ErrOptionWithSkipRetry())
@@ -87,7 +104,7 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 	}
 
 	var requestBody io.Reader
-	if model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled {
+	if !info.ConvertNonStreamToStream && (model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled) {
 		storage, err := common.GetBodyStorage(c)
 		if err != nil {
 			return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
@@ -302,6 +319,11 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 
 			return newAPIError
 		}
+	}
+
+	if unavailErr := relaycommon.CheckAndInterceptUnavailableResponse(httpResp); unavailErr != nil {
+		logger.LogWarn(c, "上游响应检测到模型不可用提示 (Claude Opus 4.6 is no longer available)，拦截并触发渠道重试...")
+		return unavailErr
 	}
 
 	usage, newAPIError := adaptor.DoResponse(c, httpResp, info)

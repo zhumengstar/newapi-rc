@@ -93,8 +93,9 @@ type RelayInfo struct {
 	FirstResponseTime time.Time
 	isFirstResponse   bool
 	//SendLastReasoningResponse bool
-	IsStream               bool
-	IsGeminiBatchEmbedding bool
+	IsStream                 bool
+	ConvertNonStreamToStream bool // 客户端为非流式，但向上游以流式请求以避免超时，接收完成后在网关聚合拼装成非流式 JSON 返回
+	IsGeminiBatchEmbedding   bool
 	IsPlayground           bool
 	UsePrice               bool
 	RelayMode              int
@@ -1214,4 +1215,14 @@ func RemoveGeminiDisabledFields(jsonData []byte) ([]byte, error) {
 		return jsonData, nil
 	}
 	return jsonDataAfter, nil
+}
+
+func (info *RelayInfo) ShouldConvertNonStreamToStream(clientIsStream bool) bool {
+	if info == nil || clientIsStream {
+		return false
+	}
+	if info.ChannelSetting.NonStreamToStream {
+		return true
+	}
+	return common.GetEnvOrDefaultBool("NON_STREAM_TO_STREAM", false)
 }

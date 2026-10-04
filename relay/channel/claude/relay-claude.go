@@ -116,7 +116,9 @@ func HandleStreamResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 			}
 		}
 		countClaudeStreamBillableTools(c, info, &claudeResponse)
-		helper.ClaudeChunkData(c, claudeResponse, data)
+		if !info.ConvertNonStreamToStream {
+			helper.ClaudeChunkData(c, claudeResponse, data)
+		}
 	} else if info.RelayFormat == types.RelayFormatOpenAI {
 		state, err := claudeToChatStreamState(info)
 		if err != nil {
@@ -136,9 +138,11 @@ func HandleStreamResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 		if response == nil {
 			return nil
 		}
-		err = helper.ObjectData(c, response)
-		if err != nil {
-			logger.LogError(c, "send_stream_response_failed: "+err.Error())
+		if !info.ConvertNonStreamToStream {
+			err = helper.ObjectData(c, response)
+			if err != nil {
+				logger.LogError(c, "send_stream_response_failed: "+err.Error())
+			}
 		}
 	} else if info.RelayFormat == types.RelayFormatGemini {
 		state, err := claudeToGeminiStreamState(info)
@@ -153,8 +157,10 @@ func HandleStreamResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 			return nil
 		}
 		countClaudeStreamBillableTools(c, info, &claudeResponse)
-		if sendErr := sendGeminiStreamResults(c, results); sendErr != nil {
-			return sendErr
+		if !info.ConvertNonStreamToStream {
+			if sendErr := sendGeminiStreamResults(c, results); sendErr != nil {
+				return sendErr
+			}
 		}
 	}
 	return nil
@@ -255,6 +261,10 @@ func HandleStreamFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, clau
 	}
 	relayconvert.FinalizeClaudeStreamBillingUsage(claudeInfo)
 
+	if info.ConvertNonStreamToStream {
+		return
+	}
+
 	if info.RelayFormat == types.RelayFormatClaude {
 		//
 	} else if info.RelayFormat == types.RelayFormatOpenAI {
@@ -284,6 +294,69 @@ func HandleStreamFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, clau
 	}
 }
 
+func sendNonStreamResponseFromClaude(c *gin.Context, info *relaycommon.RelayInfo, claudeInfo *ClaudeResponseInfo) *types.NewAPIError {
+	text := claudeInfo.ResponseText.String()
+	switch info.RelayFormat {
+	case types.RelayFormatClaude:
+		claudeResponse := dto.ClaudeResponse{
+			Id:         claudeInfo.ResponseId,
+			Type:       "message",
+			Role:       "assistant",
+			Model:      claudeInfo.Model,
+			Content:    []dto.ClaudeMediaMessage{{Type: "text", Text: &text}},
+			StopReason: "end_turn",
+		}
+		if claudeInfo.Usage != nil {
+			claudeResponse.Usage = &dto.ClaudeUsage{
+				InputTokens:              claudeInfo.Usage.PromptTokens,
+				OutputTokens:             claudeInfo.Usage.CompletionTokens,
+				CacheReadInputTokens:     claudeInfo.Usage.PromptTokensDetails.CachedTokens,
+				CacheCreationInputTokens: claudeInfo.Usage.PromptTokensDetails.CachedCreationTokens,
+			}
+		}
+		if claudeResponse.Id == "" {
+			claudeResponse.Id = helper.GetResponseID(c)
+		}
+		c.JSON(http.StatusOK, claudeResponse)
+		return nil
+	case types.RelayFormatOpenAI:
+		var openAIUsage dto.Usage
+		if claudeInfo.Usage != nil {
+			openAIUsage = buildOpenAIStyleUsageFromClaudeUsage(claudeInfo.Usage)
+		}
+		openaiResponse := dto.OpenAITextResponse{
+			Id:      claudeInfo.ResponseId,
+			Object:  "chat.completion",
+			Created: claudeInfo.Created,
+			Model:   claudeInfo.Model,
+			Choices: []dto.OpenAITextResponseChoice{
+				{
+					Index: 0,
+					Message: dto.Message{
+						Role:    "assistant",
+						Content: text,
+					},
+					FinishReason: "stop",
+				},
+			},
+			Usage: openAIUsage,
+		}
+		if openaiResponse.Id == "" {
+			openaiResponse.Id = helper.GetResponseID(c)
+		}
+		c.JSON(http.StatusOK, openaiResponse)
+		return nil
+	default:
+		c.JSON(http.StatusOK, gin.H{
+			"id":      claudeInfo.ResponseId,
+			"model":   claudeInfo.Model,
+			"content": text,
+			"usage":   claudeInfo.Usage,
+		})
+		return nil
+	}
+}
+
 func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*dto.Usage, *types.NewAPIError) {
 	claudeInfo := &ClaudeResponseInfo{
 		ResponseId:   helper.GetResponseID(c),
@@ -308,6 +381,13 @@ func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 	}
 
 	HandleStreamFinalResponse(c, info, claudeInfo)
+
+	if info.ConvertNonStreamToStream {
+		if sendErr := sendNonStreamResponseFromClaude(c, info, claudeInfo); sendErr != nil {
+			return claudeInfo.Usage, sendErr
+		}
+	}
+
 	return claudeInfo.Usage, nil
 }
 
