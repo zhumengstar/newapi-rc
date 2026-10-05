@@ -73,8 +73,8 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 	if !info.SupportStreamOptions || !lo.FromPtrOr(request.Stream, false) {
 		request.StreamOptions = nil
 	} else {
-		// 如果支持StreamOptions，且请求中没有设置StreamOptions，根据配置文件设置StreamOptions
-		if constant.ForceStreamOption {
+		// 如果支持StreamOptions，且请求中没有设置StreamOptions，根据配置文件或流转非流模式设置StreamOptions
+		if constant.ForceStreamOption || info.ConvertNonStreamToStream {
 			request.StreamOptions = &dto.StreamOptions{
 				IncludeUsage: true,
 			}

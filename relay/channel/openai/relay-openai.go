@@ -120,6 +120,7 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	var secondLastStreamData string // 保留倒数第二个stream data；部分兼容网关把完整usage放在倒数第二个事件
 	seenStreamToolCalls := make(map[string]struct{})
 	var streamFunctionCallNames []string
+	streamAgg := NewOpenAIStreamAggregator()
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
 		if lastStreamData != "" && !info.ConvertNonStreamToStream {
@@ -138,6 +139,12 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 			if err := processTokenData(info.RelayMode, data, &responseTextBuilder, &toolCount); err != nil {
 				logger.LogError(c, "error processing stream token data: "+err.Error())
 				sr.Error(err)
+			}
+			if info.ConvertNonStreamToStream {
+				var streamResp dto.ChatCompletionsStreamResponse
+				if err := common.UnmarshalJsonStr(data, &streamResp); err == nil {
+					streamAgg.Feed(&streamResp)
+				}
 			}
 		}
 	})
@@ -192,31 +199,16 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	if !info.ConvertNonStreamToStream {
 		HandleFinalResponse(c, info, lastStreamData, responseId, createAt, model, systemFingerprint, usage, containStreamUsage)
 	} else {
-		content := responseTextBuilder.String()
-		chatResponse := dto.OpenAITextResponse{
-			Id:      responseId,
-			Object:  "chat.completion",
-			Created: createAt,
-			Model:   model,
-			Choices: []dto.OpenAITextResponseChoice{
-				{
-					Index: 0,
-					Message: dto.Message{
-						Role:    "assistant",
-						Content: content,
-					},
-					FinishReason: "stop",
-				},
-			},
-			Usage: *usage,
-		}
+		chatResponse := streamAgg.BuildResponse(responseId, model, createAt, usage, info.ChannelSetting.ThinkingToContent)
 		if chatResponse.Id == "" {
 			chatResponse.Id = helper.GetResponseID(c)
 		}
 		if chatResponse.Created == 0 {
 			chatResponse.Created = common.GetTimestamp()
 		}
-		c.JSON(http.StatusOK, chatResponse)
+		if sendErr := SendNonStreamResponseFromOpenAI(c, info, chatResponse); sendErr != nil {
+			return usage, sendErr
+		}
 	}
 
 	return usage, nil

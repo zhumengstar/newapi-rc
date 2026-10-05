@@ -355,6 +355,7 @@ func GeminiChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *
 	finishReason := constant.FinishReasonStop
 	toolCallIndexByChoice := make(map[int]map[string]int)
 	nextToolCallIndexByChoice := make(map[int]int)
+	streamAgg := openai.NewOpenAIStreamAggregator()
 
 	usage, err := geminiStreamHandler(c, info, resp, func(data string, geminiResponse *dto.GeminiChatResponse) bool {
 		response, isStop := streamResponseGeminiChat2OpenAI(geminiResponse)
@@ -391,6 +392,11 @@ func GeminiChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *
 				m[tool.ID] = idx
 				tool.SetIndex(idx)
 			}
+		}
+
+		if info.ConvertNonStreamToStream {
+			streamAgg.Feed(response)
+			return true
 		}
 
 		logger.LogDebug(c, "info.SendResponseCount = %d", info.SendResponseCount)
@@ -442,6 +448,20 @@ func GeminiChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *
 
 	if err != nil {
 		return usage, err
+	}
+
+	if info.ConvertNonStreamToStream {
+		chatResponse := streamAgg.BuildResponse(id, info.UpstreamModelName, createAt, usage, info.ChannelSetting.ThinkingToContent)
+		if chatResponse.Id == "" {
+			chatResponse.Id = helper.GetResponseID(c)
+		}
+		if chatResponse.Created == 0 {
+			chatResponse.Created = common.GetTimestamp()
+		}
+		if sendErr := openai.SendNonStreamResponseFromOpenAI(c, info, chatResponse); sendErr != nil {
+			return usage, sendErr
+		}
+		return usage, nil
 	}
 
 	response := helper.GenerateFinalUsageResponse(id, createAt, info.UpstreamModelName, *usage)
