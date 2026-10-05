@@ -18,6 +18,7 @@ import (
 	"github.com/QuantumNous/new-api/setting/model_setting"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/sjson"
 )
 
 func stopReasonClaude2OpenAI(reason string) string {
@@ -84,12 +85,63 @@ func FormatClaudeResponseInfo(claudeResponse *dto.ClaudeResponse, oaiResponse *d
 	return relayconvert.FormatClaudeResponseInfo(claudeResponse, oaiResponse, claudeInfo)
 }
 
+func shouldStripClaudeCacheCreation(info *relaycommon.RelayInfo) bool {
+	if info == nil {
+		return false
+	}
+	if info.ChannelMeta != nil && strings.Contains(strings.ToLower(info.ChannelMeta.ChannelBaseUrl), "mysandbox") {
+		return true
+	}
+	return false
+}
+
+func stripClaudeUsageCacheCreation(u *dto.ClaudeUsage) int {
+	if u == nil {
+		return 0
+	}
+	creationTokens := u.GetCacheCreationTotalTokens()
+	if creationTokens > 0 {
+		u.InputTokens += creationTokens
+		u.CacheCreationInputTokens = 0
+		u.CacheCreation = nil
+		u.ClaudeCacheCreation5mTokens = 0
+		u.ClaudeCacheCreation1hTokens = 0
+	}
+	return creationTokens
+}
+
+func stripClaudeStreamChunkCacheCreation(resp *dto.ClaudeResponse, data string) string {
+	if resp == nil {
+		return data
+	}
+	if resp.Message != nil && resp.Message.Usage != nil {
+		stripClaudeUsageCacheCreation(resp.Message.Usage)
+		data, _ = sjson.Set(data, "message.usage.input_tokens", resp.Message.Usage.InputTokens)
+		data, _ = sjson.Delete(data, "message.usage.cache_creation_input_tokens")
+		data, _ = sjson.Delete(data, "message.usage.cache_creation")
+		data, _ = sjson.Delete(data, "message.usage.claude_cache_creation_5_m_tokens")
+		data, _ = sjson.Delete(data, "message.usage.claude_cache_creation_1_h_tokens")
+	}
+	if resp.Usage != nil {
+		stripClaudeUsageCacheCreation(resp.Usage)
+		data, _ = sjson.Set(data, "usage.input_tokens", resp.Usage.InputTokens)
+		data, _ = sjson.Delete(data, "usage.cache_creation_input_tokens")
+		data, _ = sjson.Delete(data, "usage.cache_creation")
+		data, _ = sjson.Delete(data, "usage.claude_cache_creation_5_m_tokens")
+		data, _ = sjson.Delete(data, "usage.claude_cache_creation_1_h_tokens")
+	}
+	return data
+}
+
 func HandleStreamResponseData(c *gin.Context, info *relaycommon.RelayInfo, claudeInfo *ClaudeResponseInfo, data string) *types.NewAPIError {
 	var claudeResponse dto.ClaudeResponse
 	err := common.UnmarshalJsonStr(data, &claudeResponse)
 	if err != nil {
 		common.SysLog("error unmarshalling stream response: " + err.Error())
 		return types.NewError(err, types.ErrorCodeBadResponseBody)
+	}
+	if shouldStripClaudeCacheCreation(info) {
+		data = stripClaudeStreamChunkCacheCreation(&claudeResponse, data)
 	}
 	if claudeError := claudeResponse.GetClaudeError(); claudeError != nil && claudeError.Type != "" {
 		return types.WithClaudeError(*claudeError, http.StatusInternalServerError)
@@ -379,6 +431,9 @@ func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
 		var claudeResponse dto.ClaudeResponse
 		if uerr := common.UnmarshalJsonStr(data, &claudeResponse); uerr == nil {
+			if shouldStripClaudeCacheCreation(info) {
+				data = stripClaudeStreamChunkCacheCreation(&claudeResponse, data)
+			}
 			claudeAgg.Feed(&claudeResponse)
 		}
 		if claudeError := claudeResponse.GetClaudeError(); claudeError != nil && claudeError.Type != "" {
@@ -470,6 +525,9 @@ func HandleClaudeResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 		claudeInfo.Usage = &dto.Usage{}
 	}
 	if claudeResponse.Usage != nil {
+		if shouldStripClaudeCacheCreation(info) {
+			stripClaudeUsageCacheCreation(claudeResponse.Usage)
+		}
 		claudeInfo.Usage.PromptTokens = claudeResponse.Usage.InputTokens
 		claudeInfo.Usage.CompletionTokens = claudeResponse.Usage.OutputTokens
 		claudeInfo.Usage.TotalTokens = claudeResponse.Usage.InputTokens + claudeResponse.Usage.OutputTokens
@@ -509,7 +567,17 @@ func HandleClaudeResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 			return types.NewError(err, types.ErrorCodeBadResponseBody)
 		}
 	case types.RelayFormatClaude:
-		responseData = data
+		if shouldStripClaudeCacheCreation(info) && claudeResponse.Usage != nil {
+			dataStr := string(data)
+			dataStr, _ = sjson.Set(dataStr, "usage.input_tokens", claudeResponse.Usage.InputTokens)
+			dataStr, _ = sjson.Delete(dataStr, "usage.cache_creation_input_tokens")
+			dataStr, _ = sjson.Delete(dataStr, "usage.cache_creation")
+			dataStr, _ = sjson.Delete(dataStr, "usage.claude_cache_creation_5_m_tokens")
+			dataStr, _ = sjson.Delete(dataStr, "usage.claude_cache_creation_1_h_tokens")
+			responseData = []byte(dataStr)
+		} else {
+			responseData = data
+		}
 	case types.RelayFormatGemini:
 		{
 			convertResult, convertErr := service.ConvertResponse(c, info, types.RelayFormatGemini, &claudeResponse)
