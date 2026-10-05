@@ -258,16 +258,16 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		newAPIError = service.NormalizeViolationFeeError(newAPIError)
 		relayInfo.LastError = newAPIError
 
-		service.SettleInterruptedRequestIfNeeded(c, relayInfo, nil, newAPIError)
-
 		processChannelAttemptError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, false, relayInfo)
 
 		if shouldStopRetryAfterSlowImageAttempt(relayInfo, time.Since(attemptStartedAt)) {
 			logger.LogInfo(c, "image upstream attempt exceeded 60s; skip channel retry")
+			service.SettleInterruptedRequestIfNeeded(c, relayInfo, nil, newAPIError)
 			break
 		}
 		if c.Writer.Written() && !isEmptyResponsesOutputError(newAPIError) {
 			logger.LogInfo(c, "upstream response has started; skip channel retry")
+			service.SettleInterruptedRequestIfNeeded(c, relayInfo, nil, newAPIError)
 			break
 		}
 
@@ -288,12 +288,21 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 
 		if !shouldRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry()) {
+			service.SettleInterruptedRequestIfNeeded(c, relayInfo, nil, newAPIError)
 			break
 		}
 		retryParam.MarkChannelTried(channel.Id)
 		if !waitBeforeChannelRetry(c, newAPIError, retryParam.GetRetry()) {
+			service.SettleInterruptedRequestIfNeeded(c, relayInfo, nil, newAPIError)
 			break
 		}
+
+		// 为下一次渠道重试重置单次尝试的流状态
+		relayInfo.ReceivedResponseCount = 0
+		relayInfo.SendResponseCount = 0
+		relayInfo.StreamStatus = nil
+		relayInfo.ClaudeToChatStreamState = nil
+		relayInfo.ChatToGeminiStreamState = nil
 	}
 
 	useChannel := c.GetStringSlice("use_channel")

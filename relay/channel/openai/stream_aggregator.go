@@ -246,7 +246,33 @@ func (agg *OpenAIStreamAggregator) BuildResponse(defaultId, defaultModel string,
 		response.Choices = append(response.Choices, choice)
 	}
 
+
 	return response
+}
+
+func (agg *OpenAIStreamAggregator) HasMeaningfulContent() bool {
+	if agg == nil || len(agg.choiceOrder) == 0 {
+		return false
+	}
+	for _, idx := range agg.choiceOrder {
+		ch := agg.choices[idx]
+		if ch == nil {
+			continue
+		}
+		if strings.TrimSpace(ch.content.String()) != "" {
+			return true
+		}
+		if strings.TrimSpace(ch.reasoning.String()) != "" {
+			return true
+		}
+		if len(ch.toolCallOrder) > 0 {
+			return true
+		}
+		if len(ch.annotations) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func SendNonStreamResponseFromOpenAI(c *gin.Context, info *relaycommon.RelayInfo, chatResponse *dto.OpenAITextResponse) *types.NewAPIError {

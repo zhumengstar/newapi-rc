@@ -356,6 +356,7 @@ func GeminiChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *
 	toolCallIndexByChoice := make(map[int]map[string]int)
 	nextToolCallIndexByChoice := make(map[int]int)
 	streamAgg := openai.NewOpenAIStreamAggregator()
+	var responseTextBuilder strings.Builder
 
 	usage, err := geminiStreamHandler(c, info, resp, func(data string, geminiResponse *dto.GeminiChatResponse) bool {
 		response, isStop := streamResponseGeminiChat2OpenAI(geminiResponse)
@@ -373,6 +374,12 @@ func GeminiChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *
 		}
 		for choiceIdx := range response.Choices {
 			choiceKey := response.Choices[choiceIdx].Index
+			if str := response.Choices[choiceIdx].Delta.GetContentString(); str != "" {
+				responseTextBuilder.WriteString(str)
+			}
+			if rc := response.Choices[choiceIdx].Delta.GetReasoningContent(); rc != "" {
+				responseTextBuilder.WriteString(rc)
+			}
 			for toolIdx := range response.Choices[choiceIdx].Delta.ToolCalls {
 				tool := &response.Choices[choiceIdx].Delta.ToolCalls[toolIdx]
 				if tool.ID == "" {
@@ -462,6 +469,15 @@ func GeminiChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *
 			return usage, types.NewErrorWithStatusCode(errToReport, types.ErrorCodeBadResponseBody, http.StatusBadGateway)
 		}
 
+		if !streamAgg.HasMeaningfulContent() && strings.TrimSpace(responseTextBuilder.String()) == "" {
+			logger.LogWarn(c, fmt.Sprintf("upstream gemini returned empty stream response (no content, reasoning, or tools), req_id=%s, model=%s", c.GetString(common.RequestIdKey), info.UpstreamModelName))
+			return nil, types.NewOpenAIError(
+				fmt.Errorf("upstream gemini returned empty stream response"),
+				types.ErrorCodeEmptyResponse,
+				http.StatusBadGateway,
+			)
+		}
+
 		chatResponse := streamAgg.BuildResponse(id, info.UpstreamModelName, createAt, usage, info.ChannelSetting.ThinkingToContent)
 		if chatResponse.Id == "" {
 			chatResponse.Id = helper.GetResponseID(c)
@@ -473,6 +489,15 @@ func GeminiChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *
 			return usage, sendErr
 		}
 		return usage, nil
+	}
+
+	if c.Writer != nil && !c.Writer.Written() && strings.TrimSpace(responseTextBuilder.String()) == "" && len(toolCallIndexByChoice) == 0 {
+		logger.LogWarn(c, fmt.Sprintf("upstream gemini returned empty stream response before writing to client, req_id=%s, model=%s", c.GetString(common.RequestIdKey), info.UpstreamModelName))
+		return nil, types.NewOpenAIError(
+			fmt.Errorf("upstream gemini returned empty stream response"),
+			types.ErrorCodeEmptyResponse,
+			http.StatusBadGateway,
+		)
 	}
 
 	response := helper.GenerateFinalUsageResponse(id, createAt, info.UpstreamModelName, *usage)
@@ -523,22 +548,10 @@ func GeminiChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.R
 			newAPIError := types.NewOpenAIError(
 				errors.New("empty response from Gemini API"),
 				types.ErrorCodeEmptyResponse,
-				http.StatusInternalServerError,
+				http.StatusBadGateway,
 			)
 
 			service.ResetStatusCode(newAPIError, c.GetString("status_code_mapping"))
-
-			switch info.RelayFormat {
-			case types.RelayFormatClaude:
-				c.JSON(newAPIError.StatusCode, gin.H{
-					"type":  "error",
-					"error": newAPIError.ToClaudeError(),
-				})
-			default:
-				c.JSON(newAPIError.StatusCode, gin.H{
-					"error": newAPIError.ToOpenAIError(),
-				})
-			}
 			return nil, newAPIError
 		}
 	}

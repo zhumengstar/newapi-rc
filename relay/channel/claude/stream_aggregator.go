@@ -225,3 +225,28 @@ func (agg *ClaudeStreamAggregator) Build(claudeInfo *ClaudeResponseInfo, default
 
 	return claudeResp
 }
+
+func (agg *ClaudeStreamAggregator) HasMeaningfulContent() bool {
+	if agg == nil || len(agg.blockOrder) == 0 {
+		return false
+	}
+	for _, idx := range agg.blockOrder {
+		b := agg.blocks[idx]
+		if b == nil {
+			continue
+		}
+		if strings.TrimSpace(b.text.String()) != "" {
+			return true
+		}
+		if strings.TrimSpace(b.thinking.String()) != "" {
+			return true
+		}
+		if b.blockType == "tool_use" {
+			return true
+		}
+		if len(b.citations) > 0 {
+			return true
+		}
+	}
+	return false
+}

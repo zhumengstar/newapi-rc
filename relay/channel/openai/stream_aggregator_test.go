@@ -179,3 +179,73 @@ func TestOpenAIStreamAggregator_ToolCalls(t *testing.T) {
 	assert.Equal(t, "get_news", parsedTools[1].Function.Name)
 	assert.Equal(t, `{"topic": "AI"}`, parsedTools[1].Function.Arguments)
 }
+
+func TestOpenAIStreamAggregator_HasMeaningfulContent(t *testing.T) {
+	// Case 1: Empty aggregator
+	aggEmpty := NewOpenAIStreamAggregator()
+	assert.False(t, aggEmpty.HasMeaningfulContent())
+
+	// Case 2: Aggregator fed empty deltas / whitespace
+	aggWhitespace := NewOpenAIStreamAggregator()
+	aggWhitespace.Feed(&dto.ChatCompletionsStreamResponse{
+		Choices: []dto.ChatCompletionsStreamResponseChoice{
+			{
+				Index: 0,
+				Delta: dto.ChatCompletionsStreamResponseChoiceDelta{
+					Role:    "assistant",
+					Content: kitutil.GetPointer("   \n\t  "),
+				},
+			},
+		},
+	})
+	assert.False(t, aggWhitespace.HasMeaningfulContent())
+
+	// Case 3: Aggregator with text content
+	aggText := NewOpenAIStreamAggregator()
+	aggText.Feed(&dto.ChatCompletionsStreamResponse{
+		Choices: []dto.ChatCompletionsStreamResponseChoice{
+			{
+				Index: 0,
+				Delta: dto.ChatCompletionsStreamResponseChoiceDelta{
+					Content: kitutil.GetPointer("Hello"),
+				},
+			},
+		},
+	})
+	assert.True(t, aggText.HasMeaningfulContent())
+
+	// Case 4: Aggregator with reasoning only
+	aggReasoning := NewOpenAIStreamAggregator()
+	aggReasoning.Feed(&dto.ChatCompletionsStreamResponse{
+		Choices: []dto.ChatCompletionsStreamResponseChoice{
+			{
+				Index: 0,
+				Delta: dto.ChatCompletionsStreamResponseChoiceDelta{
+					ReasoningContent: kitutil.GetPointer("Thinking..."),
+				},
+			},
+		},
+	})
+	assert.True(t, aggReasoning.HasMeaningfulContent())
+
+	// Case 5: Aggregator with tool calls only
+	aggTool := NewOpenAIStreamAggregator()
+	aggTool.Feed(&dto.ChatCompletionsStreamResponse{
+		Choices: []dto.ChatCompletionsStreamResponseChoice{
+			{
+				Index: 0,
+				Delta: dto.ChatCompletionsStreamResponseChoiceDelta{
+					ToolCalls: []dto.ToolCallResponse{
+						{
+							ID: "call_123",
+							Function: dto.FunctionResponse{
+								Name: "search",
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+	assert.True(t, aggTool.HasMeaningfulContent())
+}

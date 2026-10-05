@@ -382,10 +382,25 @@ func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 	HandleStreamFinalResponse(c, info, claudeInfo)
 
 	if info.ConvertNonStreamToStream {
+		if !claudeAgg.HasMeaningfulContent() && strings.TrimSpace(claudeInfo.ResponseText.String()) == "" {
+			logger.LogWarn(c, fmt.Sprintf("upstream claude returned empty stream response (no content, reasoning, or tool_use), req_id=%s, model=%s", c.GetString(common.RequestIdKey), info.UpstreamModelName))
+			return nil, types.NewOpenAIError(
+				fmt.Errorf("upstream claude returned empty stream response"),
+				types.ErrorCodeEmptyResponse,
+				http.StatusBadGateway,
+			)
+		}
 		claudeResp := claudeAgg.Build(claudeInfo, info.UpstreamModelName)
 		if sendErr := sendNonStreamResponseFromClaude(c, info, claudeResp, claudeInfo); sendErr != nil {
 			return claudeInfo.Usage, sendErr
 		}
+	} else if c.Writer != nil && !c.Writer.Written() && strings.TrimSpace(claudeInfo.ResponseText.String()) == "" && !claudeAgg.HasMeaningfulContent() {
+		logger.LogWarn(c, fmt.Sprintf("upstream claude returned empty stream response before writing to client, req_id=%s, model=%s", c.GetString(common.RequestIdKey), info.UpstreamModelName))
+		return nil, types.NewOpenAIError(
+			fmt.Errorf("upstream claude returned empty stream response"),
+			types.ErrorCodeEmptyResponse,
+			http.StatusBadGateway,
+		)
 	}
 
 	return claudeInfo.Usage, nil

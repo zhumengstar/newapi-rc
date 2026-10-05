@@ -190,3 +190,58 @@ func TestClaudeStreamAggregator_ThinkingTextAndToolUse(t *testing.T) {
 	assert.Equal(t, "get_weather", parsedTools[0].Function.Name)
 	assert.JSONEq(t, `{"city":"Tokyo"}`, parsedTools[0].Function.Arguments)
 }
+
+func TestClaudeStreamAggregator_HasMeaningfulContent(t *testing.T) {
+	// Case 1: Empty aggregator
+	aggEmpty := NewClaudeStreamAggregator()
+	assert.False(t, aggEmpty.HasMeaningfulContent())
+
+	// Case 2: Aggregator fed empty text block
+	aggWhitespace := NewClaudeStreamAggregator()
+	aggWhitespace.Feed(&dto.ClaudeResponse{
+		Type:  "content_block_start",
+		Index: kitutil.GetPointer(0),
+		ContentBlock: &dto.ClaudeMediaMessage{
+			Type: "text",
+			Text: kitutil.GetPointer("   \n\t  "),
+		},
+	})
+	assert.False(t, aggWhitespace.HasMeaningfulContent())
+
+	// Case 3: Aggregator with text
+	aggText := NewClaudeStreamAggregator()
+	aggText.Feed(&dto.ClaudeResponse{
+		Type:  "content_block_start",
+		Index: kitutil.GetPointer(0),
+		ContentBlock: &dto.ClaudeMediaMessage{
+			Type: "text",
+			Text: kitutil.GetPointer("Hello from Claude"),
+		},
+	})
+	assert.True(t, aggText.HasMeaningfulContent())
+
+	// Case 4: Aggregator with thinking only
+	aggThinking := NewClaudeStreamAggregator()
+	aggThinking.Feed(&dto.ClaudeResponse{
+		Type:  "content_block_start",
+		Index: kitutil.GetPointer(0),
+		ContentBlock: &dto.ClaudeMediaMessage{
+			Type:     "thinking",
+			Thinking: kitutil.GetPointer("Reasoning..."),
+		},
+	})
+	assert.True(t, aggThinking.HasMeaningfulContent())
+
+	// Case 5: Aggregator with tool_use only
+	aggTool := NewClaudeStreamAggregator()
+	aggTool.Feed(&dto.ClaudeResponse{
+		Type:  "content_block_start",
+		Index: kitutil.GetPointer(0),
+		ContentBlock: &dto.ClaudeMediaMessage{
+			Type: "tool_use",
+			Id:   "toolu_123",
+			Name: "calc",
+		},
+	})
+	assert.True(t, aggTool.HasMeaningfulContent())
+}

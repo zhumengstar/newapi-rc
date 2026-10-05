@@ -205,6 +205,14 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	}
 
 	if !info.ConvertNonStreamToStream {
+		if c.Writer != nil && !c.Writer.Written() && strings.TrimSpace(responseTextBuilder.String()) == "" && toolCount == 0 && len(streamFunctionCallNames) == 0 {
+			logger.LogWarn(c, fmt.Sprintf("upstream returned empty stream response before writing to client, req_id=%s, model=%s", c.GetString(common.RequestIdKey), model))
+			return nil, types.NewOpenAIError(
+				fmt.Errorf("upstream returned empty stream response"),
+				types.ErrorCodeEmptyResponse,
+				http.StatusBadGateway,
+			)
+		}
 		HandleFinalResponse(c, info, lastStreamData, responseId, createAt, model, systemFingerprint, usage, containStreamUsage)
 	} else {
 		if info.StreamStatus != nil && info.StreamStatus.EndReason == relaycommon.StreamEndReasonClientGone {
@@ -216,6 +224,15 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 				errToReport = fmt.Errorf("upstream stream ended abnormally: %s", info.StreamStatus.EndReason)
 			}
 			return usage, types.NewErrorWithStatusCode(errToReport, types.ErrorCodeBadResponseBody, http.StatusBadGateway)
+		}
+
+		if !streamAgg.HasMeaningfulContent() && strings.TrimSpace(responseTextBuilder.String()) == "" && toolCount == 0 && len(streamFunctionCallNames) == 0 {
+			logger.LogWarn(c, fmt.Sprintf("upstream returned empty stream response (no content, reasoning, or tool calls), req_id=%s, model=%s", c.GetString(common.RequestIdKey), model))
+			return nil, types.NewOpenAIError(
+				fmt.Errorf("upstream returned empty stream response"),
+				types.ErrorCodeEmptyResponse,
+				http.StatusBadGateway,
+			)
 		}
 
 		chatResponse := streamAgg.BuildResponse(responseId, model, createAt, usage, info.ChannelSetting.ThinkingToContent)
