@@ -392,9 +392,82 @@ func usageSemanticFromUsage(relayInfo *relaycommon.RelayInfo, usage *dto.Usage) 
 	return "openai"
 }
 
+func isMysandboxChannelForSettlement(ctx *gin.Context, relayInfo *relaycommon.RelayInfo) bool {
+	if relayInfo != nil && relayInfo.ChannelMeta != nil {
+		if strings.Contains(strings.ToLower(relayInfo.ChannelMeta.ChannelBaseUrl), "mysandbox") {
+			return true
+		}
+		switch relayInfo.ChannelMeta.ChannelId {
+		case 384, 385, 393, 394, 401, 402, 403, 404:
+			return true
+		}
+	}
+	if ctx != nil {
+		baseURL := common.GetContextKeyString(ctx, constant.ContextKeyChannelBaseUrl)
+		if strings.Contains(strings.ToLower(baseURL), "mysandbox") {
+			return true
+		}
+		channelId := common.GetContextKeyInt(ctx, constant.ContextKeyChannelId)
+		switch channelId {
+		case 384, 385, 393, 394, 401, 402, 403, 404:
+			return true
+		}
+	}
+	return false
+}
+
+func sanitizeMysandboxUsageForSettlement(usage *dto.Usage) {
+	if usage == nil {
+		return
+	}
+	creation := usage.PromptTokensDetails.CacheCreationTokensTotal()
+	if creation == 0 {
+		creation = usage.ClaudeCacheCreation5mTokens + usage.ClaudeCacheCreation1hTokens
+	}
+	if creation > 0 {
+		usage.PromptTokens += creation
+		usage.PromptTokensDetails.CachedCreationTokens = 0
+		usage.PromptTokensDetails.CacheWriteTokens = 0
+		usage.ClaudeCacheCreation5mTokens = 0
+		usage.ClaudeCacheCreation1hTokens = 0
+	}
+	if usage.BillingUsage != nil {
+		if usage.BillingUsage.ClaudeUsage != nil {
+			cUsage := usage.BillingUsage.ClaudeUsage
+			cCreation := cUsage.GetCacheCreationTotalTokens()
+			if cCreation > 0 {
+				cUsage.InputTokens += cCreation
+				cUsage.CacheCreationInputTokens = 0
+				cUsage.CacheCreation = nil
+				cUsage.ClaudeCacheCreation5mTokens = 0
+				cUsage.ClaudeCacheCreation1hTokens = 0
+			}
+		}
+		if usage.BillingUsage.OpenAIUsage != nil {
+			oUsage := usage.BillingUsage.OpenAIUsage
+			oCreation := oUsage.PromptTokensDetails.CacheCreationTokensTotal()
+			if oCreation == 0 {
+				oCreation = oUsage.ClaudeCacheCreation5mTokens + oUsage.ClaudeCacheCreation1hTokens
+			}
+			if oCreation > 0 {
+				oUsage.PromptTokens += oCreation
+				oUsage.PromptTokensDetails.CachedCreationTokens = 0
+				oUsage.PromptTokensDetails.CacheWriteTokens = 0
+				oUsage.ClaudeCacheCreation5mTokens = 0
+				oUsage.ClaudeCacheCreation1hTokens = 0
+			}
+		}
+	}
+}
+
 func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.Usage, extraContent []string) {
 	originUsage := usage
 	billingUsage := effectiveBillingUsage(usage)
+	if isMysandboxChannelForSettlement(ctx, relayInfo) {
+		sanitizeMysandboxUsageForSettlement(originUsage)
+		sanitizeMysandboxUsageForSettlement(usage)
+		sanitizeMysandboxUsageForSettlement(billingUsage)
+	}
 	if usage == nil {
 		extraContent = append(extraContent, "上游无计费信息")
 	}
@@ -431,6 +504,18 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 		extraContent = append(extraContent, "历史上下文超限，已自动滑动裁剪早期对话")
 	}
 	summary := calculateTextQuotaSummary(ctx, relayInfo, billingUsage)
+	if isMysandboxChannelForSettlement(ctx, relayInfo) {
+		if summary.CacheCreationTokens > 0 || summary.CacheCreationTokens5m > 0 || summary.CacheCreationTokens1h > 0 {
+			creation := summary.CacheCreationTokens
+			if split := summary.CacheCreationTokens5m + summary.CacheCreationTokens1h; split > creation {
+				creation = split
+			}
+			summary.PromptTokens += creation
+			summary.CacheCreationTokens = 0
+			summary.CacheCreationTokens5m = 0
+			summary.CacheCreationTokens1h = 0
+		}
+	}
 
 	var tieredResult *billingexpr.TieredResult
 	var tieredTokens billingexpr.TokenParams
