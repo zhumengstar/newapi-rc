@@ -1,15 +1,19 @@
 package claude
 
 import (
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/relayconvert"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -399,4 +403,103 @@ func TestOpenAIChatRequestToClaudeMessages_ClaudeOpus48ThinkingUsesAdaptiveHighE
 	require.Nil(t, claudeRequest.Temperature)
 	require.Nil(t, claudeRequest.TopP)
 	require.Nil(t, claudeRequest.TopK)
+}
+
+func TestClaudeStreamHandler_PreContentErrorAllowsRetry(t *testing.T) {
+	constant.StreamingTimeout = 30
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+
+	// 模拟上游返回 2 个元数据包后第 3 个包报错
+	ssePayload := strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"type":"message","model":"claude-sonnet-4-6","usage":{"input_tokens":10,"output_tokens":0},"role":"assistant","id":"chatcmpl-1","content":[]}}`,
+		``,
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"type":"message","usage":{"input_tokens":10,"output_tokens":0},"role":"assistant","content":[]}}`,
+		``,
+		`event: error`,
+		`data: {"type":"error","error":{"type":"upstream_error","message":"Upstream request failed"}}`,
+		``,
+	}, "\n")
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(ssePayload)),
+		Header:     make(http.Header),
+	}
+	resp.Header.Set("Content-Type", "text/event-stream")
+
+	info := &relaycommon.RelayInfo{
+		RelayFormat: types.RelayFormatClaude,
+		ChannelMeta: &relaycommon.ChannelMeta{
+			UpstreamModelName: "claude-sonnet-4-6",
+		},
+	}
+
+	usage, err := ClaudeStreamHandler(c, resp, info)
+
+	// 1. 必须返回错误
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Upstream request failed")
+
+	// 2. 客户端 Writer 绝对不能被写入任何数据，保持可重试状态
+	assert.False(t, c.Writer.Written(), "c.Writer.Written() must be false to allow channel retry")
+	assert.Empty(t, w.Body.String(), "no bytes should be sent to downstream client")
+
+	// 3. usage 必须为 nil，绝不能虚构 45 tokens 或计费
+	assert.Nil(t, usage, "usage must be nil on pre-content error")
+	assert.Zero(t, info.ReceivedResponseCount, "ReceivedResponseCount must be reset to 0")
+}
+
+func TestClaudeStreamHandler_NormalStreamFlushesPreContentChunks(t *testing.T) {
+	constant.StreamingTimeout = 30
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+
+	// 模拟正常流式：message_start -> content_block_start -> content_block_delta -> message_stop
+	ssePayload := strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"type":"message","model":"claude-sonnet-4-6","usage":{"input_tokens":10,"output_tokens":0},"role":"assistant","id":"chatcmpl-1","content":[]}}`,
+		``,
+		`event: content_block_start`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		``,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello world"}}`,
+		``,
+		`event: message_delta`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}`,
+		``,
+		`event: message_stop`,
+		`data: {"type":"message_stop"}`,
+		``,
+	}, "\n")
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(ssePayload)),
+		Header:     make(http.Header),
+	}
+	resp.Header.Set("Content-Type", "text/event-stream")
+
+	info := &relaycommon.RelayInfo{
+		RelayFormat: types.RelayFormatClaude,
+		ChannelMeta: &relaycommon.ChannelMeta{
+			UpstreamModelName: "claude-sonnet-4-6",
+		},
+	}
+
+	usage, err := ClaudeStreamHandler(c, resp, info)
+
+	assert.Nil(t, err)
+	assert.True(t, c.Writer.Written(), "c.Writer.Written() must be true after meaningful content output")
+	assert.Contains(t, w.Body.String(), "Hello world")
+	assert.Contains(t, w.Body.String(), "message_start")
+	require.NotNil(t, usage)
+	assert.Equal(t, 5, usage.CompletionTokens)
 }

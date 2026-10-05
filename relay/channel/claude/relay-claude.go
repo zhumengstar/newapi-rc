@@ -359,24 +359,81 @@ func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 	}
 	claudeAgg := NewClaudeStreamAggregator()
 	var err *types.NewAPIError
-	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
-		if info.ConvertNonStreamToStream {
-			var claudeResponse dto.ClaudeResponse
-			if uerr := common.UnmarshalJsonStr(data, &claudeResponse); uerr == nil {
-				claudeAgg.Feed(&claudeResponse)
+	var pendingChunks []string
+	flushed := false
+
+	flushPending := func() *types.NewAPIError {
+		if flushed {
+			return nil
+		}
+		flushed = true
+		for _, pendingData := range pendingChunks {
+			if ferr := HandleStreamResponseData(c, info, claudeInfo, pendingData); ferr != nil {
+				return ferr
 			}
 		}
-		err = HandleStreamResponseData(c, info, claudeInfo, data)
-		if err != nil {
+		pendingChunks = nil
+		return nil
+	}
+
+	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
+		var claudeResponse dto.ClaudeResponse
+		if uerr := common.UnmarshalJsonStr(data, &claudeResponse); uerr == nil {
+			claudeAgg.Feed(&claudeResponse)
+		}
+		if claudeError := claudeResponse.GetClaudeError(); claudeError != nil && claudeError.Type != "" {
+			err = types.WithClaudeError(*claudeError, http.StatusInternalServerError)
 			sr.Stop(err)
+			return
+		}
+
+		if info.ConvertNonStreamToStream {
+			err = HandleStreamResponseData(c, info, claudeInfo, data)
+			if err != nil {
+				sr.Stop(err)
+			}
+			return
+		}
+
+		if !flushed {
+			if claudeAgg.HasMeaningfulContent() || claudeInfo.ResponseText.Len() > 0 {
+				if ferr := flushPending(); ferr != nil {
+					err = ferr
+					sr.Stop(err)
+					return
+				}
+				err = HandleStreamResponseData(c, info, claudeInfo, data)
+				if err != nil {
+					sr.Stop(err)
+				}
+			} else {
+				pendingChunks = append(pendingChunks, data)
+			}
+		} else {
+			err = HandleStreamResponseData(c, info, claudeInfo, data)
+			if err != nil {
+				sr.Stop(err)
+			}
 		}
 	})
 	if err != nil {
-		if info.ReceivedResponseCount > 0 || claudeInfo.ResponseText.Len() > 0 || (claudeInfo.Usage != nil && (claudeInfo.Usage.PromptTokens > 0 || claudeInfo.Usage.CompletionTokens > 0)) {
+		if flushed && (info.ReceivedResponseCount > 0 || claudeInfo.ResponseText.Len() > 0 || (claudeInfo.Usage != nil && (claudeInfo.Usage.PromptTokens > 0 || claudeInfo.Usage.CompletionTokens > 0))) {
 			HandleStreamFinalResponse(c, info, claudeInfo)
 			return claudeInfo.Usage, err
 		}
+		// 首包产生实质内容前遇到上游错误，客户端从未被写入，重置接收计数并返回错误，允许外层切渠道重试且不扣费
+		info.ReceivedResponseCount = 0
 		return nil, err
+	}
+
+	if !flushed && !info.ConvertNonStreamToStream {
+		info.ReceivedResponseCount = 0
+		logger.LogWarn(c, fmt.Sprintf("upstream claude returned empty stream response before writing to client, req_id=%s, model=%s", c.GetString(common.RequestIdKey), info.UpstreamModelName))
+		return nil, types.NewOpenAIError(
+			fmt.Errorf("upstream claude returned empty stream response"),
+			types.ErrorCodeEmptyResponse,
+			http.StatusBadGateway,
+		)
 	}
 
 	HandleStreamFinalResponse(c, info, claudeInfo)
@@ -394,13 +451,6 @@ func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 		if sendErr := sendNonStreamResponseFromClaude(c, info, claudeResp, claudeInfo); sendErr != nil {
 			return claudeInfo.Usage, sendErr
 		}
-	} else if c.Writer != nil && !c.Writer.Written() && strings.TrimSpace(claudeInfo.ResponseText.String()) == "" && !claudeAgg.HasMeaningfulContent() {
-		logger.LogWarn(c, fmt.Sprintf("upstream claude returned empty stream response before writing to client, req_id=%s, model=%s", c.GetString(common.RequestIdKey), info.UpstreamModelName))
-		return nil, types.NewOpenAIError(
-			fmt.Errorf("upstream claude returned empty stream response"),
-			types.ErrorCodeEmptyResponse,
-			http.StatusBadGateway,
-		)
 	}
 
 	return claudeInfo.Usage, nil
