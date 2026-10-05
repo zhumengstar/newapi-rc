@@ -15,6 +15,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestShouldSettlePartialStream(t *testing.T) {
@@ -89,6 +90,18 @@ func TestShouldSettlePartialStream(t *testing.T) {
 		}
 		assert.True(t, ShouldSettlePartialStream(c, info, nil))
 	})
+
+	t.Run("ConvertNonStreamToStream request with received responses should settle", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		info := &relaycommon.RelayInfo{
+			IsStream:                 false,
+			ConvertNonStreamToStream: true,
+			ReceivedResponseCount:    5,
+		}
+		assert.True(t, ShouldSettlePartialStream(c, info, nil))
+	})
 }
 
 func TestSettlePartialStreamMarksErrorLogRecorded(t *testing.T) {
@@ -118,6 +131,48 @@ func TestSettlePartialStreamMarksErrorLogRecorded(t *testing.T) {
 	assert.True(t, ok)
 	assert.True(t, c.GetBool("partial_stream_settled"))
 	assert.True(t, common.GetContextKeyBool(c, constant.ContextKeyErrorLogRecorded))
+}
+
+func TestSettlePartialStreamPreservesEstimatedCompletionTokensWithBillingUsage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	c.Set("token_name", "test-token")
+
+	info := &relaycommon.RelayInfo{
+		IsStream:              true,
+		UserId:                1,
+		ChannelMeta:           &relaycommon.ChannelMeta{ChannelId: 1},
+		OriginModelName:       "claude-opus-4-6",
+		ReceivedResponseCount: 5,
+		StartTime:             time.Now().Add(-5 * time.Second),
+	}
+
+	apiErr := types.NewOpenAIError(assert.AnError, types.ErrorCodeBadResponse, http.StatusInternalServerError)
+	// 模拟流式中断时：顶部 usage 估算出了 200 completion tokens，但 BillingUsage 仍为 0
+	usage := &dto.Usage{
+		PromptTokens:     1000,
+		CompletionTokens: 200,
+		TotalTokens:      1200,
+		BillingUsage: dto.NewClaudeMessagesBillingUsage(&dto.ClaudeUsage{
+			InputTokens:  1000,
+			OutputTokens: 0,
+		}),
+	}
+
+	ok := SettlePartialStream(c, info, usage, apiErr)
+	assert.True(t, ok)
+	assert.True(t, c.GetBool("partial_stream_settled"))
+
+	// 验证 BillingUsage 中的 OutputTokens 已同步更新为 200，绝不为 0
+	require.NotNil(t, usage.BillingUsage)
+	require.NotNil(t, usage.BillingUsage.ClaudeUsage)
+	assert.Equal(t, 200, usage.BillingUsage.ClaudeUsage.OutputTokens)
+
+	// 验证 effectiveBillingUsage 提取时保留 200，不降为 0
+	eff := effectiveBillingUsage(usage)
+	assert.Equal(t, 200, eff.CompletionTokens)
 }
 
 func TestIsClientCanceled(t *testing.T) {

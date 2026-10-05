@@ -41,7 +41,7 @@ func IsClientCanceled(c *gin.Context, err error) bool {
 
 // ShouldSettlePartialStream 检查请求是否在流式传输期间已经部分输出，需要按实际已接收/输出的 Token 执行扣费结算（防止长请求中途中断导致 0 元免单）
 func ShouldSettlePartialStream(c *gin.Context, info *relaycommon.RelayInfo, usage any) bool {
-	if info == nil || !info.IsStream {
+	if info == nil || (!info.IsStream && !info.ConvertNonStreamToStream) {
 		return false
 	}
 	if c.GetBool("partial_stream_settled") {
@@ -60,8 +60,8 @@ func ShouldSettlePartialStream(c *gin.Context, info *relaycommon.RelayInfo, usag
 		}
 	}
 
-	// 2. 如果流式已接收到 chunks 并转发给客户端，或者客户端已经收到了 response 数据
-	if info.ReceivedResponseCount > 0 || (c.Writer != nil && c.Writer.Written()) {
+	// 2. 如果流式已接收到 chunks 并转发给客户端
+	if info.ReceivedResponseCount > 0 {
 		return true
 	}
 
@@ -123,10 +123,13 @@ func settleInterruptedRequest(c *gin.Context, info *relaycommon.RelayInfo, usage
 	}
 	// 如果经过流式传输但未统计到 completion tokens，按接收到的 chunk 数进行保底统计（每个 chunk 估算 15 tokens），并防止溢出
 	if u.CompletionTokens == 0 && info.ReceivedResponseCount > 0 {
-		u.CompletionTokens = max(0, min(info.ReceivedResponseCount*15, 1<<30))
+		u.CompletionTokens = max(1, min(info.ReceivedResponseCount*15, 1<<30))
 	}
-	if u.TotalTokens == 0 {
+	if u.TotalTokens == 0 || u.TotalTokens < u.PromptTokens+u.CompletionTokens {
 		u.TotalTokens = u.PromptTokens + u.CompletionTokens
+	}
+	if u.BillingUsage != nil && u.CompletionTokens > 0 {
+		u.BillingUsage = dto.CloneBillingUsageWithEstimatedCompletion(u.BillingUsage, u.CompletionTokens)
 	}
 
 	logger.LogWarn(c, logMsg)

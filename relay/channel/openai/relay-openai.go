@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -188,6 +189,13 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	if !containStreamUsage {
 		usage = service.ResponseText2Usage(c, responseTextBuilder.String(), info.UpstreamModelName, info.GetEstimatePromptTokens())
 		usage.CompletionTokens += toolCount * 7
+		if usage.CompletionTokens == 0 && info.ReceivedResponseCount > 0 {
+			usage.CompletionTokens = max(1, min(info.ReceivedResponseCount*15, 1<<30))
+			usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+		}
+		if usage.BillingUsage != nil && usage.CompletionTokens > 0 {
+			usage.BillingUsage = dto.CloneBillingUsageWithEstimatedCompletion(usage.BillingUsage, usage.CompletionTokens)
+		}
 	}
 
 	applyUsagePostProcessing(info, usage, common.StringToByteSlice(usageFrame))
@@ -199,6 +207,17 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	if !info.ConvertNonStreamToStream {
 		HandleFinalResponse(c, info, lastStreamData, responseId, createAt, model, systemFingerprint, usage, containStreamUsage)
 	} else {
+		if info.StreamStatus != nil && info.StreamStatus.EndReason == relaycommon.StreamEndReasonClientGone {
+			return usage, types.NewErrorWithStatusCode(context.Canceled, types.ErrorCodeInvalidRequest, 499)
+		}
+		if info.StreamStatus != nil && (info.StreamStatus.EndReason == relaycommon.StreamEndReasonTimeout || info.StreamStatus.EndReason == relaycommon.StreamEndReasonScannerErr || info.StreamStatus.EndReason == relaycommon.StreamEndReasonPingFail) {
+			errToReport := info.StreamStatus.EndError
+			if errToReport == nil {
+				errToReport = fmt.Errorf("upstream stream ended abnormally: %s", info.StreamStatus.EndReason)
+			}
+			return usage, types.NewErrorWithStatusCode(errToReport, types.ErrorCodeBadResponseBody, http.StatusBadGateway)
+		}
+
 		chatResponse := streamAgg.BuildResponse(responseId, model, createAt, usage, info.ChannelSetting.ThinkingToContent)
 		if chatResponse.Id == "" {
 			chatResponse.Id = helper.GetResponseID(c)

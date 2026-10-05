@@ -254,10 +254,17 @@ func HandleStreamFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, clau
 		if claudeInfo.Usage.PromptTokens == 0 {
 			claudeInfo.Usage.PromptTokens = fallback.PromptTokens
 		}
+		// 如果经过流式传输接收到了 chunks，但实际文本估算依然为 0，按接收到的 chunk 数保底统计，绝不能返回 0
+		if claudeInfo.Usage.CompletionTokens == 0 && info.ReceivedResponseCount > 0 {
+			claudeInfo.Usage.CompletionTokens = max(1, min(info.ReceivedResponseCount*15, 1<<30))
+		}
 		claudeInfo.Usage.TotalTokens = claudeInfo.Usage.PromptTokens + claudeInfo.Usage.CompletionTokens
 	}
 	if claudeInfo.Usage != nil {
 		claudeInfo.Usage.UsageSemantic = "anthropic"
+		if claudeInfo.Usage.BillingUsage != nil && claudeInfo.Usage.CompletionTokens > 0 {
+			claudeInfo.Usage.BillingUsage = dto.CloneBillingUsageWithEstimatedCompletion(claudeInfo.Usage.BillingUsage, claudeInfo.Usage.CompletionTokens)
+		}
 	}
 	relayconvert.FinalizeClaudeStreamBillingUsage(claudeInfo)
 
@@ -266,7 +273,13 @@ func HandleStreamFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, clau
 	}
 
 	if info.RelayFormat == types.RelayFormatClaude {
-		//
+		// 当中途异常中断且下游客户端已在接收流式数据时，优雅发送最终 message_delta 与 message_stop 附带实际统计
+		if !claudeInfo.Done && c.Writer != nil && c.Writer.Written() && claudeInfo.Usage != nil && claudeInfo.Usage.CompletionTokens > 0 {
+			deltaData := fmt.Sprintf(`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":%d}}`, claudeInfo.Usage.CompletionTokens)
+			helper.ClaudeChunkData(c, dto.ClaudeResponse{Type: "message_delta"}, deltaData)
+			helper.ClaudeChunkData(c, dto.ClaudeResponse{Type: "message_stop"}, `{"type":"message_stop"}`)
+			claudeInfo.Done = true
+		}
 	} else if info.RelayFormat == types.RelayFormatOpenAI {
 		if info.ShouldIncludeUsage {
 			openAIUsage := buildOpenAIStyleUsageFromClaudeUsage(claudeInfo.Usage)

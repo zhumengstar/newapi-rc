@@ -170,9 +170,13 @@ func CloneBillingUsageWithEstimatedCompletion(usage *BillingUsage, completionTok
 	switch {
 	case clone.OpenAIUsage != nil:
 		openAIUsage := clone.OpenAIUsage
-		if openAIUsage.CompletionTokens == 0 && openAIUsage.OutputTokens == 0 {
-			openAIUsage.CompletionTokens = completionTokens
-			openAIUsage.OutputTokens = completionTokens
+		if openAIUsage.CompletionTokens < completionTokens || openAIUsage.OutputTokens < completionTokens {
+			if openAIUsage.CompletionTokens < completionTokens {
+				openAIUsage.CompletionTokens = completionTokens
+			}
+			if openAIUsage.OutputTokens < completionTokens {
+				openAIUsage.OutputTokens = completionTokens
+			}
 			inputTokens := openAIUsage.PromptTokens
 			if inputTokens == 0 {
 				inputTokens = openAIUsage.InputTokens
@@ -183,14 +187,14 @@ func CloneBillingUsageWithEstimatedCompletion(usage *BillingUsage, completionTok
 			updated = true
 		}
 	case clone.ClaudeUsage != nil:
-		if clone.ClaudeUsage.OutputTokens == 0 {
+		if clone.ClaudeUsage.OutputTokens < completionTokens {
 			clone.ClaudeUsage.OutputTokens = completionTokens
 			updated = true
 		}
 	case clone.GeminiUsageMetadata != nil:
 		metadata := clone.GeminiUsageMetadata
-		if metadata.CandidatesTokenCount == 0 {
-			candidateTokens := max(completionTokens-metadata.ThoughtsTokenCount, 0)
+		candidateTokens := max(completionTokens-metadata.ThoughtsTokenCount, 0)
+		if metadata.CandidatesTokenCount < candidateTokens {
 			metadata.CandidatesTokenCount = candidateTokens
 			totalTokens := metadata.PromptTokenCount + metadata.ToolUsePromptTokenCount + metadata.CandidatesTokenCount + metadata.ThoughtsTokenCount
 			if metadata.TotalTokenCount < totalTokens {

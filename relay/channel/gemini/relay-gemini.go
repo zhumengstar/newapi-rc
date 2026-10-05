@@ -451,6 +451,17 @@ func GeminiChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *
 	}
 
 	if info.ConvertNonStreamToStream {
+		if info.StreamStatus != nil && info.StreamStatus.EndReason == relaycommon.StreamEndReasonClientGone {
+			return usage, types.NewErrorWithStatusCode(context.Canceled, types.ErrorCodeInvalidRequest, 499)
+		}
+		if info.StreamStatus != nil && (info.StreamStatus.EndReason == relaycommon.StreamEndReasonTimeout || info.StreamStatus.EndReason == relaycommon.StreamEndReasonScannerErr || info.StreamStatus.EndReason == relaycommon.StreamEndReasonPingFail) {
+			errToReport := info.StreamStatus.EndError
+			if errToReport == nil {
+				errToReport = fmt.Errorf("upstream gemini stream ended abnormally: %s", info.StreamStatus.EndReason)
+			}
+			return usage, types.NewErrorWithStatusCode(errToReport, types.ErrorCodeBadResponseBody, http.StatusBadGateway)
+		}
+
 		chatResponse := streamAgg.BuildResponse(id, info.UpstreamModelName, createAt, usage, info.ChannelSetting.ThinkingToContent)
 		if chatResponse.Id == "" {
 			chatResponse.Id = helper.GetResponseID(c)

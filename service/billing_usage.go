@@ -18,6 +18,16 @@ const (
 
 func effectiveBillingUsage(usage *dto.Usage) *dto.Usage {
 	if billingUsage, ok := usageFromBillingUsage(usage); ok {
+		if usage != nil && usage.CompletionTokens > 0 && billingUsage.CompletionTokens == 0 {
+			billingUsage.CompletionTokens = usage.CompletionTokens
+			billingUsage.OutputTokens = usage.CompletionTokens
+			if billingUsage.TotalTokens < billingUsage.PromptTokens+billingUsage.CompletionTokens {
+				billingUsage.TotalTokens = billingUsage.PromptTokens + billingUsage.CompletionTokens
+			}
+			if billingUsage.BillingUsage != nil {
+				billingUsage.BillingUsage = dto.CloneBillingUsageWithEstimatedCompletion(billingUsage.BillingUsage, usage.CompletionTokens)
+			}
+		}
 		return billingUsage
 	}
 	return usage

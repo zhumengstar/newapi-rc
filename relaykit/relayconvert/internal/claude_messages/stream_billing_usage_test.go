@@ -64,3 +64,31 @@ func TestTerminalSidecarRemainsAuthoritativeAgainstFinalize(t *testing.T) {
 	FinalizeClaudeStreamBillingUsage(info)
 	assert.Equal(t, 7, info.Usage.BillingUsage.ClaudeUsage.OutputTokens)
 }
+
+func TestInterruptedStreamUpdatesBillingUsageOnFinalize(t *testing.T) {
+	t.Parallel()
+
+	info := &ClaudeResponseInfo{Usage: &dto.Usage{}}
+	ok := FormatClaudeResponseInfo(&dto.ClaudeResponse{
+		Type: "message_start",
+		Message: &dto.ClaudeMediaMessage{
+			Usage: &dto.ClaudeUsage{
+				InputTokens:  100,
+				OutputTokens: 1,
+				BillingUsage: dto.NewClaudeMessagesBillingUsage(&dto.ClaudeUsage{
+					InputTokens:  100,
+					OutputTokens: 1,
+				}),
+			},
+		},
+	}, nil, info)
+	require.True(t, ok)
+	require.NotNil(t, info.Usage.BillingUsage)
+	assert.False(t, info.Done)
+
+	// Stream interrupted midway; host estimates completion tokens from received text
+	info.Usage.CompletionTokens = 250
+	FinalizeClaudeStreamBillingUsage(info)
+	require.NotNil(t, info.Usage.BillingUsage.ClaudeUsage)
+	assert.Equal(t, 250, info.Usage.BillingUsage.ClaudeUsage.OutputTokens)
+}

@@ -446,8 +446,13 @@ func FinalizeClaudeStreamBillingUsage(claudeInfo *ClaudeResponseInfo) {
 	if claudeInfo == nil || claudeInfo.Usage == nil {
 		return
 	}
-	if claudeInfo.Usage.BillingUsage != nil && !claudeInfo.billingUsageSynthesized {
-		return
+	if claudeInfo.Usage.BillingUsage != nil {
+		if !claudeInfo.Done && claudeInfo.Usage.CompletionTokens > 0 {
+			claudeInfo.Usage.BillingUsage = dto.CloneBillingUsageWithEstimatedCompletion(claudeInfo.Usage.BillingUsage, claudeInfo.Usage.CompletionTokens)
+		}
+		if !claudeInfo.billingUsageSynthesized {
+			return
+		}
 	}
 
 	billingUsage := claudeBillingUsageFromSemanticUsage(claudeInfo.Usage)
@@ -524,6 +529,12 @@ func FormatClaudeResponseInfo(claudeResponse *dto.ClaudeResponse, oaiResponse *d
 			if claudeResponse.Delta.Thinking != nil {
 				claudeInfo.ResponseText.WriteString(*claudeResponse.Delta.Thinking)
 			}
+			if claudeResponse.Delta.PartialJson != nil {
+				claudeInfo.ResponseText.WriteString(*claudeResponse.Delta.PartialJson)
+			}
+			if claudeResponse.Delta.Delta != "" {
+				claudeInfo.ResponseText.WriteString(claudeResponse.Delta.Delta)
+			}
 		}
 	} else if claudeResponse.Type == "message_delta" {
 		if claudeResponse.Usage != nil {
@@ -552,7 +563,18 @@ func FormatClaudeResponseInfo(claudeResponse *dto.ClaudeResponse, oaiResponse *d
 
 		claudeInfo.Done = true
 	} else if claudeResponse.Type == "content_block_start" {
+		if claudeResponse.ContentBlock != nil {
+			if claudeResponse.ContentBlock.Text != nil {
+				claudeInfo.ResponseText.WriteString(*claudeResponse.ContentBlock.Text)
+			}
+			if claudeResponse.ContentBlock.Thinking != nil {
+				claudeInfo.ResponseText.WriteString(*claudeResponse.ContentBlock.Thinking)
+			}
+		}
 	} else {
+		if claudeResponse.Completion != "" {
+			claudeInfo.ResponseText.WriteString(claudeResponse.Completion)
+		}
 		return false
 	}
 	if oaiResponse != nil {
