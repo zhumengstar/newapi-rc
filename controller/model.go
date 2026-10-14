@@ -297,13 +297,23 @@ func ListModels(c *gin.Context, modelType int) {
 	case constant.ChannelTypeGemini:
 		userGeminiModels := make([]dto.GeminiModel, len(userOpenAiModels))
 		for i, model := range userOpenAiModels {
+			cleanId := strings.TrimPrefix(model.Id, "models/")
 			userGeminiModels[i] = dto.GeminiModel{
-				Name:        model.Id,
-				DisplayName: model.Id,
+				Name:                       "models/" + cleanId,
+				BaseModelId:                cleanId,
+				Version:                    "001",
+				DisplayName:                cleanId,
+				Description:                cleanId,
+				InputTokenLimit:            1048576,
+				OutputTokenLimit:           8192,
+				SupportedGenerationMethods: []any{"generateContent", "countTokens"},
 			}
 		}
 		c.JSON(200, gin.H{
 			"models":        userGeminiModels,
+			"data":          userOpenAiModels,
+			"object":        "list",
+			"success":       true,
 			"nextPageToken": nil,
 		})
 	default:
@@ -361,7 +371,12 @@ func AllChannelListModels(c *gin.Context) {
 
 func RetrieveModel(c *gin.Context, modelType int) {
 	modelId := c.Param("model")
-	if aiModel, ok := openAIModelsMap[modelId]; ok {
+	lookupId := strings.TrimPrefix(modelId, "models/")
+	aiModel, ok := openAIModelsMap[modelId]
+	if !ok {
+		aiModel, ok = openAIModelsMap[lookupId]
+	}
+	if ok {
 		switch modelType {
 		case constant.ChannelTypeAnthropic:
 			c.JSON(200, dto.AnthropicModel{
@@ -369,6 +384,18 @@ func RetrieveModel(c *gin.Context, modelType int) {
 				CreatedAt:   time.Unix(int64(aiModel.Created), 0).UTC().Format(time.RFC3339),
 				DisplayName: aiModel.Id,
 				Type:        "model",
+			})
+		case constant.ChannelTypeGemini:
+			cleanId := strings.TrimPrefix(aiModel.Id, "models/")
+			c.JSON(200, dto.GeminiModel{
+				Name:                       "models/" + cleanId,
+				BaseModelId:                cleanId,
+				Version:                    "001",
+				DisplayName:                cleanId,
+				Description:                cleanId,
+				InputTokenLimit:            1048576,
+				OutputTokenLimit:           8192,
+				SupportedGenerationMethods: []any{"generateContent", "countTokens"},
 			})
 		default:
 			c.JSON(200, aiModel)
