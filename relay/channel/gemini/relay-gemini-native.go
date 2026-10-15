@@ -36,6 +36,13 @@ func GeminiTextGenerationHandler(c *gin.Context, info *relaycommon.RelayInfo, re
 	}
 	countGeminiBillableFunctionCalls(info, &geminiResponse)
 
+	if IsImageGenerationModel(info) {
+		if len(geminiResponse.Candidates) == 0 || !HasGeminiInlineImages(&geminiResponse) {
+			common.SetContextKey(c, constant.ContextKeyAdminRejectReason, "gemini_native_image_empty_or_blocked")
+			return nil, NewImageModerationRejectError()
+		}
+	}
+
 	isSafetyBlock := false
 	var blockReason string
 	var finishMsg *string
