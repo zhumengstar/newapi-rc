@@ -68,9 +68,37 @@ func cleanGeminiFunctionParametersWithDepth(params interface{}, depth int) inter
 		if props, ok := cleanedMap["properties"].(map[string]interface{}); ok && props != nil {
 			cleanedProps := make(map[string]interface{})
 			for propName, propValue := range props {
+				if strings.TrimSpace(propName) == "" {
+					continue
+				}
+				if pMap, ok := propValue.(map[string]interface{}); ok {
+					delete(pMap, "parts")
+					delete(pMap, "contents")
+				}
 				cleanedProps[propName] = cleanGeminiFunctionParametersWithDepth(propValue, depth+1)
 			}
 			cleanedMap["properties"] = cleanedProps
+		}
+
+		if rawReq, ok := cleanedMap["required"].([]interface{}); ok && rawReq != nil {
+			cleanedReq := make([]interface{}, 0, len(rawReq))
+			for _, r := range rawReq {
+				if s, ok := r.(string); ok {
+					trimmed := strings.TrimSpace(s)
+					if trimmed != "" {
+						if props, hasProps := cleanedMap["properties"].(map[string]interface{}); hasProps {
+							if _, inProps := props[trimmed]; inProps {
+								cleanedReq = append(cleanedReq, trimmed)
+							}
+						} else {
+							cleanedReq = append(cleanedReq, trimmed)
+						}
+					}
+				} else if r != nil {
+					cleanedReq = append(cleanedReq, r)
+				}
+			}
+			cleanedMap["required"] = cleanedReq
 		}
 
 		if items, ok := cleanedMap["items"].(map[string]interface{}); ok && items != nil {
@@ -238,6 +266,14 @@ func RemoveAdditionalProperties(schema interface{}, depth int) interface{} {
 		delete(value, "additionalProperties")
 		if properties, ok := value["properties"].(map[string]interface{}); ok {
 			for key, nested := range properties {
+				if strings.TrimSpace(key) == "" {
+					delete(properties, key)
+					continue
+				}
+				if nMap, isMap := nested.(map[string]interface{}); isMap {
+					delete(nMap, "parts")
+					delete(nMap, "contents")
+				}
 				properties[key] = RemoveAdditionalProperties(nested, depth+1)
 			}
 		}

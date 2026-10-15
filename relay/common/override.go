@@ -2532,12 +2532,76 @@ func cleanEmptyEnumsInJSONNode(node any) (any, bool) {
 		}
 		return val, modified
 	case map[string]any:
-		// 剔除 Gemini 不支持的已知非标准业务扩展字段，避免上游 400 Unknown name ...: Cannot find field
+		// 1. 过滤当前 map 自身的无效空 key，避免 Proto fields must have a name
+		for k := range val {
+			if strings.TrimSpace(k) == "" {
+				delete(val, k)
+				modified = true
+			}
+		}
+
+		// 2. 剔除 Gemini 不支持的已知非标准业务扩展字段，避免上游 400 Unknown name ...: Cannot find field
 		unsupportedKeys := []string{"availableArgs", "validTargetCharacterIds"}
 		for _, key := range unsupportedKeys {
 			if _, exists := val[key]; exists {
 				delete(val, key)
 				modified = true
+			}
+		}
+
+		// 3. 深度清洗 Schema properties：剔除空属性名 "" 以及属性内部非法的 parts/contents 字段
+		if rawProps, hasProps := val["properties"]; hasProps && rawProps != nil {
+			if propsMap, ok := rawProps.(map[string]any); ok {
+				for pName, pVal := range propsMap {
+					if strings.TrimSpace(pName) == "" {
+						delete(propsMap, pName)
+						modified = true
+						continue
+					}
+					if pValMap, isMap := pVal.(map[string]any); isMap {
+						for _, badField := range []string{"parts", "contents"} {
+							if _, hasBad := pValMap[badField]; hasBad {
+								delete(pValMap, badField)
+								modified = true
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// 4. 同步清洗 required 列表中的空字符串或已被剔除的属性
+		if rawReq, hasReq := val["required"]; hasReq && rawReq != nil {
+			if reqSlice, ok := rawReq.([]any); ok {
+				var propsMap map[string]any
+				if p, ok := val["properties"].(map[string]any); ok {
+					propsMap = p
+				}
+				newReq := make([]any, 0, len(reqSlice))
+				for _, r := range reqSlice {
+					if rStr, isStr := r.(string); isStr {
+						trimmed := strings.TrimSpace(rStr)
+						if trimmed == "" {
+							modified = true
+							continue
+						}
+						if propsMap != nil {
+							if _, inProps := propsMap[rStr]; !inProps {
+								modified = true
+								continue
+							}
+						}
+						newReq = append(newReq, trimmed)
+					} else if r != nil {
+						newReq = append(newReq, r)
+					} else {
+						modified = true
+					}
+				}
+				if len(newReq) != len(reqSlice) {
+					val["required"] = newReq
+					modified = true
+				}
 			}
 		}
 

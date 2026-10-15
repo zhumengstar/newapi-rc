@@ -2755,6 +2755,44 @@ func TestEnsureGeminiSchemaCleanliness(t *testing.T) {
 	assert.Contains(t, cleanedPartStr, `"text":" "`)
 	assert.NotContains(t, cleanedPartStr, `"id":"part-id-123"`)
 	assert.NotContains(t, cleanedPartStr, `"inlineData"`)
+
+	// 测试 3: tools 中 function_declarations 包含空属性名 "" 和非法 parts 字段
+	toolsJSON := `{
+		"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+		"tools": [
+			{
+				"function_declarations": [
+					{
+						"name": "test_tool",
+						"description": "test tool description",
+						"parameters": {
+							"type": "OBJECT",
+							"properties": {
+								"": {
+									"type": "STRING",
+									"description": "empty key property"
+								},
+								"valid_prop": {
+									"type": "STRING",
+									"description": "valid property",
+									"parts": [{"text": "invalid repeated parts"}]
+								}
+							},
+							"required": ["", "valid_prop", "non_exist_prop"]
+						}
+					}
+				]
+			}
+		]
+	}`
+	cleanedToolsBytes, err := EnsureGeminiSchemaCleanliness([]byte(toolsJSON))
+	require.NoError(t, err)
+	cleanedToolsStr := string(cleanedToolsBytes)
+	assert.Contains(t, cleanedToolsStr, `"valid_prop"`)
+	assert.NotContains(t, cleanedToolsStr, `"":{`)
+	assert.NotContains(t, cleanedToolsStr, `"empty key property"`)
+	assert.NotContains(t, cleanedToolsStr, `"invalid repeated parts"`)
+	assert.Contains(t, cleanedToolsStr, `"required":["valid_prop"]`)
 }
 
 func TestApplyParamOverrideRecursiveDelete(t *testing.T) {
