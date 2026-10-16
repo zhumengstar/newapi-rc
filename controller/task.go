@@ -387,6 +387,12 @@ func GetUserTask(c *gin.Context) {
 	userID := c.GetInt("id")
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
+	if c.GetInt("role") < common.RoleAdminUser && common.UserOnlyViewTodayLogsEnabled {
+		todayStart := model.ShanghaiTodayStartUnix()
+		if startTimestamp < todayStart {
+			startTimestamp = todayStart
+		}
+	}
 	queryParams := model.SyncTaskQueryParams{Platform: constant.TaskPlatform(c.Query("platform")), TaskID: c.Query("task_id"), Status: c.Query("status"), Action: c.Query("action"), StartTimestamp: startTimestamp, EndTimestamp: endTimestamp}
 	items := model.TaskGetAllUserTask(userID, pageInfo.GetStartIdx(), pageInfo.GetPageSize(), queryParams)
 	pageInfo.SetTotal(int(model.TaskCountAllUserTask(userID, queryParams)))

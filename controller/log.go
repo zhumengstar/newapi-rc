@@ -58,6 +58,12 @@ func GetUserLogs(c *gin.Context) {
 	logType, _ := strconv.Atoi(c.Query("type"))
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
+	if c.GetInt("role") < common.RoleAdminUser && common.UserOnlyViewTodayLogsEnabled {
+		todayStart := model.ShanghaiTodayStartUnix()
+		if startTimestamp < todayStart {
+			startTimestamp = todayStart
+		}
+	}
 	tokenName := c.Query("token_name")
 	modelName := c.Query("model_name")
 	group := c.Query("group")
@@ -124,7 +130,11 @@ func GetLogByKey(c *gin.Context) {
 		})
 		return
 	}
-	logs, err := model.GetLogByTokenId(tokenId)
+	var minTimestamp int64
+	if c.GetInt("role") < common.RoleAdminUser && common.UserOnlyViewTodayLogsEnabled {
+		minTimestamp = model.ShanghaiTodayStartUnix()
+	}
+	logs, err := model.GetLogByTokenId(tokenId, minTimestamp)
 	if err != nil {
 		c.JSON(200, gin.H{
 			"success": false,
@@ -172,6 +182,12 @@ func GetLogsSelfStat(c *gin.Context) {
 	logType, _ := strconv.Atoi(c.Query("type"))
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
+	if c.GetInt("role") < common.RoleAdminUser && common.UserOnlyViewTodayLogsEnabled {
+		todayStart := model.ShanghaiTodayStartUnix()
+		if startTimestamp < todayStart {
+			startTimestamp = todayStart
+		}
+	}
 	tokenName := c.Query("token_name")
 	modelName := c.Query("model_name")
 	channel, _ := strconv.Atoi(c.Query("channel"))

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -307,11 +308,20 @@ func GetUserMidjourney(c *gin.Context) {
 	pageInfo := common.GetPageQuery(c)
 
 	userId := c.GetInt("id")
+	startTimestamp := c.Query("start_timestamp")
+	endTimestamp := c.Query("end_timestamp")
+	if c.GetInt("role") < common.RoleAdminUser && common.UserOnlyViewTodayLogsEnabled {
+		todayStart := model.ShanghaiTodayStartUnix()
+		startVal, _ := strconv.ParseInt(startTimestamp, 10, 64)
+		if startVal < todayStart {
+			startTimestamp = strconv.FormatInt(todayStart, 10)
+		}
+	}
 
 	queryParams := model.TaskQueryParams{
 		MjID:           c.Query("mj_id"),
-		StartTimestamp: c.Query("start_timestamp"),
-		EndTimestamp:   c.Query("end_timestamp"),
+		StartTimestamp: startTimestamp,
+		EndTimestamp:   endTimestamp,
 	}
 
 	items := model.GetAllUserTask(userId, pageInfo.GetStartIdx(), pageInfo.GetPageSize(), queryParams)

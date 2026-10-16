@@ -185,6 +185,7 @@ func InitOptionMap() {
 	common.OptionMap["AutomaticDisableStatusCodes"] = operation_setting.AutomaticDisableStatusCodesToString()
 	common.OptionMap["AutomaticRetryStatusCodes"] = operation_setting.AutomaticRetryStatusCodesToString()
 	common.OptionMap["ExposeRatioEnabled"] = strconv.FormatBool(ratio_setting.IsExposeRatioEnabled())
+	common.OptionMap["UserOnlyViewTodayLogsEnabled"] = strconv.FormatBool(common.UserOnlyViewTodayLogsEnabled)
 
 	// 自动添加所有注册的模型配置
 	modelConfigs := config.GlobalConfig.ExportAllConfigs()
@@ -423,6 +424,8 @@ func updateOptionMap(key string, value string) (err error) {
 			setting.DefaultUseAutoGroup = boolValue
 		case "ExposeRatioEnabled":
 			ratio_setting.SetExposeRatioEnabled(boolValue)
+		case "UserOnlyViewTodayLogsEnabled":
+			common.UserOnlyViewTodayLogsEnabled = boolValue
 		}
 	}
 	if key == setting.TaskPluginDisabledFactoryKeysKey {

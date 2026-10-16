@@ -437,14 +437,18 @@ var (
 	userTodayQuotaCache     userTodayQuotaCacheEntry
 )
 
-func shanghaiTodayStartUnix() int64 {
+func ShanghaiTodayStartUnix() int64 {
 	location := time.FixedZone("Asia/Shanghai", 8*60*60)
 	now := time.Now().In(location)
 	return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, location).Unix()
 }
 
+func shanghaiTodayStartUnix() int64 {
+	return ShanghaiTodayStartUnix()
+}
+
 func getTodayUserConsumptionMap() (map[int]int64, []int, error) {
-	todayStart := shanghaiTodayStartUnix()
+	todayStart := ShanghaiTodayStartUnix()
 	userTodayQuotaCacheLock.RLock()
 	if time.Since(userTodayQuotaCache.lastUpdate) < 15*time.Second && userTodayQuotaCache.dayStart == todayStart && userTodayQuotaCache.quotaMap != nil {
 		m := userTodayQuotaCache.quotaMap
