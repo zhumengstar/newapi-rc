@@ -19,6 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { act, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { createInstance } from 'i18next'
+import { useState } from 'react'
 import { I18nextProvider } from 'react-i18next'
 import { expect, test, vi } from 'vitest'
 
@@ -83,4 +84,60 @@ test('language changes preserve draft mappings and explain the same direction in
   expect(onChange).toHaveBeenLastCalledWith(
     '{\n  "client-alias": "provider-model"\n}'
   )
+})
+
+test('controlled mode preserves new empty row when parent reflects empty onChange', async () => {
+  const user = userEvent.setup()
+  function ControlledWrapper() {
+    const [value, setValue] = useState('')
+    return <ModelMappingEditor value={value} onChange={setValue} />
+  }
+
+  render(<ControlledWrapper />)
+  expect(
+    screen.getByText('No model mappings configured. Click "Add Mapping" to get started.')
+  ).toBeVisible()
+
+  // Clicking "Add Mapping" must not be wiped out by an immediate sync loop
+  await user.click(screen.getByRole('button', { name: 'Add Mapping' }))
+  const fromInput = screen.getByPlaceholderText('gpt-3.5-turbo')
+  const toInput = screen.getByPlaceholderText('gpt-3.5-turbo-0125')
+  expect(fromInput).toBeVisible()
+  expect(toInput).toBeVisible()
+
+  // User types into the inputs
+  await user.type(fromInput, 'gemini-3.8-flash')
+  await user.type(toInput, 'gemini-3.8-flash-tiered')
+  expect(fromInput).toHaveValue('gemini-3.8-flash')
+  expect(toInput).toHaveValue('gemini-3.8-flash-tiered')
+
+  // Adding a second row must preserve the first row and not destroy either
+  await user.click(screen.getByRole('button', { name: 'Add Mapping' }))
+  const allFromInputs = screen.getAllByPlaceholderText('gpt-3.5-turbo')
+  expect(allFromInputs).toHaveLength(2)
+  expect(allFromInputs[0]).toHaveValue('gemini-3.8-flash')
+  expect(allFromInputs[1]).toHaveValue('')
+
+  // Clearing the second input text must not wipe out the second row
+  await user.type(allFromInputs[1], 'abc')
+  expect(allFromInputs[1]).toHaveValue('abc')
+  await user.clear(allFromInputs[1])
+  expect(screen.getAllByPlaceholderText('gpt-3.5-turbo')).toHaveLength(2)
+})
+
+test('initial value is immediately rendered in visual mode without empty placeholder', () => {
+  const onChange = vi.fn()
+  render(
+    <ModelMappingEditor
+      value='{"source-model":"target-model"}'
+      onChange={onChange}
+    />
+  )
+  expect(screen.getByDisplayValue('source-model')).toBeVisible()
+  expect(screen.getByDisplayValue('target-model')).toBeVisible()
+  expect(
+    screen.queryByText(
+      'No model mappings configured. Click "Add Mapping" to get started.'
+    )
+  ).not.toBeInTheDocument()
 })

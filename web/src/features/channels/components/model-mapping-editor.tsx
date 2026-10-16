@@ -66,15 +66,36 @@ function getDuplicateSources(rows: MappingRow[]): string[] {
   return [...duplicates]
 }
 
+function parseInitialRows(json: string): MappingRow[] {
+  if (!json || !json.trim()) return []
+  try {
+    const parsed = JSON.parse(json)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return []
+    let idCounter = 0
+    return Object.entries(parsed)
+      .filter(([, to]) => typeof to === 'string')
+      .map(([from, to]) => ({
+        id: `mapping-init-${++idCounter}`,
+        from,
+        to: String(to),
+      }))
+  } catch {
+    return []
+  }
+}
+
 export function ModelMappingEditor(props: ModelMappingEditorProps) {
   const { t } = useTranslation()
   const sourceListId = useId()
   const targetListId = useId()
   const [mode, setMode] = useState<'visual' | 'json'>('visual')
-  const [rows, setRows] = useState<MappingRow[]>([])
-  const [jsonValue, setJsonValue] = useState(props.value)
+  const [rows, setRows] = useState<MappingRow[]>(() =>
+    parseInitialRows(props.value)
+  )
+  const [jsonValue, setJsonValue] = useState(props.value || '')
   const [jsonError, setJsonError] = useState<string | null>(null)
   const nextRowIdRef = useRef(0)
+  const lastEmittedValueRef = useRef<string | null>(props.value || '')
   const duplicateSources = useMemo(() => getDuplicateSources(rows), [rows])
 
   const createRowId = () => {
@@ -134,25 +155,32 @@ export function ModelMappingEditor(props: ModelMappingEditorProps) {
   }
 
   const syncExternalValue = useEffectEvent(() => {
-    setJsonValue(props.value)
-    parseJsonToRows(props.value)
+    const normalized = props.value || ''
+    setJsonValue(normalized)
+    parseJsonToRows(normalized)
   })
 
-  // Only replace the draft when the external value changes, not on language changes.
+  // Only replace the draft when the external value changes, not on internal updates or language changes.
   useEffect(() => {
+    const normalized = props.value || ''
+    if (normalized === lastEmittedValueRef.current) {
+      return
+    }
+    lastEmittedValueRef.current = normalized
     syncExternalValue()
   }, [props.value])
 
   const convertRowsToJson = (updatedRows: MappingRow[]): string => {
-    if (updatedRows.length === 0) {
-      return ''
-    }
     const obj: Record<string, string> = {}
     updatedRows.forEach((row) => {
-      if (row.from.trim()) {
-        obj[row.from.trim()] = row.to.trim()
+      const key = row.from.trim()
+      if (key) {
+        obj[key] = row.to.trim()
       }
     })
+    if (Object.keys(obj).length === 0) {
+      return ''
+    }
     return JSON.stringify(obj, null, 2)
   }
 
@@ -162,6 +190,7 @@ export function ModelMappingEditor(props: ModelMappingEditorProps) {
     if (duplicates.length > 0) {
       setJsonError(t('Duplicate source model mappings are not allowed'))
       setJsonValue(DUPLICATE_MAPPING_SENTINEL)
+      lastEmittedValueRef.current = DUPLICATE_MAPPING_SENTINEL
       props.onChange(DUPLICATE_MAPPING_SENTINEL)
       return
     }
@@ -169,6 +198,7 @@ export function ModelMappingEditor(props: ModelMappingEditorProps) {
     const json = convertRowsToJson(updatedRows)
     setJsonError(null)
     setJsonValue(json)
+    lastEmittedValueRef.current = json
     props.onChange(json)
   }
 
@@ -198,6 +228,7 @@ export function ModelMappingEditor(props: ModelMappingEditorProps) {
 
   const handleJsonChange = (newJson: string) => {
     setJsonValue(newJson)
+    lastEmittedValueRef.current = newJson
     props.onChange(newJson)
     parseJsonToRows(newJson)
   }
@@ -209,6 +240,7 @@ export function ModelMappingEditor(props: ModelMappingEditorProps) {
       2
     )
     setJsonValue(template)
+    lastEmittedValueRef.current = template
     props.onChange(template)
     parseJsonToRows(template)
   }
@@ -220,6 +252,7 @@ export function ModelMappingEditor(props: ModelMappingEditorProps) {
       if (duplicates.length === 0) {
         const json = convertRowsToJson(rows)
         setJsonValue(json)
+        lastEmittedValueRef.current = json
         props.onChange(json)
       }
       setMode('json')

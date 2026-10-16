@@ -1298,6 +1298,9 @@ export function ChannelMutateDrawer({
     queryClient.invalidateQueries({ queryKey: ['channel-groups'] })
     queryClient.invalidateQueries({ queryKey: ['pricing'] })
     if (channelId) {
+      queryClient.removeQueries({
+        queryKey: channelsQueryKeys.detail(channelId),
+      })
       queryClient.invalidateQueries({
         queryKey: channelsQueryKeys.detail(channelId),
       })
