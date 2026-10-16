@@ -1,9 +1,17 @@
 package controller
 
 import (
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/model"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestConstrainPriorityToGroupRange(t *testing.T) {
@@ -14,7 +22,10 @@ func TestConstrainPriorityToGroupRange(t *testing.T) {
 	assert.Equal(t, int64(9), constrainPriorityToGroupRange(&firstGroup, 99))
 	assert.Equal(t, int64(14), constrainPriorityToGroupRange(&secondGroup, 14))
 	assert.Equal(t, int64(19), constrainPriorityToGroupRange(&secondGroup, 99))
-	assert.Equal(t, int64(1), constrainPriorityToGroupRange(nil, 99))
+	assert.Equal(t, int64(99), constrainPriorityToGroupRange(nil, 99))
+	zeroGroup := int64(0)
+	assert.Equal(t, int64(5), constrainPriorityToGroupRange(&zeroGroup, 5))
+	assert.Equal(t, int64(0), constrainPriorityToGroupRange(&zeroGroup, -5))
 }
 
 func TestRemapPriorityByBase(t *testing.T) {
@@ -53,4 +64,47 @@ func TestIsPriorityInGroupRange(t *testing.T) {
 	assert.True(t, isPriorityInGroupRange(nil, 81))
 	zeroGroup := int64(0)
 	assert.True(t, isPriorityInGroupRange(&zeroGroup, 81))
+}
+
+func TestUpdateChannelExplicitPriorityPreserved(t *testing.T) {
+	setupTaskPluginBindChannelTest(t)
+	gin.SetMode(gin.TestMode)
+
+	weight := uint(87)
+	prio0 := int64(0)
+	ch := model.Channel{
+		Type:     1,
+		Status:   common.ChannelStatusEnabled,
+		Name:     "test-priority-channel",
+		Key:      "sk-test",
+		Models:   "gemini-pro",
+		Group:    "Gemini组",
+		Weight:   &weight,
+		Priority: &prio0,
+	}
+	require.NoError(t, ch.Insert())
+
+	testCases := []int64{1, 2, 5, 10, 0}
+	for _, targetPrio := range testCases {
+		body, _ := json.Marshal(map[string]any{
+			"id":       ch.Id,
+			"priority": targetPrio,
+		})
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request, _ = http.NewRequest(http.MethodPut, "/api/channel/", bytes.NewReader(body))
+		c.Set("id", 1)
+		c.Set("role", common.RoleRootUser)
+
+		UpdateChannel(c)
+
+		var resp map[string]any
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		assert.True(t, resp["success"].(bool), "UpdateChannel should succeed")
+
+		reloaded, err := model.GetChannelById(ch.Id, true)
+		require.NoError(t, err)
+		require.NotNil(t, reloaded.Priority)
+		assert.Equal(t, targetPrio, *reloaded.Priority, "priority must be preserved accurately")
+	}
 }

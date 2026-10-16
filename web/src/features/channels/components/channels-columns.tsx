@@ -370,19 +370,13 @@ function PriorityCell({ channel }: { channel: Channel }) {
     return <TagPriorityCell channel={channel} />
   }
 
-  const priority = channel.priority ?? 0
-  const base = priority > 0 ? Math.floor((priority - 1) / 10) * 10 : 0
-  const min = base > 0 ? base + 1 : -999
-  const max = base > 0 ? base + 9 : 999
-
   return (
-    <div title={base > 0 ? `当前分组区间: ${min} ~ ${max}` : undefined}>
+    <div>
       <ChannelFieldCell
         channelId={channel.id}
         value={channel.priority}
         field='priority'
-        min={min}
-        max={max}
+        min={0}
       />
     </div>
   )

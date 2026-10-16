@@ -1886,6 +1886,9 @@ func GetGroupBasePriority(group string) (*int64, error) {
 	if firstGroup == "" {
 		return nil, nil
 	}
+	if commonGroupCol == "" {
+		initCol()
+	}
 	var ability Ability
 	err := DB.Where(commonGroupCol+" = ?", firstGroup).Order("priority ASC").First(&ability).Error
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {

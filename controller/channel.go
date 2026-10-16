@@ -1565,7 +1565,10 @@ func constrainNewChannelPriority(group string, requested int64) (int64, error) {
 
 func constrainPriorityToGroupRange(groupPriority *int64, requested int64) int64 {
 	if groupPriority == nil || *groupPriority <= 0 {
-		return 1
+		if requested < 0 {
+			return 0
+		}
+		return requested
 	}
 	base := ((*groupPriority - 1) / 10) * 10
 	if requested < base+1 {
@@ -1743,8 +1746,8 @@ func UpdateChannel(c *gin.Context) {
 	}
 	groupChanged := targetGroup != originChannel.Group
 
+	_, priorityProvided := requestData["priority"]
 	if groupChanged {
-		_, priorityProvided := requestData["priority"]
 		if !priorityProvided {
 			origPriority := int64(0)
 			if originChannel.Priority != nil {
@@ -1754,24 +1757,7 @@ func UpdateChannel(c *gin.Context) {
 			if err == nil {
 				channel.Priority = &newPriority
 			}
-		} else if channel.Priority != nil {
-			groupPriority, _ := getGroupBasePriority(targetGroup)
-			if groupPriority != nil && !isPriorityInGroupRange(groupPriority, *channel.Priority) {
-				newPriority, err := remapPriorityToGroupRange(targetGroup, *channel.Priority)
-				if err == nil {
-					*channel.Priority = newPriority
-				}
-			}
 		}
-	}
-
-	if channel.Priority != nil {
-		priority, priorityErr := constrainChannelPriority(channel.Id, targetGroup, *channel.Priority)
-		if priorityErr != nil {
-			common.ApiError(c, priorityErr)
-			return
-		}
-		*channel.Priority = priority
 	}
 	proxyChanged := false
 	if _, settingProvided := requestData["setting"]; settingProvided {
