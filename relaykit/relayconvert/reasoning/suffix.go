@@ -216,16 +216,13 @@ func TrimGeminiThinkingSuffix(modelName string) (string, bool) {
 
 func parseProviderModelSuffix(modelName string, requiredPrefix string, allowThinkingAlias bool, includeThoughts bool) (string, Intent, bool, error) {
 	if allowThinkingAlias {
-		if marker := strings.LastIndex(modelName, "-thinking-"); marker >= 0 {
-			baseModel := modelName[:marker]
-			if !strings.HasPrefix(baseModel, requiredPrefix) {
-				return modelName, Intent{}, false, nil
-			}
-			budget, err := strconv.Atoi(modelName[marker+len("-thinking-"):])
-			if err != nil {
-				return modelName, Intent{}, false, fmt.Errorf("invalid thinking budget suffix on model %q: %w", modelName, err)
-			}
-			intent := Intent{BudgetTokens: &budget, Source: SourceSuffix, BudgetSource: SourceSuffix}
+		if before, ok := strings.CutSuffix(modelName, "-nothinking-c"); ok {
+			baseModel := before
+			return baseModel, Intent{Mode: ModeDisabled, Effort: EffortNone, Source: SourceSuffix}, true, nil
+		}
+		if before, ok := strings.CutSuffix(modelName, "-thinking-c"); ok {
+			baseModel := before
+			intent := Intent{Mode: ModeEnabled, Source: SourceSuffix}
 			if includeThoughts {
 				value := true
 				intent.IncludeThoughts = &value
@@ -239,6 +236,24 @@ func parseProviderModelSuffix(modelName string, requiredPrefix string, allowThin
 		if before, ok := strings.CutSuffix(modelName, "-thinking"); ok {
 			baseModel := before
 			intent := Intent{Mode: ModeEnabled, Source: SourceSuffix}
+			if includeThoughts {
+				value := true
+				intent.IncludeThoughts = &value
+			}
+			return baseModel, intent, true, nil
+		}
+		if marker := strings.LastIndex(modelName, "-thinking-"); marker >= 0 {
+			baseModel := modelName[:marker]
+			if !strings.HasPrefix(baseModel, requiredPrefix) {
+				return modelName, Intent{}, false, nil
+			}
+			rawBudget := modelName[marker+len("-thinking-"):]
+			rawBudget = strings.TrimSuffix(rawBudget, "-c")
+			budget, err := strconv.Atoi(rawBudget)
+			if err != nil {
+				return modelName, Intent{}, false, fmt.Errorf("invalid thinking budget suffix on model %q: %w", modelName, err)
+			}
+			intent := Intent{BudgetTokens: &budget, Source: SourceSuffix, BudgetSource: SourceSuffix}
 			if includeThoughts {
 				value := true
 				intent.IncludeThoughts = &value

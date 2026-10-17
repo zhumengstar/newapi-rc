@@ -38,6 +38,20 @@ func TestApplyReasoningModelSuffixTrimsUpstreamAndAttachesState(t *testing.T) {
 	assert.Equal(t, "enabled", info.ReasoningConversion.Mode)
 }
 
+func TestApplyReasoningModelSuffixCountBasedThinkingModel(t *testing.T) {
+	info := &relaycommon.RelayInfo{
+		OriginModelName: "claude-opus-4-6-thinking-c",
+		ChannelMeta: &relaycommon.ChannelMeta{
+			UpstreamModelName: "claude-opus-4-6-thinking",
+		},
+	}
+
+	mustApplyReasoningModelSuffix(t, info)
+	assert.Equal(t, "claude-opus-4-6", info.UpstreamModelName)
+	require.NotNil(t, info.ReasoningConversion)
+	assert.Equal(t, "enabled", info.ReasoningConversion.Mode)
+}
+
 func TestApplyReasoningModelSuffixRetryKeepsEquivalentState(t *testing.T) {
 	info := &relaycommon.RelayInfo{
 		OriginModelName: "claude-opus-4-8-high",
