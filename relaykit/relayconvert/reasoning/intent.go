@@ -157,8 +157,9 @@ func normalizeIntent(intent Intent) (Intent, error) {
 			}
 			intent.Mode = ModeDisabled
 			intent.Effort = EffortNone
+			intent.BudgetTokens = nil
 		} else if intent.Mode == ModeDisabled || intent.Effort == EffortNone {
-			return Intent{}, fmt.Errorf("%w: a non-zero budget enables thinking", ErrEffortConflict)
+			intent.BudgetTokens = nil
 		} else if intent.Mode == ModeUnset {
 			intent.Mode = ModeEnabled
 		}
@@ -495,30 +496,35 @@ func FromClaude(req *dto.ClaudeRequest) (Intent, error) {
 		case "disabled":
 			intent.Mode = ModeDisabled
 			intent.Effort = EffortNone
+			req.Thinking.BudgetTokens = nil
 		default:
 			return Intent{}, fmt.Errorf("unsupported Claude thinking type %q", req.Thinking.Type)
 		}
-		intent.BudgetTokens = req.Thinking.BudgetTokens
-		if req.Thinking.BudgetTokens != nil {
-			budget := *req.Thinking.BudgetTokens
-			if budget < 1024 {
-				budget = 1024
-				req.Thinking.BudgetTokens = &budget
-			}
-			if req.MaxTokens != nil && uint(budget) >= *req.MaxTokens {
-				if *req.MaxTokens <= 1024 {
-					newMax := uint(budget) + 1024
-					req.MaxTokens = &newMax
-				} else {
-					budget = int(float64(*req.MaxTokens) * 0.8)
-					if budget < 1024 {
-						budget = int(*req.MaxTokens) - 1
-					}
+		if intent.Mode != ModeDisabled {
+			intent.BudgetTokens = req.Thinking.BudgetTokens
+			if req.Thinking.BudgetTokens != nil {
+				budget := *req.Thinking.BudgetTokens
+				if budget < 1024 {
+					budget = 1024
 					req.Thinking.BudgetTokens = &budget
 				}
+				if req.MaxTokens != nil && uint(budget) >= *req.MaxTokens {
+					if *req.MaxTokens <= 1024 {
+						newMax := uint(budget) + 1024
+						req.MaxTokens = &newMax
+					} else {
+						budget = int(float64(*req.MaxTokens) * 0.8)
+						if budget < 1024 {
+							budget = int(*req.MaxTokens) - 1
+						}
+						req.Thinking.BudgetTokens = &budget
+					}
+				}
+				intent.BudgetTokens = req.Thinking.BudgetTokens
+				intent.BudgetSource = SourceNative
 			}
-			intent.BudgetTokens = req.Thinking.BudgetTokens
-			intent.BudgetSource = SourceNative
+		} else {
+			intent.BudgetTokens = nil
 		}
 		switch req.Thinking.Display {
 		case "summarized":

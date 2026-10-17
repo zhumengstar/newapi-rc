@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { api } from '@/lib/api'
+import type { ApiResponse } from '@/types/api'
 
 import type {
   GetModelsParams,
@@ -51,6 +52,15 @@ export async function getModels(
   const res = await api.get('/api/models/', { params })
   return res.data
 }
+
+/**
+ * Get all available models ranked by request count (2-hour cache)
+ */
+export async function getRankedModels(): Promise<ApiResponse<string[]>> {
+  const res = await api.get('/api/models/ranked')
+  return res.data
+}
+
 
 /**
  * Search models with filters

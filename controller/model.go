@@ -412,3 +412,11 @@ func RetrieveModel(c *gin.Context, modelType int) {
 		})
 	}
 }
+
+func GetRankedModels(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    model.GetRankedModels(),
+	})
+}

@@ -203,3 +203,29 @@ func TestFromClaudeMessagesAutoHealsBudgetTokens(t *testing.T) {
 	assert.Equal(t, 1024, *intentSmall.BudgetTokens, "budget should be auto-healed to at least 1024")
 }
 
+func TestFromClaudeMessagesDisabledThinkingDoesNotError(t *testing.T) {
+	b0 := 0
+	reqZero := &dto.ClaudeRequest{
+		Thinking: &dto.Thinking{
+			Type:         "disabled",
+			BudgetTokens: &b0,
+		},
+	}
+	intentZero, err := FromClaude(reqZero)
+	require.NoError(t, err)
+	assert.Equal(t, ModeDisabled, intentZero.Mode)
+	assert.Nil(t, intentZero.BudgetTokens)
+
+	b2048 := 2048
+	reqResidual := &dto.ClaudeRequest{
+		Thinking: &dto.Thinking{
+			Type:         "disabled",
+			BudgetTokens: &b2048,
+		},
+	}
+	intentResidual, err := FromClaude(reqResidual)
+	require.NoError(t, err)
+	assert.Equal(t, ModeDisabled, intentResidual.Mode)
+	assert.Nil(t, intentResidual.BudgetTokens)
+}
+

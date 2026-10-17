@@ -41,6 +41,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { getGroups, getTodayConsumptionUsers } from '@/features/users/api'
+import { getRankedModels } from '@/features/models/api'
 import { formatLogQuota } from '@/lib/format'
 import { useMediaQuery } from '@/hooks'
 import { getUserGroups } from '@/lib/api'
@@ -161,6 +162,17 @@ export function CommonLogsFilterBar<TData>(
       .filter((group) => group !== 'auto')
       .map((group) => ({ label: group, value: group }))
   }, [isAdmin, adminGroups, userGroups])
+
+  const { data: rankedModelsData } = useQuery({
+    queryKey: ['ranked-models'],
+    queryFn: async () => requireServerSuccess(await getRankedModels()),
+    staleTime: 60 * 1000,
+  })
+
+  const modelOptions = useMemo(() => {
+    const list = rankedModelsData?.data ?? []
+    return list.map((m) => ({ label: m, value: m }))
+  }, [rankedModelsData])
 
   const { data: userCandidatesData } = useQuery({
     queryKey: ['today-consumption-users'],
@@ -407,10 +419,19 @@ export function CommonLogsFilterBar<TData>(
   )
   const modelFilter = (
     <LogsFilterField flex className='min-w-[100px]'>
-      <LogsFilterInput
+      <Combobox
+        options={modelOptions}
+        allowCustomValue
+        aria-label={t('Model Name')}
+        emptyText={t('No model found.')}
         placeholder={t('Model Name')}
+        className='h-8 min-w-0 text-sm leading-5'
         value={filters.model || ''}
-        onChange={(e) => handleChange('model', e.target.value)}
+        onValueChange={(value) => {
+          const modelValue = value || undefined
+          handleChange('model', modelValue)
+          handleApply({ ...filters, model: modelValue }, logType)
+        }}
         onKeyDown={handleKeyDown}
       />
     </LogsFilterField>

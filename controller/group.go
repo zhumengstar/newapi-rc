@@ -22,10 +22,7 @@ func GetChannelGroups(c *gin.Context) {
 }
 
 func GetGroups(c *gin.Context) {
-	groupNames := make([]string, 0)
-	for groupName := range ratio_setting.GetGroupRatioCopy() {
-		groupNames = append(groupNames, groupName)
-	}
+	groupNames := model.GetRankedGroups()
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
@@ -63,7 +60,7 @@ func GetUserGroups(c *gin.Context) {
 }
 
 func GetGroupDetails(c *gin.Context) {
-	groupNames := make([]string, 0)
+	groupNames := model.GetRankedGroups()
 	groupRatios := ratio_setting.GetGroupRatioCopy()
 	userUsableGroups := setting.GetUserUsableGroupsCopy()
 	userId := c.GetInt("id")
@@ -76,9 +73,9 @@ func GetGroupDetails(c *gin.Context) {
 	if groupChannelsMap == nil {
 		groupChannelsMap = make(map[string][]model.ChannelGroupItem)
 	}
-	groupMeta := make(map[string]map[string]any, len(groupRatios))
-	for groupName, ratio := range groupRatios {
-		groupNames = append(groupNames, groupName)
+	groupMeta := make(map[string]map[string]any, len(groupNames))
+	for _, groupName := range groupNames {
+		ratio := groupRatios[groupName]
 		_, isPublic := userUsableGroups[groupName]
 		models := groupModelsMap[groupName]
 		if models == nil {
