@@ -21,7 +21,9 @@ import { memo } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { GroupBadge } from '@/components/group-badge'
+import { ROLE } from '@/lib/roles'
 import { cn } from '@/lib/utils'
+import { useAuthStore } from '@/stores/auth-store'
 
 import { CHANNEL_STATUS } from '../constants'
 import { isTagAggregateRow, parseGroupsList, sortGroupsByRatio } from '../lib'
@@ -49,7 +51,9 @@ function ChannelCardComponent({
   groupRatio: Record<string, number>
 }) {
   const { t } = useTranslation()
-  const { sensitiveVisible } = useChannels()
+  const { sensitiveVisible, setCurrentEditGroup, setOpen } = useChannels()
+  const currentUser = useAuthStore((s) => s.auth.user)
+  const isAdmin = (currentUser?.role ?? 0) >= ROLE.ADMIN
   const isTagRow = isTagAggregateRow(row.original)
   const cells = row.getAllCells()
 
@@ -189,17 +193,43 @@ function ChannelCardComponent({
         <div className='min-w-0'>
           {groups.length > 0 ? (
             <div className='flex flex-col items-start gap-1.5'>
-              {groups.map((g) => (
-                <GroupBadge
-                  key={g}
-                  group={g}
-                  label={sensitiveVisible ? undefined : SENSITIVE_MASK}
-                  ratio={groupRatio[g]}
-                  size='sm'
-                  containerClassName='max-w-full'
-                  className='max-w-none whitespace-normal break-words text-left'
-                />
-              ))}
+              {groups.map((g) => {
+                const isAuto = g === 'auto'
+                const canEdit = isAdmin && !isAuto
+                const badge = (
+                  <GroupBadge
+                    group={g}
+                    label={sensitiveVisible ? undefined : SENSITIVE_MASK}
+                    ratio={groupRatio[g]}
+                    size='sm'
+                    containerClassName='max-w-full'
+                    className={cn(
+                      'max-w-none whitespace-normal break-words text-left',
+                      canEdit && 'cursor-pointer hover:opacity-85 transition-opacity'
+                    )}
+                  />
+                )
+
+                if (!canEdit) {
+                  return <span key={g}>{badge}</span>
+                }
+
+                return (
+                  <button
+                    key={g}
+                    type='button'
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setCurrentEditGroup(g)
+                      setOpen('edit-group')
+                    }}
+                    title={t('Click to edit group name and default ratio')}
+                    className='group/gbtn text-left max-w-full focus:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded-md transition-transform hover:scale-[1.02]'
+                  >
+                    {badge}
+                  </button>
+                )
+              })}
             </div>
           ) : (
             <span className='text-muted-foreground text-sm'>-</span>

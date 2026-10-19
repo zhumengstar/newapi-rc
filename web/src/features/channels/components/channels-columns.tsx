@@ -57,8 +57,10 @@ import {
 } from '@/lib/currency'
 import { formatTimestampToDate } from '@/lib/format'
 import { handleServerError } from '@/lib/handle-server-error'
+import { ROLE } from '@/lib/roles'
 import { createServerError } from '@/lib/server-error-message'
-import { truncateText } from '@/lib/utils'
+import { cn, truncateText } from '@/lib/utils'
+import { useAuthStore } from '@/stores/auth-store'
 
 import {
   getCodexUsage,
@@ -1100,8 +1102,10 @@ export function useChannelsColumns(
   } = {}
 ): ColumnDef<Channel>[] {
   const { t, i18n } = useTranslation()
-  const { sensitiveVisible } = useChannels()
+  const { sensitiveVisible, setCurrentEditGroup, setOpen } = useChannels()
   const { groupRatio } = usePricingData()
+  const currentUser = useAuthStore((s) => s.auth.user)
+  const isAdmin = (currentUser?.role ?? 0) >= ROLE.ADMIN
   const enableSelection = options.enableSelection ?? true
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   // The column definitions only depend on the translation function, the active
@@ -1635,17 +1639,43 @@ export function useChannelsColumns(
           }
           return (
             <div className='flex flex-col items-start gap-1 py-1 min-w-0 max-w-full'>
-              {groupArray.map((g) => (
-                <GroupBadge
-                  key={g}
-                  group={g}
-                  label={sensitiveVisible ? undefined : SENSITIVE_MASK}
-                  ratio={groupRatio[g]}
-                  size='sm'
-                  containerClassName='max-w-full'
-                  className='max-w-none whitespace-normal break-words text-left'
-                />
-              ))}
+              {groupArray.map((g) => {
+                const isAuto = g === 'auto'
+                const canEdit = isAdmin && !isAuto
+                const badge = (
+                  <GroupBadge
+                    group={g}
+                    label={sensitiveVisible ? undefined : SENSITIVE_MASK}
+                    ratio={groupRatio[g]}
+                    size='sm'
+                    containerClassName='max-w-full'
+                    className={cn(
+                      'max-w-none whitespace-normal break-words text-left',
+                      canEdit && 'cursor-pointer hover:opacity-85 transition-opacity'
+                    )}
+                  />
+                )
+
+                if (!canEdit) {
+                  return <span key={g}>{badge}</span>
+                }
+
+                return (
+                  <button
+                    key={g}
+                    type='button'
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setCurrentEditGroup(g)
+                      setOpen('edit-group')
+                    }}
+                    title={t('Click to edit group name and default ratio')}
+                    className='group/gbtn text-left max-w-full focus:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded-md transition-transform hover:scale-[1.02]'
+                  >
+                    {badge}
+                  </button>
+                )
+              })}
             </div>
           )
         },
@@ -1831,6 +1861,15 @@ export function useChannelsColumns(
         meta: { pinned: 'right' as const },
       },
     ],
-    [enableSelection, t, locale, sensitiveVisible, groupRatio]
+    [
+      enableSelection,
+      t,
+      locale,
+      sensitiveVisible,
+      groupRatio,
+      setCurrentEditGroup,
+      setOpen,
+      isAdmin,
+    ]
   )
 }

@@ -20,6 +20,7 @@ import { useChannels } from './channels-provider'
 import { BalanceQueryDialog } from './dialogs/balance-query-dialog'
 import { ChannelTestDialog } from './dialogs/channel-test-dialog'
 import { CopyChannelDialog } from './dialogs/copy-channel-dialog'
+import { EditGroupDialog } from './dialogs/edit-group-dialog'
 import { EditTagDialog } from './dialogs/edit-tag-dialog'
 import { FetchModelsDialog } from './dialogs/fetch-models-dialog'
 import { MultiKeyManageDialog } from './dialogs/multi-key-manage-dialog'
@@ -29,7 +30,7 @@ import { UpstreamUpdateDialog } from './dialogs/upstream-update-dialog'
 import { ChannelMutateDrawer } from './drawers/channel-mutate-drawer'
 
 export function ChannelsDialogs() {
-  const { open, setOpen, currentRow, upstream } = useChannels()
+  const { open, setOpen, currentRow, upstream, currentEditGroup } = useChannels()
 
   return (
     <>
@@ -86,6 +87,13 @@ export function ChannelsDialogs() {
       <EditTagDialog
         open={open === 'edit-tag'}
         onOpenChange={(v) => !v && setOpen(null)}
+      />
+
+      {/* Edit Group Dialog */}
+      <EditGroupDialog
+        open={open === 'edit-group'}
+        onOpenChange={(v) => !v && setOpen(null)}
+        group={currentEditGroup}
       />
 
       {/* Upstream Model Update Dialog */}

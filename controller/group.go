@@ -103,3 +103,59 @@ func GetGroupDetails(c *gin.Context) {
 		},
 	})
 }
+
+type UpdateGroupRequest struct {
+	OldGroup string   `json:"old_group" binding:"required"`
+	NewGroup string   `json:"new_group" binding:"required"`
+	Ratio    *float64 `json:"ratio"`
+	Desc     *string  `json:"desc"`
+}
+
+func UpdateGroup(c *gin.Context) {
+	var req UpdateGroupRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "请求参数无效: " + err.Error(),
+		})
+		return
+	}
+
+	ratio := 1.0
+	if req.Ratio != nil {
+		ratio = *req.Ratio
+	} else {
+		ratio = ratio_setting.GetGroupRatio(req.OldGroup)
+	}
+
+	desc := ""
+	if req.Desc != nil {
+		desc = *req.Desc
+	}
+
+	err := model.UpdateGroupGlobal(req.OldGroup, req.NewGroup, ratio, desc)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": err.Error(),
+		})
+		return
+	}
+
+	recordManageAudit(c, "group.update", map[string]any{
+		"old_group": req.OldGroup,
+		"new_group": req.NewGroup,
+		"ratio":     ratio,
+	})
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "分组配置已更新并全局同步",
+		"data": gin.H{
+			"old_group": req.OldGroup,
+			"new_group": req.NewGroup,
+			"ratio":     ratio,
+		},
+	})
+}
+

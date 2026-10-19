@@ -358,6 +358,9 @@ func SetApiRouter(router *gin.Engine) {
 		{
 			groupRoute.GET("/", controller.GetGroups)
 			groupRoute.GET("/detail", controller.GetGroupDetails)
+			groupRoute.PUT("/", controller.UpdateGroup)
+			groupRoute.PUT("/edit", controller.UpdateGroup)
+			groupRoute.POST("/edit", controller.UpdateGroup)
 		}
 
 		prefillGroupRoute := apiRouter.Group("/prefill_group")

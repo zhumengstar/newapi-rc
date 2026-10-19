@@ -858,3 +858,25 @@ export async function getPrefillGroups(
   const res = await api.get('/api/prefill_group', { params: { type } })
   return res.data
 }
+
+export type UpdateGroupPayload = {
+  old_group: string
+  new_group: string
+  ratio: number
+  desc?: string
+}
+
+/**
+ * Update group name and default multiplier ratio globally.
+ */
+export async function updateGroup(
+  payload: UpdateGroupPayload
+): Promise<{
+  success: boolean
+  message?: string
+  data?: { old_group: string; new_group: string; ratio: number }
+}> {
+  const res = await api.put('/api/group/', payload)
+  return res.data
+}
+

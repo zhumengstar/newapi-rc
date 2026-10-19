@@ -17,10 +17,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { getCoreRowModel, useReactTable } from '@tanstack/react-table'
+import { flexRender, getCoreRowModel, useReactTable } from '@tanstack/react-table'
 import { render, renderHook, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { expect, test, vi } from 'vitest'
+
+import { ROLE } from '@/lib/roles'
+import { useAuthStore } from '@/stores/auth-store'
 
 import type { Channel } from '../../types'
 import {
@@ -35,6 +38,7 @@ const updateChannel = vi.hoisted(() => vi.fn())
 const updateChannelBalance = vi.hoisted(() => vi.fn())
 const setCurrentRow = vi.hoisted(() => vi.fn())
 const setOpen = vi.hoisted(() => vi.fn())
+const setCurrentEditGroup = vi.hoisted(() => vi.fn())
 
 vi.mock('../../api', () => ({
   getCodexUsage: vi.fn(),
@@ -55,6 +59,8 @@ vi.mock('../channels-provider', () => ({
     sensitiveVisible: true,
     setCurrentRow,
     setOpen,
+    setCurrentEditGroup,
+    currentEditGroup: null,
   }),
 }))
 
@@ -273,3 +279,70 @@ test('a new edit after escape still saves on blur', async () => {
     expect(updateChannel).toHaveBeenCalledWith(10, { channel_ratio: 0.75 })
   )
 })
+
+test('clicking a group badge in group column calls setCurrentEditGroup and opens edit-group dialog', async () => {
+  useAuthStore.setState({
+    auth: {
+      user: { id: 1, username: 'admin', role: ROLE.ADMIN },
+      isLogged: true,
+      token: 'mock-token',
+    } as any,
+  })
+
+  const channel: Channel = {
+    id: 1,
+    name: 'Test Channel',
+    type: 1,
+    status: 1,
+    group: 'Gemini4按次组',
+    models: 'gpt-4o',
+    priority: 0,
+    weight: 0,
+    created_time: 0,
+    test_time: 0,
+    response_time: 0,
+    base_url: '',
+    other: '',
+    balance: 0,
+    balance_updated_time: 0,
+    used_quota: 0,
+    model_mapping: '',
+    headers: '',
+    channel_ratio: 1,
+  }
+
+  function TestTable() {
+    const columns = useChannelsColumns({ enableSelection: false })
+    const table = useReactTable({
+      data: [channel],
+      columns,
+      getCoreRowModel: getCoreRowModel(),
+    })
+    const groupCell = table
+      .getRowModel()
+      .rows[0].getVisibleCells()
+      .find((c) => c.column.id === 'group')
+
+    return (
+      <div>
+        {groupCell
+          ? flexRender(groupCell.column.columnDef.cell, groupCell.getContext())
+          : null}
+      </div>
+    )
+  }
+
+  const user = userEvent.setup()
+  render(<TestTable />)
+
+  const groupButton = screen.getByRole('button', {
+    name: /Gemini4按次组/i,
+  })
+  expect(groupButton).toBeInTheDocument()
+
+  await user.click(groupButton)
+
+  expect(setCurrentEditGroup).toHaveBeenCalledWith('Gemini4按次组')
+  expect(setOpen).toHaveBeenCalledWith('edit-group')
+})
+

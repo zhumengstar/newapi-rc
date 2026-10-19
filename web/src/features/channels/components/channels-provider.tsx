@@ -45,6 +45,7 @@ type DialogType =
   | 'tag-batch-edit'
   | 'edit-tag'
   | 'copy-channel'
+  | 'edit-group'
   | null
 
 type UpstreamUpdateState = ReturnType<typeof useChannelUpstreamUpdates>
@@ -56,6 +57,8 @@ type ChannelsContextType = {
   setCurrentRow: (row: Channel | null) => void
   currentTag: string | null
   setCurrentTag: (tag: string | null) => void
+  currentEditGroup: string | null
+  setCurrentEditGroup: (group: string | null) => void
   enableTagMode: boolean
   setEnableTagMode: (enabled: boolean) => void
   idSort: boolean
@@ -87,6 +90,7 @@ export function ChannelsProvider({ children }: { children: React.ReactNode }) {
   const [open, setOpen] = useState<DialogType>(null)
   const [currentRow, setCurrentRow] = useState<Channel | null>(null)
   const [currentTag, setCurrentTag] = useState<string | null>(null)
+  const [currentEditGroup, setCurrentEditGroup] = useState<string | null>(null)
   const [enableTagMode, setEnableTagMode] = useState(() => {
     return localStorage.getItem('enable-tag-mode') === 'true'
   })
@@ -119,6 +123,8 @@ export function ChannelsProvider({ children }: { children: React.ReactNode }) {
       setCurrentRow,
       currentTag,
       setCurrentTag,
+      currentEditGroup,
+      setCurrentEditGroup,
       enableTagMode,
       setEnableTagMode,
       idSort,
@@ -137,6 +143,7 @@ export function ChannelsProvider({ children }: { children: React.ReactNode }) {
       open,
       currentRow,
       currentTag,
+      currentEditGroup,
       enableTagMode,
       idSort,
       groupSort,
