@@ -42,6 +42,8 @@ export type Option = {
   label: string
   value: string
   description?: React.ReactNode
+  chipLabel?: React.ReactNode
+  itemLabel?: React.ReactNode
 }
 
 interface MultiSelectProps {
@@ -149,6 +151,26 @@ export function MultiSelect(props: MultiSelectProps) {
     for (const option of props.options) {
       if (option.description !== undefined) {
         map.set(option.value, option.description)
+      }
+    }
+    return map
+  }, [props.options])
+
+  const chipLabelMap = React.useMemo(() => {
+    const map = new Map<string, React.ReactNode>()
+    for (const option of props.options) {
+      if (option.chipLabel !== undefined) {
+        map.set(option.value, option.chipLabel)
+      }
+    }
+    return map
+  }, [props.options])
+
+  const itemLabelMap = React.useMemo(() => {
+    const map = new Map<string, React.ReactNode>()
+    for (const option of props.options) {
+      if (option.itemLabel !== undefined) {
+        map.set(option.value, option.itemLabel)
       }
     }
     return map
@@ -331,8 +353,9 @@ export function MultiSelect(props: MultiSelectProps) {
               <>
                 {visibleValues.map((value) => {
                   const label = labelMap.get(value) ?? value
+                  const chipContent = chipLabelMap.get(value) ?? label
                   return (
-                    <ComboboxChip key={value}>
+                    <ComboboxChip key={value} className='h-auto py-0.5'>
                       {props.copyChipOnClick ? (
                         <button
                           type='button'
@@ -341,12 +364,14 @@ export function MultiSelect(props: MultiSelectProps) {
                           }
                           onPointerDown={(event) => event.stopPropagation()}
                           title={t('Click to copy')}
-                          className='max-w-[16rem] cursor-pointer truncate rounded-sm hover:underline'
+                          className='max-w-[22rem] cursor-pointer truncate rounded-sm hover:underline inline-flex items-center gap-1.5'
                         >
-                          {label}
+                          {chipContent}
                         </button>
                       ) : (
-                        <span className='max-w-[16rem] truncate'>{label}</span>
+                        <span className='max-w-[22rem] truncate inline-flex items-center gap-1.5'>
+                          {chipContent}
+                        </span>
                       )}
                     </ComboboxChip>
                   )
@@ -426,12 +451,16 @@ export function MultiSelect(props: MultiSelectProps) {
                           : t('Add "{{value}}"', { value: item })}
                       </span>
                     </>
-                  ) : descriptionMap.has(item) ? (
+                  ) : itemLabelMap.has(item) || descriptionMap.has(item) ? (
                     <div className='flex items-center justify-between gap-2 w-full min-w-0'>
-                      <span className='truncate'>{label}</span>
-                      <span className='shrink-0 text-xs text-muted-foreground'>
-                        {descriptionMap.get(item)}
-                      </span>
+                      <div className='flex items-center gap-1.5 min-w-0 truncate'>
+                        {itemLabelMap.get(item) ?? <span className='truncate'>{label}</span>}
+                      </div>
+                      {descriptionMap.has(item) && (
+                        <span className='shrink-0 text-xs text-muted-foreground'>
+                          {descriptionMap.get(item)}
+                        </span>
+                      )}
                     </div>
                   ) : (
                     <span className='truncate'>{label}</span>

@@ -38,6 +38,7 @@ import {
   Settings,
   SlidersHorizontal,
   Wand2,
+  ArrowUpDown,
 } from 'lucide-react'
 import {
   type ComponentProps,
@@ -649,11 +650,22 @@ export function ChannelMutateDrawer({
     })
   }, [searchedUsersData])
 
+  const [userSortOrder, setUserSortOrder] = useState<'asc' | 'desc'>('asc')
+
   const eligibleUserOptions = useMemo(() => {
     const channelGroupSet = new Set(channelGroupsArray)
     const allUsers = Array.from(userPool.values())
 
-    const opts = allUsers
+    type UserOptionItem = {
+      label: string
+      value: string
+      mainRatio: number
+      itemLabel: ReactNode
+      chipLabel: ReactNode
+      description: ReactNode
+    }
+
+    const opts: UserOptionItem[] = allUsers
       .filter((user) => {
         if (!user.group) return false
         const userGroups = user.group.split(',').map((g) => g.trim())
@@ -681,24 +693,69 @@ export function ChannelMutateDrawer({
           }
         }
 
-        if (!ratioDisplay) {
+        if (!ratioDisplay || mainRatio === null) {
           ratioDisplay = '1x'
           mainRatio = 1
         }
 
         let badgeStyle =
-          'bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20'
-        if (mainRatio != null && mainRatio > 1) {
+          'bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/25'
+        let chipBadgeStyle =
+          'bg-blue-500/15 text-blue-600 dark:text-blue-400 border-blue-500/30'
+        if (mainRatio > 1) {
           badgeStyle =
             'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/30'
-        } else if (mainRatio != null && mainRatio < 1) {
+          chipBadgeStyle =
+            'bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/35'
+        } else if (mainRatio < 1) {
           badgeStyle =
             'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/30'
+          chipBadgeStyle =
+            'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/35'
         }
 
         return {
-          label: `${user.username} (#${user.id})${user.remark ? ` - ${user.remark}` : ''} [${ratioDisplay}]`,
+          label: `${user.username} (#${user.id}) ${user.remark ? user.remark : ''} ${ratioDisplay}`,
           value: String(user.id),
+          mainRatio,
+          itemLabel: (
+            <div className='flex items-center gap-1.5 min-w-0'>
+              <span className='font-medium text-foreground truncate'>
+                {user.username}
+              </span>
+              <span className='text-[11px] text-muted-foreground font-mono bg-muted/80 px-1 py-0.5 rounded shrink-0'>
+                #{user.id}
+              </span>
+              {user.remark && (
+                <span className='text-xs text-muted-foreground truncate max-w-[130px]'>
+                  ({user.remark})
+                </span>
+              )}
+            </div>
+          ),
+          chipLabel: (
+            <span className='inline-flex items-center gap-1.5 min-w-0 max-w-full'>
+              <span className='font-medium text-foreground truncate'>
+                {user.username}
+              </span>
+              <span className='text-[10px] text-muted-foreground font-mono shrink-0'>
+                #{user.id}
+              </span>
+              {user.remark && (
+                <span className='text-[11px] text-muted-foreground/80 truncate max-w-[80px]'>
+                  {user.remark}
+                </span>
+              )}
+              <span
+                className={cn(
+                  'inline-flex items-center px-1.5 py-0 rounded text-[10px] font-mono font-semibold border leading-tight shrink-0',
+                  chipBadgeStyle
+                )}
+              >
+                {ratioDisplay}
+              </span>
+            </span>
+          ),
           description: (
             <span
               className={cn(
@@ -707,7 +764,7 @@ export function ChannelMutateDrawer({
               )}
             >
               <span className='opacity-70 text-[10px]'>倍率:</span>
-              <span>{ratioDisplay}</span>
+              <span className='font-bold'>{ratioDisplay}</span>
             </span>
           ),
         }
@@ -720,8 +777,42 @@ export function ChannelMutateDrawer({
         const cached = userPool.get(uid)
         if (cached) {
           opts.push({
-            label: `${cached.username} (#${cached.id})${cached.remark ? ` - ${cached.remark}` : ''}`,
+            label: `${cached.username} (#${cached.id}) ${cached.remark ? cached.remark : ''}`,
             value: uidStr,
+            mainRatio: 9999,
+            itemLabel: (
+              <div className='flex items-center gap-1.5 min-w-0'>
+                <span className='font-medium text-foreground truncate'>
+                  {cached.username}
+                </span>
+                <span className='text-[11px] text-muted-foreground font-mono bg-muted/80 px-1 py-0.5 rounded shrink-0'>
+                  #{cached.id}
+                </span>
+                {cached.remark && (
+                  <span className='text-xs text-muted-foreground truncate max-w-[130px]'>
+                    ({cached.remark})
+                  </span>
+                )}
+              </div>
+            ),
+            chipLabel: (
+              <span className='inline-flex items-center gap-1.5 min-w-0 max-w-full'>
+                <span className='font-medium text-foreground truncate'>
+                  {cached.username}
+                </span>
+                <span className='text-[10px] text-muted-foreground font-mono shrink-0'>
+                  #{cached.id}
+                </span>
+                {cached.remark && (
+                  <span className='text-[11px] text-muted-foreground/80 truncate max-w-[80px]'>
+                    {cached.remark}
+                  </span>
+                )}
+                <span className='inline-flex items-center px-1.5 py-0 rounded text-[10px] font-mono border bg-muted text-muted-foreground shrink-0'>
+                  已绑定
+                </span>
+              </span>
+            ),
             description: (
               <span className='inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-mono font-medium border bg-muted text-muted-foreground border-border shrink-0'>
                 已绑定
@@ -732,6 +823,18 @@ export function ChannelMutateDrawer({
           opts.push({
             label: `用户 #${uidStr}`,
             value: uidStr,
+            mainRatio: 9999,
+            itemLabel: (
+              <span className='font-medium text-foreground truncate'>用户 #{uidStr}</span>
+            ),
+            chipLabel: (
+              <span className='inline-flex items-center gap-1.5 min-w-0 max-w-full'>
+                <span className='font-medium text-foreground truncate'>用户 #{uidStr}</span>
+                <span className='inline-flex items-center px-1.5 py-0 rounded text-[10px] font-mono border bg-muted text-muted-foreground shrink-0'>
+                  已绑定
+                </span>
+              </span>
+            ),
             description: (
               <span className='inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-mono font-medium border bg-muted text-muted-foreground border-border shrink-0'>
                 已绑定
@@ -741,8 +844,18 @@ export function ChannelMutateDrawer({
         }
       }
     }
+
+    opts.sort((a, b) => {
+      if (a.mainRatio !== b.mainRatio) {
+        return userSortOrder === 'asc'
+          ? a.mainRatio - b.mainRatio
+          : b.mainRatio - a.mainRatio
+      }
+      return Number(a.value) - Number(b.value)
+    })
+
     return opts
-  }, [userPool, channelGroupsArray, formValues.allowed_user_ids])
+  }, [userPool, channelGroupsArray, formValues.allowed_user_ids, userSortOrder])
 
   const multiKeyMode = formValues.multi_key_mode
   const multiKeyType = formValues.multi_key_type
@@ -3608,9 +3721,28 @@ export function ChannelMutateDrawer({
               render={({ field }) => (
                 <FormItem className='space-y-3'>
                   <div className='space-y-1'>
-                    <FormLabel>
-                      {t('Exclusive Users', '专属绑定客户')}
-                    </FormLabel>
+                    <div className='flex items-center justify-between'>
+                      <FormLabel>
+                        {t('Exclusive Users', '专属绑定客户')}
+                      </FormLabel>
+                      <Button
+                        type='button'
+                        variant='outline'
+                        size='xs'
+                        onClick={() =>
+                          setUserSortOrder((prev) =>
+                            prev === 'asc' ? 'desc' : 'asc'
+                          )
+                        }
+                        className='h-6 px-2 text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1 rounded cursor-pointer border-border/80 bg-muted/20 hover:bg-muted/50 transition-colors'
+                        title='点击切换倍率升序/降序'
+                      >
+                        <ArrowUpDown className='size-3 shrink-0' />
+                        <span>
+                          倍率{userSortOrder === 'asc' ? '升序 (低→高)' : '降序 (高→低)'}
+                        </span>
+                      </Button>
+                    </div>
                     <FormDescription>
                       {t(
                         'Exclusive users description',
