@@ -502,58 +502,95 @@ export function ChannelMutateDrawer({
     enabled: open && !showProviderPicker,
   })
 
+  const { copyToClipboard } = useCopyToClipboard()
+
+  const { channelKey, isChannelKeyLoading, handleRevealKey, verification } =
+    useChannelKeyDisclosure(open, channelId)
+
+  // Check if this is a multi-key channel
+  const isMultiKeyChannel =
+    isEditing && channelData?.data?.channel_info?.is_multi_key === true
+
+  // Form setup
+  const form = useForm<ChannelFormValues>({
+    resolver: zodResolver(channelFormSchema),
+    defaultValues: CHANNEL_FORM_DEFAULT_VALUES,
+  })
+
+  // Watch values once for conditional fields and configuration indicators.
+  const formValues = form.watch()
+
   const [userSearchKeyword, setUserSearchKeyword] = useState('')
   const debouncedUserSearch = useDebounce(userSearchKeyword, 300)
+
+  const channelGroupsArray = useMemo(() => {
+    const raw = formValues?.group
+    if (!raw) return []
+    if (Array.isArray(raw)) return raw
+    if (typeof raw === 'string') {
+      return (raw as string).split(',').map((g) => g.trim()).filter(Boolean)
+    }
+    return []
+  }, [formValues?.group])
 
   // 1. Fetch all users with auto-pagination so no user is ever omitted
   const { data: allUsersList, isLoading: isLoadingUsers } = useQuery({
     queryKey: ['all_users_for_channel_select'],
     queryFn: async () => {
-      const all: User[] = []
-      let page = 1
-      while (page <= 10) {
-        const res = requireServerSuccess(
-          await searchUsers({ p: page, page_size: 100 })
-        )
-        const items = res?.data?.items || []
-        all.push(...items)
-        const total = res?.data?.total || 0
-        if (all.length >= total || items.length === 0) {
-          break
+      try {
+        const all: User[] = []
+        let page = 1
+        while (page <= 10) {
+          const res = requireServerSuccess(
+            await searchUsers({ p: page, page_size: 100 })
+          )
+          const items = res?.data?.items || []
+          all.push(...items)
+          const total = res?.data?.total || 0
+          if (all.length >= total || items.length === 0) {
+            break
+          }
+          page++
         }
-        page++
+        return all
+      } catch (err) {
+        console.warn('Failed to fetch all users for channel select:', err)
+        return []
       }
-      return all
     },
     enabled: open && !showProviderPicker,
   })
 
   // 2. Fetch users specifically belonging to currently selected channel groups
-  const currentGroupsKey = (formValues?.group || []).join(',')
+  const currentGroupsKey = channelGroupsArray.join(',')
   const { data: groupUsersList } = useQuery({
     queryKey: ['group_users_for_channel_select', currentGroupsKey],
     queryFn: async () => {
-      const groups = formValues?.group || []
-      if (groups.length === 0) return []
-      const results: User[] = []
-      for (const g of groups) {
-        let page = 1
-        while (page <= 5) {
-          const res = requireServerSuccess(
-            await searchUsers({ group: g, p: page, page_size: 100 })
-          )
-          const items = res?.data?.items || []
-          results.push(...items)
-          const total = res?.data?.total || 0
-          if (results.length >= total || items.length === 0) {
-            break
+      if (channelGroupsArray.length === 0) return []
+      try {
+        const results: User[] = []
+        for (const g of channelGroupsArray) {
+          let page = 1
+          while (page <= 5) {
+            const res = requireServerSuccess(
+              await searchUsers({ group: g, p: page, page_size: 100 })
+            )
+            const items = res?.data?.items || []
+            results.push(...items)
+            const total = res?.data?.total || 0
+            if (results.length >= total || items.length === 0) {
+              break
+            }
+            page++
           }
-          page++
         }
+        return results
+      } catch (err) {
+        console.warn('Failed to fetch group users for channel select:', err)
+        return []
       }
-      return results
     },
-    enabled: open && !showProviderPicker && (formValues?.group?.length || 0) > 0,
+    enabled: open && !showProviderPicker && channelGroupsArray.length > 0,
   })
 
   // 3. Fetch users dynamically when user types a search keyword
@@ -562,9 +599,14 @@ export function ChannelMutateDrawer({
     queryFn: async () => {
       const kw = debouncedUserSearch.trim()
       if (!kw) return null
-      return requireServerSuccess(
-        await searchUsers({ keyword: kw, p: 1, page_size: 100 })
-      )
+      try {
+        return requireServerSuccess(
+          await searchUsers({ keyword: kw, p: 1, page_size: 100 })
+        )
+      } catch (err) {
+        console.warn('Failed to search users for channel:', err)
+        return null
+      }
     },
     enabled:
       open && !showProviderPicker && debouncedUserSearch.trim().length > 0,
@@ -607,27 +649,8 @@ export function ChannelMutateDrawer({
     })
   }, [searchedUsersData])
 
-  const { copyToClipboard } = useCopyToClipboard()
-
-  const { channelKey, isChannelKeyLoading, handleRevealKey, verification } =
-    useChannelKeyDisclosure(open, channelId)
-
-  // Check if this is a multi-key channel
-  const isMultiKeyChannel =
-    isEditing && channelData?.data?.channel_info?.is_multi_key === true
-
-  // Form setup
-  const form = useForm<ChannelFormValues>({
-    resolver: zodResolver(channelFormSchema),
-    defaultValues: CHANNEL_FORM_DEFAULT_VALUES,
-  })
-
-  // Watch values once for conditional fields and configuration indicators.
-  const formValues = form.watch()
-
   const eligibleUserOptions = useMemo(() => {
-    const channelGroups = formValues.group || []
-    const channelGroupSet = new Set(channelGroups)
+    const channelGroupSet = new Set(channelGroupsArray)
     const allUsers = Array.from(userPool.values())
 
     const opts = allUsers
@@ -719,7 +742,7 @@ export function ChannelMutateDrawer({
       }
     }
     return opts
-  }, [userPool, formValues.group, formValues.allowed_user_ids])
+  }, [userPool, channelGroupsArray, formValues.allowed_user_ids])
 
   const multiKeyMode = formValues.multi_key_mode
   const multiKeyType = formValues.multi_key_type
