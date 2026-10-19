@@ -505,15 +505,58 @@ export function ChannelMutateDrawer({
   const [userSearchKeyword, setUserSearchKeyword] = useState('')
   const debouncedUserSearch = useDebounce(userSearchKeyword, 300)
 
-  // Fetch initial users list (up to 100)
-  const { data: initialUsersData, isLoading: isLoadingUsers } = useQuery({
-    queryKey: ['users_for_channel_select'],
-    queryFn: async () =>
-      requireServerSuccess(await searchUsers({ p: 1, page_size: 100 })),
+  // 1. Fetch all users with auto-pagination so no user is ever omitted
+  const { data: allUsersList, isLoading: isLoadingUsers } = useQuery({
+    queryKey: ['all_users_for_channel_select'],
+    queryFn: async () => {
+      const all: User[] = []
+      let page = 1
+      while (page <= 10) {
+        const res = requireServerSuccess(
+          await searchUsers({ p: page, page_size: 100 })
+        )
+        const items = res?.data?.items || []
+        all.push(...items)
+        const total = res?.data?.total || 0
+        if (all.length >= total || items.length === 0) {
+          break
+        }
+        page++
+      }
+      return all
+    },
     enabled: open && !showProviderPicker,
   })
 
-  // Fetch users dynamically when user types a search keyword
+  // 2. Fetch users specifically belonging to currently selected channel groups
+  const currentGroupsKey = (formValues?.group || []).join(',')
+  const { data: groupUsersList } = useQuery({
+    queryKey: ['group_users_for_channel_select', currentGroupsKey],
+    queryFn: async () => {
+      const groups = formValues?.group || []
+      if (groups.length === 0) return []
+      const results: User[] = []
+      for (const g of groups) {
+        let page = 1
+        while (page <= 5) {
+          const res = requireServerSuccess(
+            await searchUsers({ group: g, p: page, page_size: 100 })
+          )
+          const items = res?.data?.items || []
+          results.push(...items)
+          const total = res?.data?.total || 0
+          if (results.length >= total || items.length === 0) {
+            break
+          }
+          page++
+        }
+      }
+      return results
+    },
+    enabled: open && !showProviderPicker && (formValues?.group?.length || 0) > 0,
+  })
+
+  // 3. Fetch users dynamically when user types a search keyword
   const { data: searchedUsersData } = useQuery({
     queryKey: ['users_for_channel_search', debouncedUserSearch],
     queryFn: async () => {
@@ -527,33 +570,41 @@ export function ChannelMutateDrawer({
       open && !showProviderPicker && debouncedUserSearch.trim().length > 0,
   })
 
-  // User pool to accumulate known users across initial load and searches
+  // User pool to accumulate known users across auto-pagination, group fetch, and searches
   const [userPool, setUserPool] = useState<Map<number, User>>(new Map())
 
   useEffect(() => {
-    const items = initialUsersData?.data?.items || []
-    if (items.length > 0) {
-      setUserPool((prev) => {
-        const next = new Map(prev)
-        for (const u of items) {
-          next.set(u.id, u)
-        }
-        return next
-      })
-    }
-  }, [initialUsersData])
+    if (!allUsersList || allUsersList.length === 0) return
+    setUserPool((prev) => {
+      const next = new Map(prev)
+      for (const u of allUsersList) {
+        next.set(u.id, u)
+      }
+      return next
+    })
+  }, [allUsersList])
+
+  useEffect(() => {
+    if (!groupUsersList || groupUsersList.length === 0) return
+    setUserPool((prev) => {
+      const next = new Map(prev)
+      for (const u of groupUsersList) {
+        next.set(u.id, u)
+      }
+      return next
+    })
+  }, [groupUsersList])
 
   useEffect(() => {
     const items = searchedUsersData?.data?.items || []
-    if (items.length > 0) {
-      setUserPool((prev) => {
-        const next = new Map(prev)
-        for (const u of items) {
-          next.set(u.id, u)
-        }
-        return next
-      })
-    }
+    if (items.length === 0) return
+    setUserPool((prev) => {
+      const next = new Map(prev)
+      for (const u of items) {
+        next.set(u.id, u)
+      }
+      return next
+    })
   }, [searchedUsersData])
 
   const { copyToClipboard } = useCopyToClipboard()
@@ -575,31 +626,96 @@ export function ChannelMutateDrawer({
   const formValues = form.watch()
 
   const eligibleUserOptions = useMemo(() => {
-    const channelGroups = new Set(formValues.group || [])
+    const channelGroups = formValues.group || []
+    const channelGroupSet = new Set(channelGroups)
     const allUsers = Array.from(userPool.values())
 
     const opts = allUsers
       .filter((user) => {
         if (!user.group) return false
         const userGroups = user.group.split(',').map((g) => g.trim())
-        return userGroups.some((g) => channelGroups.has(g))
+        return userGroups.some((g) => channelGroupSet.has(g))
       })
-      .map((user) => ({
-        label: `${user.username} (#${user.id})${user.remark ? ` - ${user.remark}` : ''}`,
-        value: String(user.id),
-      }))
+      .map((user) => {
+        const userGroups = user.group.split(',').map((g) => g.trim())
+        const matchedGroups = userGroups.filter((g) => channelGroupSet.has(g))
+
+        let ratioDisplay = ''
+        let mainRatio: number | null = null
+        if (user.effective_group_ratios) {
+          const ratioItems: string[] = []
+          for (const mg of matchedGroups) {
+            if (user.effective_group_ratios[mg] !== undefined) {
+              const r = user.effective_group_ratios[mg]
+              if (mainRatio === null) mainRatio = r
+              ratioItems.push(
+                matchedGroups.length > 1 ? `${mg}: ${r}x` : `${r}x`
+              )
+            }
+          }
+          if (ratioItems.length > 0) {
+            ratioDisplay = ratioItems.join(' | ')
+          }
+        }
+
+        if (!ratioDisplay) {
+          ratioDisplay = '1x'
+          mainRatio = 1
+        }
+
+        let badgeStyle =
+          'bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20'
+        if (mainRatio != null && mainRatio > 1) {
+          badgeStyle =
+            'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/30'
+        } else if (mainRatio != null && mainRatio < 1) {
+          badgeStyle =
+            'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/30'
+        }
+
+        return {
+          label: `${user.username} (#${user.id})${user.remark ? ` - ${user.remark}` : ''} [${ratioDisplay}]`,
+          value: String(user.id),
+          description: (
+            <span
+              className={cn(
+                'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-mono font-medium border shadow-2xs shrink-0',
+                badgeStyle
+              )}
+            >
+              <span className='opacity-70 text-[10px]'>倍率:</span>
+              <span>{ratioDisplay}</span>
+            </span>
+          ),
+        }
+      })
 
     const existingIds = new Set(opts.map((o) => o.value))
     for (const uid of formValues.allowed_user_ids || []) {
       const uidStr = String(uid)
       if (!existingIds.has(uidStr)) {
         const cached = userPool.get(uid)
-        opts.push({
-          label: cached
-            ? `${cached.username} (#${cached.id})${cached.remark ? ` - ${cached.remark}` : ''}`
-            : `用户 #${uidStr}`,
-          value: uidStr,
-        })
+        if (cached) {
+          opts.push({
+            label: `${cached.username} (#${cached.id})${cached.remark ? ` - ${cached.remark}` : ''}`,
+            value: uidStr,
+            description: (
+              <span className='inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-mono font-medium border bg-muted text-muted-foreground border-border shrink-0'>
+                已绑定
+              </span>
+            ),
+          })
+        } else {
+          opts.push({
+            label: `用户 #${uidStr}`,
+            value: uidStr,
+            description: (
+              <span className='inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-mono font-medium border bg-muted text-muted-foreground border-border shrink-0'>
+                已绑定
+              </span>
+            ),
+          })
+        }
       }
     }
     return opts
