@@ -429,15 +429,25 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 		return nil, types.NewError(fmt.Errorf("分组 %s 下模型 %s 的可用渠道不存在（retry）", selectGroup, info.OriginModelName), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
 	}
 
-	info.PriceData.GroupRatioInfo = helper.HandleGroupRatio(c, info)
-	if userModelPrice, ok := helper.GetUserPerCallModelPrice(info); ok {
-		info.PriceData.ModelPrice = userModelPrice
-		info.PriceData.UsePrice = true
+	if selectGroup != "" && selectGroup != info.UsingGroup {
+		info.UsingGroup = selectGroup
+		common.SetContextKey(c, constant.ContextKeyUsingGroup, selectGroup)
+		common.SetContextKey(c, constant.ContextKeyAutoGroup, selectGroup)
 	}
 
 	newAPIError := middleware.SetupContextForSelectedChannel(c, channel, info.OriginModelName)
 	if newAPIError != nil {
 		return channel, newAPIError
+	}
+	_ = helper.ModelMappedHelper(c, info, nil)
+
+	info.PriceData.GroupRatioInfo = helper.HandleGroupRatio(c, info)
+	if userModelPrice, ok := helper.GetUserPerCallModelPrice(info); ok {
+		info.PriceData.ModelPrice = userModelPrice
+		info.PriceData.UsePrice = true
+		info.PriceData.GroupRatioInfo.GroupRatio = 1.0
+		info.PriceData.GroupRatioInfo.GroupSpecialRatio = 1.0
+		info.PriceData.GroupRatioInfo.HasSpecialRatio = true
 	}
 	return channel, nil
 }

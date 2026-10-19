@@ -55,13 +55,27 @@ func GetUserPerCallModelPrice(info *relaycommon.RelayInfo) (float64, bool) {
 	if len(userSetting.UserModelPriceRules) == 0 && len(userSetting.UserModelPrices) == 0 && info.UserId > 0 {
 		userSetting, _ = model.GetUserSetting(info.UserId, false)
 	}
+	upstreamModel := info.GetUpstreamModelName()
 	for _, rule := range userSetting.UserModelPriceRules {
 		if strings.TrimSpace(rule.Group) != info.UsingGroup || rule.Price < 0 {
 			continue
 		}
 		for _, modelName := range rule.Models {
 			trimmed := strings.TrimSpace(modelName)
-			if trimmed == info.OriginModelName || trimmed == billingModelName {
+			if trimmed == "" {
+				continue
+			}
+			if trimmed == info.OriginModelName || trimmed == billingModelName || (upstreamModel != "" && trimmed == upstreamModel) {
+				return rule.Price, true
+			}
+			// 兼容带 -c 后缀的按次模型标识（如 gemini-4-argon 与 gemini-4-argon-c 双向兼容匹配）
+			trimmedBase := strings.TrimSuffix(trimmed, "-c")
+			originBase := strings.TrimSuffix(info.OriginModelName, "-c")
+			billingBase := strings.TrimSuffix(billingModelName, "-c")
+			if trimmedBase == originBase || trimmedBase == billingBase {
+				return rule.Price, true
+			}
+			if upstreamModel != "" && trimmedBase == strings.TrimSuffix(upstreamModel, "-c") {
 				return rule.Price, true
 			}
 		}
@@ -73,6 +87,18 @@ func GetUserPerCallModelPrice(info *relaycommon.RelayInfo) (float64, bool) {
 			return price, true
 		}
 		if price, ok := userSetting.UserModelPrices[billingModelName]; ok && price >= 0 {
+			return price, true
+		}
+		if upstreamModel != "" {
+			if price, ok := userSetting.UserModelPrices[upstreamModel]; ok && price >= 0 {
+				return price, true
+			}
+		}
+		originBase := strings.TrimSuffix(info.OriginModelName, "-c")
+		if price, ok := userSetting.UserModelPrices[originBase+"-c"]; ok && price >= 0 {
+			return price, true
+		}
+		if price, ok := userSetting.UserModelPrices[originBase]; ok && price >= 0 {
 			return price, true
 		}
 	}

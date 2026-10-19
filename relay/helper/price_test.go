@@ -749,3 +749,65 @@ func TestUserPerCallModelPriceWithHandleGroupRatioAndRetry(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, 0.05, userModelPrice)
 }
+
+func TestGetUserPerCallModelPriceCompatibilityAndMapping(t *testing.T) {
+	groupName := "Gemini4按次组"
+
+	// 规则配置了 gemini-4-argon，请求的是 gemini-4-argon-c
+	info1 := &relaycommon.RelayInfo{
+		OriginModelName: "gemini-4-argon-c",
+		UsingGroup:      groupName,
+		UserSetting: dto.UserSetting{
+			UserModelPriceRules: []dto.UserModelPriceRule{
+				{
+					Group:  groupName,
+					Models: []string{"gemini-4-argon"},
+					Price:  0.1,
+				},
+			},
+		},
+	}
+	p1, ok1 := GetUserPerCallModelPrice(info1)
+	assert.True(t, ok1)
+	assert.Equal(t, 0.1, p1)
+
+	// 规则配置了 gemini-4-argon-c，请求的是 gemini-4-argon
+	info2 := &relaycommon.RelayInfo{
+		OriginModelName: "gemini-4-argon",
+		UsingGroup:      groupName,
+		UserSetting: dto.UserSetting{
+			UserModelPriceRules: []dto.UserModelPriceRule{
+				{
+					Group:  groupName,
+					Models: []string{"gemini-4-argon-c"},
+					Price:  0.025,
+				},
+			},
+		},
+	}
+	p2, ok2 := GetUserPerCallModelPrice(info2)
+	assert.True(t, ok2)
+	assert.Equal(t, 0.025, p2)
+
+	// 渠道模型重定向: 原模型请求 gemini-4-argon，渠道映射为 custom-argon-upstream
+	info3 := &relaycommon.RelayInfo{
+		OriginModelName: "gemini-4-argon",
+		ChannelMeta: &relaycommon.ChannelMeta{
+			UpstreamModelName: "custom-argon-upstream",
+		},
+		UsingGroup: groupName,
+		UserSetting: dto.UserSetting{
+			UserModelPriceRules: []dto.UserModelPriceRule{
+				{
+					Group:  groupName,
+					Models: []string{"custom-argon-upstream"},
+					Price:  0.08,
+				},
+			},
+		},
+	}
+	p3, ok3 := GetUserPerCallModelPrice(info3)
+	assert.True(t, ok3)
+	assert.Equal(t, 0.08, p3)
+}
+
