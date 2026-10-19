@@ -452,7 +452,7 @@ func GetChannelGroups() ([]string, error) {
 
 func GetGroupModelsMap() (map[string][]string, error) {
 	var channels []Channel
-	if err := DB.Model(&Channel{}).Select(commonGroupCol, "models").Find(&channels).Error; err != nil {
+	if err := DB.Model(&Channel{}).Where("status = ?", common.ChannelStatusEnabled).Select(commonGroupCol, "models").Find(&channels).Error; err != nil {
 		return nil, err
 	}
 

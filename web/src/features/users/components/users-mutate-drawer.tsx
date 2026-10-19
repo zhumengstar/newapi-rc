@@ -19,12 +19,14 @@ For commercial licensing, please contact support@quantumnous.com
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useQuery } from '@tanstack/react-query'
 import {
+  AlertCircle,
   Check,
   CheckCheck,
   ChevronDown,
   ChevronUp,
   ChevronsUpDown,
   Coins,
+  Eraser,
   Eye,
   EyeOff,
   Filter,
@@ -37,7 +39,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react'
-import { Fragment, useEffect, useMemo, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -212,31 +214,43 @@ export function UsersMutateDrawer({
   const [draftModelPrice, setDraftModelPrice] = useState<string>('')
   const [expandedRuleIndices, setExpandedRuleIndices] = useState<Record<number, boolean>>({})
 
-  const availableModelsForGroup = useMemo(() => {
-    if (!draftPriceGroup) return []
-    const metaModels: string[] = Array.isArray(groupMeta[draftPriceGroup]?.models)
-      ? groupMeta[draftPriceGroup].models
-      : []
-    const perCallItems = perCallModels.filter(
-      (item) =>
-        item.groups?.includes(draftPriceGroup) ||
-        item.groups?.includes('all')
-    )
-    const perCallMap = new Map(perCallItems.map((item) => [item.model, item]))
+  // Rule models inline editing state
+  const [editingRuleIndex, setEditingRuleIndex] = useState<number | null>(null)
+  const [editingRuleModels, setEditingRuleModels] = useState<string[]>([])
 
-    const modelSet = new Set<string>([...metaModels, ...perCallItems.map((i) => i.model)])
-    const allModelNames = Array.from(modelSet).sort()
+  const getAvailableModelsForGroup = useCallback(
+    (group: string) => {
+      if (!group) return []
+      const metaModels: string[] = Array.isArray(groupMeta[group]?.models)
+        ? groupMeta[group].models
+        : []
+      const perCallItems = perCallModels.filter(
+        (item) =>
+          item.groups?.includes(group) ||
+          item.groups?.includes('all')
+      )
+      const perCallMap = new Map(perCallItems.map((item) => [item.model, item]))
 
-    return allModelNames.map((modelName) => {
-      const perCall = perCallMap.get(modelName)
-      return {
-        model: modelName,
-        price: perCall?.price,
-        has_global_price: Boolean(perCall?.has_global_price),
-        is_per_call_default: Boolean(perCall),
-      }
-    })
-  }, [perCallModels, draftPriceGroup, groupMeta])
+      const modelSet = new Set<string>([...metaModels, ...perCallItems.map((i) => i.model)])
+      const allModelNames = Array.from(modelSet).sort()
+
+      return allModelNames.map((modelName) => {
+        const perCall = perCallMap.get(modelName)
+        return {
+          model: modelName,
+          price: perCall?.price,
+          has_global_price: Boolean(perCall?.has_global_price),
+          is_per_call_default: Boolean(perCall),
+        }
+      })
+    },
+    [perCallModels, groupMeta]
+  )
+
+  const availableModelsForGroup = useMemo(
+    () => getAvailableModelsForGroup(draftPriceGroup),
+    [getAvailableModelsForGroup, draftPriceGroup]
+  )
 
   const singleSelectedModelMeta = useMemo(() => {
     if (draftPriceModels.length !== 1) return null
@@ -277,6 +291,8 @@ export function UsersMutateDrawer({
       setDraftPriceModels([])
       setDraftModelPrice('')
       setExpandedRuleIndices({})
+      setEditingRuleIndex(null)
+      setEditingRuleModels([])
     }
   }, [open])
 
@@ -362,6 +378,12 @@ export function UsersMutateDrawer({
       'user_model_price_rules',
       currentRules.filter((_, i) => i !== index)
     )
+    if (editingRuleIndex === index) {
+      setEditingRuleIndex(null)
+      setEditingRuleModels([])
+    } else if (editingRuleIndex !== null && editingRuleIndex > index) {
+      setEditingRuleIndex(editingRuleIndex - 1)
+    }
   }
 
   const handleUpdatePriceRule = (index: number, newPrice: number) => {
@@ -370,6 +392,122 @@ export function UsersMutateDrawer({
       'user_model_price_rules',
       currentRules.map((item, i) => (i === index ? { ...item, price: newPrice } : item))
     )
+  }
+
+  const handleStartEditRuleModels = (index: number) => {
+    const rules = form.getValues('user_model_price_rules') || []
+    const rule = rules[index]
+    if (!rule) return
+
+    const groupAvail = getAvailableModelsForGroup(rule.group)
+    const validSet = new Set(groupAvail.map((m) => m.model))
+
+    // 自动取消掉没有、不存在的模型
+    const validSelected = rule.models.filter((m) => validSet.has(m))
+    const removedModels = rule.models.filter((m) => !validSet.has(m))
+
+    if (removedModels.length > 0) {
+      toast.info(
+        t('已自动取消 {{count}} 个不存在的模型: {{models}}', {
+          count: removedModels.length,
+          models: removedModels.join(', '),
+        })
+      )
+    }
+
+    setEditingRuleIndex(index)
+    setEditingRuleModels(validSelected)
+  }
+
+  const handleCancelEditRuleModels = () => {
+    setEditingRuleIndex(null)
+    setEditingRuleModels([])
+  }
+
+  const handleSaveEditRuleModels = (index: number) => {
+    if (editingRuleModels.length === 0) {
+      toast.error(t('请至少选择一个模型，或直接删除该规则'))
+      return
+    }
+
+    const currentRules = form.getValues('user_model_price_rules') || []
+    const targetRule = currentRules[index]
+    if (!targetRule) return
+
+    const hasDuplicate = currentRules.some(
+      (rule, i) =>
+        i !== index &&
+        rule.group === targetRule.group &&
+        rule.models.some((m) => editingRuleModels.includes(m))
+    )
+    if (hasDuplicate) {
+      toast.error(t('同一分组下的模型不能在多个规则中重复配置'))
+      return
+    }
+
+    form.setValue(
+      'user_model_price_rules',
+      currentRules.map((r, i) =>
+        i === index ? { ...r, models: [...editingRuleModels] } : r
+      )
+    )
+
+    setEditingRuleIndex(null)
+    setEditingRuleModels([])
+    toast.success(t('已更新模型列表'))
+  }
+
+  const handleRemoveModelFromRule = (ruleIndex: number, modelToRemove: string) => {
+    const currentRules = form.getValues('user_model_price_rules') || []
+    const targetRule = currentRules[ruleIndex]
+    if (!targetRule) return
+
+    const newModels = targetRule.models.filter((m) => m !== modelToRemove)
+    if (newModels.length === 0) {
+      handleDeletePriceRule(ruleIndex)
+      toast.info(t('规则中无剩余模型，已自动删除该规则'))
+    } else {
+      form.setValue(
+        'user_model_price_rules',
+        currentRules.map((r, i) =>
+          i === ruleIndex ? { ...r, models: newModels } : r
+        )
+      )
+    }
+  }
+
+  const handleAutoCleanInvalidModels = (index: number) => {
+    const currentRules = form.getValues('user_model_price_rules') || []
+    const targetRule = currentRules[index]
+    if (!targetRule) return
+
+    const groupAvail = getAvailableModelsForGroup(targetRule.group)
+    const validSet = new Set(groupAvail.map((m) => m.model))
+    const validModels = targetRule.models.filter((m) => validSet.has(m))
+    const removedModels = targetRule.models.filter((m) => !validSet.has(m))
+
+    if (removedModels.length === 0) {
+      toast.info(t('所有模型均有效，无需清理'))
+      return
+    }
+
+    if (validModels.length === 0) {
+      handleDeletePriceRule(index)
+      toast.info(t('所有模型均不存在，已自动删除该规则'))
+    } else {
+      form.setValue(
+        'user_model_price_rules',
+        currentRules.map((r, i) =>
+          i === index ? { ...r, models: validModels } : r
+        )
+      )
+      toast.success(
+        t('已自动取消 {{count}} 个不存在的模型: {{models}}', {
+          count: removedModels.length,
+          models: removedModels.join(', '),
+        })
+      )
+    }
   }
 
   const onSubmit = async (data: UserFormValues) => {
@@ -404,6 +542,22 @@ export function UsersMutateDrawer({
           }
         }
       }
+
+      // 自动取消掉各规则中已不存在的模型
+      if (Object.keys(groupMeta).length > 0) {
+        finalPriceRules = finalPriceRules
+          .map((rule) => {
+            const avail = getAvailableModelsForGroup(rule.group)
+            if (avail.length === 0) return rule
+            const vSet = new Set(avail.map((m) => m.model))
+            return {
+              ...rule,
+              models: rule.models.filter((m) => vSet.has(m)),
+            }
+          })
+          .filter((rule) => rule.models.length > 0)
+      }
+
       finalData.user_model_price_rules = finalPriceRules
 
       // 确保用户配置的所有非公开分组（包括倍率和按次专属定价中的分组）都包含在 group 列表中
@@ -1453,118 +1607,336 @@ export function UsersMutateDrawer({
                         </div>
 
                         {/* Configured Rules list */}
-                        {(form.watch('user_model_price_rules') || []).length > 0 && (
-                          <div className='space-y-2 border-t border-border/60 pt-3'>
-                            <div className='flex items-center justify-between text-[11px] font-medium text-muted-foreground'>
-                              <span>
-                                {t('Configured Rules')} ({(form.watch('user_model_price_rules') || []).length})
-                              </span>
-                            </div>
-                            <div className='space-y-2 max-h-60 overflow-y-auto pr-1'>
-                              {(form.watch('user_model_price_rules') || []).map((rule, idx) => {
-                                const isExpanded = !!expandedRuleIndices[idx]
-                                const visibleModels = isExpanded ? rule.models : rule.models.slice(0, 3)
-                                const hiddenCount = rule.models.length - visibleModels.length
-                                const fam = inferGroupFamily(
-                                  rule.group,
-                                  groupMeta[rule.group]?.desc,
-                                  groupMeta[rule.group]?.models
-                                )
+                        {/* Configured Rules list */}
+                        {(() => {
+                          const configuredRules = form.watch('user_model_price_rules') || []
+                          if (configuredRules.length === 0) return null
 
-                                return (
-                                  <div
-                                    key={`${rule.group}-${idx}`}
-                                    className='rounded-lg bg-background p-2.5 text-xs border border-border/70 shadow-2xs space-y-2 transition-colors hover:border-border'
+                          const totalInvalidCount = configuredRules.reduce((acc, rule) => {
+                            const groupAvail = getAvailableModelsForGroup(rule.group)
+                            const validSet = new Set(groupAvail.map((m) => m.model))
+                            return acc + rule.models.filter((m) => !validSet.has(m)).length
+                          }, 0)
+
+                          return (
+                            <div className='space-y-2 border-t border-border/60 pt-3'>
+                              <div className='flex items-center justify-between text-[11px] font-medium text-muted-foreground'>
+                                <div className='flex items-center gap-1.5'>
+                                  <span>
+                                    {t('Configured Rules')} ({configuredRules.length})
+                                  </span>
+                                  {totalInvalidCount > 0 && (
+                                    <Badge
+                                      variant='outline'
+                                      className='h-4 px-1 text-[9px] text-amber-600 dark:text-amber-400 border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40'
+                                    >
+                                      {totalInvalidCount} {t('个失效模型')}
+                                    </Badge>
+                                  )}
+                                </div>
+
+                                {totalInvalidCount > 0 && (
+                                  <Button
+                                    type='button'
+                                    variant='ghost'
+                                    size='sm'
+                                    className='h-6 px-1.5 text-[10px] text-amber-600 dark:text-amber-400 hover:text-amber-700 dark:hover:text-amber-300 hover:bg-amber-100/50 dark:hover:bg-amber-900/30 gap-1'
+                                    onClick={() => {
+                                      const currentRules = form.getValues('user_model_price_rules') || []
+                                      const cleaned = currentRules
+                                        .map((r) => {
+                                          const groupAvail = getAvailableModelsForGroup(r.group)
+                                          const validSet = new Set(groupAvail.map((m) => m.model))
+                                          return {
+                                            ...r,
+                                            models: r.models.filter((m) => validSet.has(m)),
+                                          }
+                                        })
+                                        .filter((r) => r.models.length > 0)
+                                      form.setValue('user_model_price_rules', cleaned)
+                                      toast.success(t('已一键清理所有规则中不存在的模型'))
+                                    }}
                                   >
-                                    <div className='flex items-center justify-between gap-2'>
-                                      <div className='flex items-center gap-1.5 min-w-0'>
-                                        <Badge
-                                          variant='outline'
-                                          className={cn(
-                                            'h-4 px-1 text-[9px] shrink-0 font-normal',
-                                            fam.badgeClassName
-                                          )}
-                                        >
-                                          {fam.name.split(' / ')[0]}
-                                        </Badge>
-                                        <span className='font-medium text-xs text-foreground truncate'>
-                                          {rule.group}
-                                        </span>
-                                        <Badge variant='secondary' className='h-4 px-1 text-[10px] font-mono font-normal'>
-                                          {rule.models.length} {t('个模型')}
-                                        </Badge>
-                                      </div>
+                                    <Eraser className='size-3' />
+                                    <span>{t('一键清理失效模型')}</span>
+                                  </Button>
+                                )}
+                              </div>
 
-                                      <div className='flex items-center gap-2 shrink-0'>
-                                        <div className='relative w-28'>
-                                          <span className='absolute left-2 top-1/2 -translate-y-1/2 text-xs text-muted-foreground'>
-                                            $
-                                          </span>
-                                          <Input
-                                            type='number'
-                                            min='0'
-                                            step='0.001'
-                                            className='h-7 pl-5 pr-7 text-xs font-mono'
-                                            value={rule.price}
-                                            onChange={(e) => {
-                                              const val = Number(e.target.value)
-                                              if (Number.isFinite(val) && val >= 0) {
-                                                handleUpdatePriceRule(idx, val)
-                                              }
-                                            }}
-                                          />
-                                          <span className='absolute right-1.5 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground font-mono'>
-                                            /{t('call')}
-                                          </span>
+                              <div className='space-y-2 max-h-60 overflow-y-auto pr-1'>
+                                {configuredRules.map((rule, idx) => {
+                                  const isExpanded = !!expandedRuleIndices[idx]
+                                  const isEditingThis = editingRuleIndex === idx
+                                  const groupAvail = getAvailableModelsForGroup(rule.group)
+                                  const validSet = new Set(groupAvail.map((m) => m.model))
+                                  const invalidModels = rule.models.filter((m) => !validSet.has(m))
+                                  const hasInvalid = invalidModels.length > 0
+
+                                  const visibleModels = isExpanded ? rule.models : rule.models.slice(0, 3)
+                                  const hiddenCount = rule.models.length - visibleModels.length
+                                  const fam = inferGroupFamily(
+                                    rule.group,
+                                    groupMeta[rule.group]?.desc,
+                                    groupMeta[rule.group]?.models
+                                  )
+
+                                  if (isEditingThis) {
+                                    return (
+                                      <div
+                                        key={`${rule.group}-${idx}`}
+                                        className='rounded-lg bg-background p-2.5 text-xs border border-primary/50 ring-1 ring-primary/20 shadow-xs space-y-2.5'
+                                      >
+                                        <div className='flex items-center justify-between gap-2'>
+                                          <div className='flex items-center gap-1.5 min-w-0'>
+                                            <Badge
+                                              variant='outline'
+                                              className={cn(
+                                                'h-4 px-1 text-[9px] shrink-0 font-normal',
+                                                fam.badgeClassName
+                                              )}
+                                            >
+                                              {fam.name.split(' / ')[0]}
+                                            </Badge>
+                                            <span className='font-medium text-xs text-foreground truncate'>
+                                              {rule.group}
+                                            </span>
+                                            <Badge
+                                              variant='outline'
+                                              className='h-4 px-1 text-[10px] font-mono font-normal text-primary border-primary/30 bg-primary/5'
+                                            >
+                                              {t('编辑模型')}
+                                            </Badge>
+                                          </div>
+
+                                          <div className='flex items-center gap-1 shrink-0'>
+                                            <Button
+                                              type='button'
+                                              variant='ghost'
+                                              size='sm'
+                                              className='h-6 px-2 text-[11px] text-muted-foreground hover:text-foreground'
+                                              onClick={handleCancelEditRuleModels}
+                                            >
+                                              {t('Cancel')}
+                                            </Button>
+                                            <Button
+                                              type='button'
+                                              size='sm'
+                                              className='h-6 px-2 text-[11px] gap-1'
+                                              disabled={editingRuleModels.length === 0}
+                                              onClick={() => handleSaveEditRuleModels(idx)}
+                                            >
+                                              <Check className='size-3' />
+                                              {t('Save')}
+                                            </Button>
+                                          </div>
                                         </div>
-                                        <Button
-                                          type='button'
-                                          variant='ghost'
-                                          size='icon'
-                                          className='size-7 text-muted-foreground hover:text-destructive'
-                                          onClick={() => handleDeletePriceRule(idx)}
-                                        >
-                                          <Trash2 className='h-3.5 w-3.5' />
-                                        </Button>
+
+                                        <div className='space-y-1.5'>
+                                          <div className='flex items-center justify-between text-[11px] text-muted-foreground'>
+                                            <span>
+                                              {t('已选')} {editingRuleModels.length} {t('个可用模型')}
+                                            </span>
+                                            <span className='text-[10px] text-muted-foreground/80'>
+                                              {t('已自动剔除不存在的模型')}
+                                            </span>
+                                          </div>
+                                          <MultiSelect
+                                            options={groupAvail.map((item) => ({
+                                              value: item.model,
+                                              label: item.model,
+                                              description: (
+                                                <Badge
+                                                  variant='outline'
+                                                  className={cn(
+                                                    'h-4 px-1 text-[10px] font-mono border-border/60',
+                                                    item.has_global_price
+                                                      ? 'text-muted-foreground bg-muted/40'
+                                                      : 'text-amber-600 bg-amber-50 dark:text-amber-400 dark:bg-amber-950/40 border-amber-200 dark:border-amber-900/50'
+                                                  )}
+                                                >
+                                                  {item.has_global_price
+                                                    ? `$${item.price}/${t('call')}`
+                                                    : t('按量转按次')}
+                                                </Badge>
+                                              ),
+                                            }))}
+                                            selected={editingRuleModels}
+                                            onChange={setEditingRuleModels}
+                                            placeholder={
+                                              groupAvail.length === 0
+                                                ? t('No models available in this group')
+                                                : t('Select one or more models')
+                                            }
+                                            className='min-h-8 text-xs bg-background w-full'
+                                            maxVisibleChips={4}
+                                            copyChipOnClick={true}
+                                          />
+                                        </div>
+                                      </div>
+                                    )
+                                  }
+
+                                  return (
+                                    <div
+                                      key={`${rule.group}-${idx}`}
+                                      className={cn(
+                                        'rounded-lg bg-background p-2.5 text-xs border shadow-2xs space-y-2 transition-colors',
+                                        hasInvalid
+                                          ? 'border-amber-400/60 dark:border-amber-700/60 bg-amber-50/20 dark:bg-amber-950/10'
+                                          : 'border-border/70 hover:border-border'
+                                      )}
+                                    >
+                                      <div className='flex items-center justify-between gap-2'>
+                                        <div className='flex items-center gap-1.5 min-w-0 flex-wrap'>
+                                          <Badge
+                                            variant='outline'
+                                            className={cn(
+                                              'h-4 px-1 text-[9px] shrink-0 font-normal',
+                                              fam.badgeClassName
+                                            )}
+                                          >
+                                            {fam.name.split(' / ')[0]}
+                                          </Badge>
+                                          <span className='font-medium text-xs text-foreground truncate'>
+                                            {rule.group}
+                                          </span>
+                                          <Badge
+                                            variant='secondary'
+                                            className='h-4 px-1 text-[10px] font-mono font-normal'
+                                          >
+                                            {rule.models.length} {t('个模型')}
+                                          </Badge>
+                                          {hasInvalid && (
+                                            <Badge
+                                              variant='outline'
+                                              className='h-4 px-1 text-[9px] font-normal text-amber-600 dark:text-amber-400 border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 flex items-center gap-0.5'
+                                            >
+                                              <AlertCircle className='size-2.5 shrink-0' />
+                                              <span>{invalidModels.length} {t('个不存在')}</span>
+                                            </Badge>
+                                          )}
+                                        </div>
+
+                                        <div className='flex items-center gap-1.5 shrink-0'>
+                                          <div className='relative w-24'>
+                                            <span className='absolute left-2 top-1/2 -translate-y-1/2 text-xs text-muted-foreground'>
+                                              $
+                                            </span>
+                                            <Input
+                                              type='number'
+                                              min='0'
+                                              step='0.001'
+                                              className='h-7 pl-5 pr-6 text-xs font-mono'
+                                              value={rule.price}
+                                              onChange={(e) => {
+                                                const val = Number(e.target.value)
+                                                if (Number.isFinite(val) && val >= 0) {
+                                                  handleUpdatePriceRule(idx, val)
+                                                }
+                                              }}
+                                            />
+                                            <span className='absolute right-1.5 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground font-mono'>
+                                              /{t('call')}
+                                            </span>
+                                          </div>
+                                          <Button
+                                            type='button'
+                                            variant='ghost'
+                                            size='icon'
+                                            className='size-7 text-muted-foreground hover:text-primary'
+                                            title={t('编辑模型')}
+                                            onClick={() => handleStartEditRuleModels(idx)}
+                                          >
+                                            <Pencil className='h-3.5 w-3.5' />
+                                          </Button>
+                                          <Button
+                                            type='button'
+                                            variant='ghost'
+                                            size='icon'
+                                            className='size-7 text-muted-foreground hover:text-destructive'
+                                            title={t('删除规则')}
+                                            onClick={() => handleDeletePriceRule(idx)}
+                                          >
+                                            <Trash2 className='h-3.5 w-3.5' />
+                                          </Button>
+                                        </div>
+                                      </div>
+
+                                      {/* Models Chips */}
+                                      <div className='flex flex-wrap items-center gap-1 pt-0.5'>
+                                        {visibleModels.map((m) => {
+                                          const isInvalid = !validSet.has(m)
+                                          return (
+                                            <Badge
+                                              key={m}
+                                              variant='outline'
+                                              className={cn(
+                                                'text-[10px] font-mono font-normal flex items-center gap-1 group/chip py-0.5',
+                                                isInvalid
+                                                  ? 'bg-amber-100/50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-400 border-amber-300 dark:border-amber-800'
+                                                  : 'bg-muted/30 text-foreground/80'
+                                              )}
+                                            >
+                                              <span className={cn(isInvalid && 'line-through opacity-80')}>
+                                                {m}
+                                              </span>
+                                              {isInvalid && (
+                                                <span className='text-[8px] font-sans px-0.5 rounded bg-amber-200/60 dark:bg-amber-900/60 text-amber-800 dark:text-amber-300'>
+                                                  {t('不存在')}
+                                                </span>
+                                              )}
+                                              <button
+                                                type='button'
+                                                onClick={(e) => {
+                                                  e.stopPropagation()
+                                                  handleRemoveModelFromRule(idx, m)
+                                                }}
+                                                className='hover:bg-muted-foreground/20 rounded p-0.5 transition-colors cursor-pointer text-muted-foreground hover:text-foreground'
+                                                title={t('移除此模型')}
+                                              >
+                                                <X className='size-2.5' />
+                                              </button>
+                                            </Badge>
+                                          )
+                                        })}
+                                        {hiddenCount > 0 && (
+                                          <button
+                                            type='button'
+                                            onClick={() => toggleRuleExpand(idx)}
+                                            className='text-[10px] font-mono text-muted-foreground hover:text-foreground px-1.5 py-0.5 rounded bg-muted hover:bg-muted/80 transition-colors'
+                                          >
+                                            +{hiddenCount}
+                                          </button>
+                                        )}
+                                        {isExpanded && rule.models.length > 3 && (
+                                          <button
+                                            type='button'
+                                            onClick={() => toggleRuleExpand(idx)}
+                                            className='text-[10px] font-mono text-muted-foreground hover:text-foreground px-1.5 py-0.5 rounded bg-muted hover:bg-muted/80 transition-colors'
+                                          >
+                                            {t('Collapse')}
+                                          </button>
+                                        )}
+                                        {hasInvalid && (
+                                          <Button
+                                            type='button'
+                                            variant='ghost'
+                                            size='sm'
+                                            onClick={() => handleAutoCleanInvalidModels(idx)}
+                                            className='h-5 px-1.5 text-[10px] text-amber-600 dark:text-amber-400 hover:text-amber-700 dark:hover:text-amber-300 hover:bg-amber-100/50 dark:hover:bg-amber-900/40 gap-1'
+                                          >
+                                            <Eraser className='size-2.5' />
+                                            <span>{t('清除不存在模型')}</span>
+                                          </Button>
+                                        )}
                                       </div>
                                     </div>
-
-                                    {/* Models Chips */}
-                                    <div className='flex flex-wrap items-center gap-1 pt-0.5'>
-                                      {visibleModels.map((m) => (
-                                        <Badge
-                                          key={m}
-                                          variant='outline'
-                                          className='text-[10px] font-mono font-normal bg-muted/30 text-foreground/80'
-                                        >
-                                          {m}
-                                        </Badge>
-                                      ))}
-                                      {hiddenCount > 0 && (
-                                        <button
-                                          type='button'
-                                          onClick={() => toggleRuleExpand(idx)}
-                                          className='text-[10px] font-mono text-muted-foreground hover:text-foreground px-1.5 py-0.5 rounded bg-muted hover:bg-muted/80 transition-colors'
-                                        >
-                                          +{hiddenCount}
-                                        </button>
-                                      )}
-                                      {isExpanded && rule.models.length > 3 && (
-                                        <button
-                                          type='button'
-                                          onClick={() => toggleRuleExpand(idx)}
-                                          className='text-[10px] font-mono text-muted-foreground hover:text-foreground px-1.5 py-0.5 rounded bg-muted hover:bg-muted/80 transition-colors'
-                                        >
-                                          {t('Collapse')}
-                                        </button>
-                                      )}
-                                    </div>
-                                  </div>
-                                )
-                              })}
+                                  )
+                                })}
+                              </div>
                             </div>
-                          </div>
-                        )}
+                          )
+                        })()}
                       </div>
                     </div>
                   )}
