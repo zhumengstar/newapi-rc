@@ -78,6 +78,10 @@ interface MultiSelectProps {
    * instead of being inert. The remove (×) button keeps its own behaviour.
    */
   copyChipOnClick?: boolean
+  /** Callback fired whenever the search input text changes. */
+  onSearchChange?: (search: string) => void
+  /** Custom filter function for items. Set null to disable filtering. */
+  filter?: ((item: string, query: string) => boolean) | null
 }
 
 const COMMA_REGEX = /[,，\n]/
@@ -196,6 +200,7 @@ export function MultiSelect(props: MultiSelectProps) {
   )
 
   const handleInputValueChange = (value: string) => {
+    props.onSearchChange?.(value)
     if (!props.allowCreate) {
       setInputValue(value)
       return
@@ -286,6 +291,20 @@ export function MultiSelect(props: MultiSelectProps) {
       open={open}
       onOpenChange={setOpen}
       disabled={props.disabled}
+      filter={
+        props.filter === null
+          ? undefined
+          : (props.filter ??
+            ((item: string, query: string) => {
+              const term = query.trim().toLowerCase()
+              if (!term) return true
+              const label = labelMap.get(item) ?? item
+              return (
+                label.toLowerCase().includes(term) ||
+                item.toLowerCase().includes(term)
+              )
+            }))
+      }
     >
       <ComboboxChips
         ref={chipsAnchorRef}

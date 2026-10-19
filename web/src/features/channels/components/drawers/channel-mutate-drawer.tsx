@@ -135,6 +135,8 @@ import {
   refreshCodexCredential,
 } from '../../api'
 import { searchUsers } from '@/features/users/api'
+import type { User } from '@/features/users/types'
+import { useDebounce } from '@/hooks/use-debounce'
 import {
   ADD_MODE_OPTIONS,
   CLAUDE_FIELD_PASSTHROUGH_TYPES,
@@ -500,12 +502,59 @@ export function ChannelMutateDrawer({
     enabled: open && !showProviderPicker,
   })
 
-  // Fetch users for restricted channel binding
-  const { data: usersData, isLoading: isLoadingUsers } = useQuery({
+  const [userSearchKeyword, setUserSearchKeyword] = useState('')
+  const debouncedUserSearch = useDebounce(userSearchKeyword, 300)
+
+  // Fetch initial users list (up to 100)
+  const { data: initialUsersData, isLoading: isLoadingUsers } = useQuery({
     queryKey: ['users_for_channel_select'],
-    queryFn: async () => requireServerSuccess(await searchUsers({ p: 1, page_size: 500 })),
+    queryFn: async () =>
+      requireServerSuccess(await searchUsers({ p: 1, page_size: 100 })),
     enabled: open && !showProviderPicker,
   })
+
+  // Fetch users dynamically when user types a search keyword
+  const { data: searchedUsersData } = useQuery({
+    queryKey: ['users_for_channel_search', debouncedUserSearch],
+    queryFn: async () => {
+      const kw = debouncedUserSearch.trim()
+      if (!kw) return null
+      return requireServerSuccess(
+        await searchUsers({ keyword: kw, p: 1, page_size: 100 })
+      )
+    },
+    enabled:
+      open && !showProviderPicker && debouncedUserSearch.trim().length > 0,
+  })
+
+  // User pool to accumulate known users across initial load and searches
+  const [userPool, setUserPool] = useState<Map<number, User>>(new Map())
+
+  useEffect(() => {
+    const items = initialUsersData?.data?.items || []
+    if (items.length > 0) {
+      setUserPool((prev) => {
+        const next = new Map(prev)
+        for (const u of items) {
+          next.set(u.id, u)
+        }
+        return next
+      })
+    }
+  }, [initialUsersData])
+
+  useEffect(() => {
+    const items = searchedUsersData?.data?.items || []
+    if (items.length > 0) {
+      setUserPool((prev) => {
+        const next = new Map(prev)
+        for (const u of items) {
+          next.set(u.id, u)
+        }
+        return next
+      })
+    }
+  }, [searchedUsersData])
 
   const { copyToClipboard } = useCopyToClipboard()
 
@@ -527,8 +576,9 @@ export function ChannelMutateDrawer({
 
   const eligibleUserOptions = useMemo(() => {
     const channelGroups = new Set(formValues.group || [])
-    const items = usersData?.items || []
-    const opts = items
+    const allUsers = Array.from(userPool.values())
+
+    const opts = allUsers
       .filter((user) => {
         if (!user.group) return false
         const userGroups = user.group.split(',').map((g) => g.trim())
@@ -543,14 +593,17 @@ export function ChannelMutateDrawer({
     for (const uid of formValues.allowed_user_ids || []) {
       const uidStr = String(uid)
       if (!existingIds.has(uidStr)) {
+        const cached = userPool.get(uid)
         opts.push({
-          label: `User #${uidStr}`,
+          label: cached
+            ? `${cached.username} (#${cached.id})${cached.remark ? ` - ${cached.remark}` : ''}`
+            : `用户 #${uidStr}`,
           value: uidStr,
         })
       }
     }
     return opts
-  }, [usersData, formValues.group, formValues.allowed_user_ids])
+  }, [userPool, formValues.group, formValues.allowed_user_ids])
 
   const multiKeyMode = formValues.multi_key_mode
   const multiKeyType = formValues.multi_key_type
@@ -3416,10 +3469,14 @@ export function ChannelMutateDrawer({
               render={({ field }) => (
                 <FormItem className='space-y-3'>
                   <div className='space-y-1'>
-                    <FormLabel>{t('Exclusive Users') || '专属绑定客户'}</FormLabel>
+                    <FormLabel>
+                      {t('Exclusive Users', '专属绑定客户')}
+                    </FormLabel>
                     <FormDescription>
-                      {t('Exclusive users description') ||
-                        '可选。配置后，选中的客户将只能访问为其配置的渠道；不配置（留空）则所有拥有该分组权限的客户均可访问。只有拥有当前渠道分组的客户才可被选中。'}
+                      {t(
+                        'Exclusive users description',
+                        '可选。配置后，选中的客户将只能访问为其配置的渠道；不配置（留空）则所有拥有该分组权限的客户均可访问。只有拥有当前渠道分组的客户才可被选中。'
+                      )}
                     </FormDescription>
                   </div>
                   <FormControl>
@@ -3430,6 +3487,7 @@ export function ChannelMutateDrawer({
                         options={eligibleUserOptions}
                         selected={(field.value || []).map(String)}
                         allowCreate={false}
+                        onSearchChange={setUserSearchKeyword}
                         onChange={(values) => {
                           field.onChange(
                             values
@@ -3438,7 +3496,14 @@ export function ChannelMutateDrawer({
                           )
                         }}
                         placeholder={
-                          t('Select exclusive users') || '留空表示不限制用户，所有用户均可使用'
+                          !formValues.group || formValues.group.length === 0
+                            ? '请先选择上方渠道分组'
+                            : '搜索用户名、ID 或备注，留空表示所有用户均可使用'
+                        }
+                        emptyText={
+                          !formValues.group || formValues.group.length === 0
+                            ? '请先选择渠道分组'
+                            : '未找到匹配该分组的用户'
                         }
                       />
                     )}
