@@ -97,6 +97,24 @@ func getRandomSatisfiedChannel(group string, param *RetryParam, priorityRetry in
 				excludedChannels = mergedExcluded
 			}
 		}
+
+		userId := param.Ctx.GetInt("id")
+		if userId > 0 && model.IsUserRestrictedInGroup(group, userId) {
+			allowedSet := model.GetUserAllowedChannelsInGroup(group, userId)
+			candidates := model.GetGroupChannelIds(group)
+			mergedExcluded := make(map[int]bool, len(excludedChannels)+len(candidates))
+			for id, v := range excludedChannels {
+				if v {
+					mergedExcluded[id] = true
+				}
+			}
+			for _, cid := range candidates {
+				if !allowedSet[cid] {
+					mergedExcluded[cid] = true
+				}
+			}
+			excludedChannels = mergedExcluded
+		}
 	}
 	return model.GetRandomSatisfiedChannelExcluding(group, param.ModelName, priorityRetry, filters, excludedChannels)
 }

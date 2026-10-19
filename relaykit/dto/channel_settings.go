@@ -93,6 +93,8 @@ type ChannelOtherSettings struct {
 	ToolLossPolicy string `json:"tool_loss_policy,omitempty"`
 	// StripClaudeResponseCache 抹平返回给下游客户端的 Claude 缓存统计字段（如按量无缓存策略）
 	StripClaudeResponseCache bool `json:"strip_claude_response_cache,omitempty"`
+	// AllowedUserIds 指定可访问本渠道的客户用户ID列表；空表示全员共享，非空时只有配置的用户受限路由，未被配置的普通用户不限制
+	AllowedUserIds []int `json:"allowed_user_ids,omitempty"`
 }
 
 func (s *ChannelOtherSettings) IsOpenRouterEnterprise() bool {

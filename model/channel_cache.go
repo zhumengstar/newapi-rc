@@ -19,6 +19,12 @@ import (
 
 var group2model2channels map[string]map[string][]int // enabled channel
 var channelsIDM map[int]*Channel                     // all channels include disabled
+// group2userRestricted tracks whether a user has designated/restricted channels in group.
+// group -> userId -> bool
+var group2userRestricted map[string]map[int]bool
+// group2userAllowedChannels tracks which channels a restricted user is allowed to access in group.
+// group -> userId -> map[channelId]bool
+var group2userAllowedChannels map[string]map[int]map[int]bool
 // channel2advancedCustomConfig caches parsed Advanced Custom (type 58) configs so
 // path-aware selection avoids re-parsing JSON per request. Refreshed on full sync.
 var channel2advancedCustomConfig map[int]*kitdto.AdvancedCustomConfig
@@ -49,15 +55,39 @@ func InitChannelCache() {
 		groups[ability.Group] = true
 	}
 	newGroup2model2channels := make(map[string]map[string][]int)
+	newGroup2userRestricted := make(map[string]map[int]bool)
+	newGroup2userAllowedChannels := make(map[string]map[int]map[int]bool)
 	for group := range groups {
 		newGroup2model2channels[group] = make(map[string][]int)
+		newGroup2userRestricted[group] = make(map[int]bool)
+		newGroup2userAllowedChannels[group] = make(map[int]map[int]bool)
 	}
 	for _, channel := range channels {
 		if channel.Status != common.ChannelStatusEnabled {
 			continue // skip disabled channels
 		}
+		allowedUsers := channel.GetOtherSettings().AllowedUserIds
 		groups := strings.SplitSeq(channel.Group, ",")
 		for group := range groups {
+			group = strings.TrimSpace(group)
+			if group == "" {
+				continue
+			}
+			if len(allowedUsers) > 0 {
+				if newGroup2userRestricted[group] == nil {
+					newGroup2userRestricted[group] = make(map[int]bool)
+					newGroup2userAllowedChannels[group] = make(map[int]map[int]bool)
+				}
+				for _, uid := range allowedUsers {
+					if uid > 0 {
+						newGroup2userRestricted[group][uid] = true
+						if newGroup2userAllowedChannels[group][uid] == nil {
+							newGroup2userAllowedChannels[group][uid] = make(map[int]bool)
+						}
+						newGroup2userAllowedChannels[group][uid][channel.Id] = true
+					}
+				}
+			}
 			models := channel.GetModels()
 			for _, model := range models {
 				if _, ok := newGroup2model2channels[group][model]; !ok {
@@ -80,6 +110,8 @@ func InitChannelCache() {
 
 	channelSyncLock.Lock()
 	group2model2channels = newGroup2model2channels
+	group2userRestricted = newGroup2userRestricted
+	group2userAllowedChannels = newGroup2userAllowedChannels
 	//channelsIDM = newChannelId2channel
 	for i, channel := range newChannelId2channel {
 		if channel.ChannelInfo.IsMultiKey {
@@ -113,6 +145,41 @@ func SyncChannelCache(frequency int) {
 		InitChannelCache()
 	}
 }
+
+// IsUserRestrictedInGroup returns true if userId is configured on any channels in group.
+func IsUserRestrictedInGroup(group string, userId int) bool {
+	if userId <= 0 {
+		return false
+	}
+	channelSyncLock.RLock()
+	defer channelSyncLock.RUnlock()
+	if group2userRestricted == nil || group2userRestricted[group] == nil {
+		return false
+	}
+	return group2userRestricted[group][userId]
+}
+
+// GetUserAllowedChannelsInGroup returns a map of channel IDs allowed for userId in group.
+func GetUserAllowedChannelsInGroup(group string, userId int) map[int]bool {
+	if userId <= 0 {
+		return nil
+	}
+	channelSyncLock.RLock()
+	defer channelSyncLock.RUnlock()
+	if group2userAllowedChannels == nil || group2userAllowedChannels[group] == nil {
+		return nil
+	}
+	userMap := group2userAllowedChannels[group][userId]
+	if len(userMap) == 0 {
+		return nil
+	}
+	res := make(map[int]bool, len(userMap))
+	for k, v := range userMap {
+		res[k] = v
+	}
+	return res
+}
+
 
 func GetRandomSatisfiedChannel(
 	group string,

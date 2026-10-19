@@ -903,6 +903,41 @@ func validateChannel(channel *model.Channel, isAdd bool) error {
 	if err := channel.ValidateSettings(); err != nil {
 		return fmt.Errorf("渠道额外设置[channel setting] 格式错误：%s", err.Error())
 	}
+
+	// 校验指定受限客户白名单：选中的客户必须具有本渠道的指定分组
+	otherSettings := channel.GetOtherSettings()
+	if len(otherSettings.AllowedUserIds) > 0 {
+		channelGroups := strings.Split(channel.Group, ",")
+		channelGroupMap := make(map[string]bool)
+		for _, g := range channelGroups {
+			g = strings.TrimSpace(g)
+			if g != "" {
+				channelGroupMap[g] = true
+			}
+		}
+		for _, uid := range otherSettings.AllowedUserIds {
+			if uid <= 0 {
+				continue
+			}
+			user, err := model.GetUserById(uid, false)
+			if err != nil || user == nil {
+				return fmt.Errorf("指定的客户 ID #%d 不存在", uid)
+			}
+			userGroups := strings.Split(user.Group, ",")
+			hasGroup := false
+			for _, ug := range userGroups {
+				ug = strings.TrimSpace(ug)
+				if channelGroupMap[ug] {
+					hasGroup = true
+					break
+				}
+			}
+			if !hasGroup {
+				return fmt.Errorf("指定的客户 %s (#%d) 没有本渠道的任一分组权限 (渠道分组: %s, 客户分组: %s)", user.Username, uid, channel.Group, user.Group)
+			}
+		}
+	}
+
 	if channel.Type == constant.ChannelTypeTaskPlugin {
 		pluginKey := strings.TrimSpace(channel.GetSetting().TaskPluginKey)
 		if pluginKey == "" {

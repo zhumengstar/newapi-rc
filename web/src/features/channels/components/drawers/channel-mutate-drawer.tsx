@@ -134,6 +134,7 @@ import {
   getTaskPluginOptions,
   refreshCodexCredential,
 } from '../../api'
+import { searchUsers } from '@/features/users/api'
 import {
   ADD_MODE_OPTIONS,
   CLAUDE_FIELD_PASSTHROUGH_TYPES,
@@ -499,6 +500,13 @@ export function ChannelMutateDrawer({
     enabled: open && !showProviderPicker,
   })
 
+  // Fetch users for restricted channel binding
+  const { data: usersData, isLoading: isLoadingUsers } = useQuery({
+    queryKey: ['users_for_channel_select'],
+    queryFn: async () => requireServerSuccess(await searchUsers({ p: 1, page_size: 500 })),
+    enabled: open && !showProviderPicker,
+  })
+
   const { copyToClipboard } = useCopyToClipboard()
 
   const { channelKey, isChannelKeyLoading, handleRevealKey, verification } =
@@ -516,6 +524,34 @@ export function ChannelMutateDrawer({
 
   // Watch values once for conditional fields and configuration indicators.
   const formValues = form.watch()
+
+  const eligibleUserOptions = useMemo(() => {
+    const channelGroups = new Set(formValues.group || [])
+    const items = usersData?.items || []
+    const opts = items
+      .filter((user) => {
+        if (!user.group) return false
+        const userGroups = user.group.split(',').map((g) => g.trim())
+        return userGroups.some((g) => channelGroups.has(g))
+      })
+      .map((user) => ({
+        label: `${user.username} (#${user.id})${user.remark ? ` - ${user.remark}` : ''}`,
+        value: String(user.id),
+      }))
+
+    const existingIds = new Set(opts.map((o) => o.value))
+    for (const uid of formValues.allowed_user_ids || []) {
+      const uidStr = String(uid)
+      if (!existingIds.has(uidStr)) {
+        opts.push({
+          label: `User #${uidStr}`,
+          value: uidStr,
+        })
+      }
+    }
+    return opts
+  }, [usersData, formValues.group, formValues.allowed_user_ids])
+
   const multiKeyMode = formValues.multi_key_mode
   const multiKeyType = formValues.multi_key_type
   const keyMode = formValues.key_mode
@@ -3364,6 +3400,46 @@ export function ChannelMutateDrawer({
                           }
                         }}
                         placeholder={t(FIELD_PLACEHOLDERS.GROUP)}
+                      />
+                    )}
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          </div>
+
+          <div className='border-border/60 rounded-lg border p-4'>
+            <FormField
+              control={form.control}
+              name='allowed_user_ids'
+              render={({ field }) => (
+                <FormItem className='space-y-3'>
+                  <div className='space-y-1'>
+                    <FormLabel>{t('Exclusive Users') || '专属绑定客户'}</FormLabel>
+                    <FormDescription>
+                      {t('Exclusive users description') ||
+                        '可选。配置后，选中的客户将只能访问为其配置的渠道；不配置（留空）则所有拥有该分组权限的客户均可访问。只有拥有当前渠道分组的客户才可被选中。'}
+                    </FormDescription>
+                  </div>
+                  <FormControl>
+                    {isLoadingUsers ? (
+                      <Skeleton className='h-10 w-full' />
+                    ) : (
+                      <MultiSelect
+                        options={eligibleUserOptions}
+                        selected={(field.value || []).map(String)}
+                        allowCreate={false}
+                        onChange={(values) => {
+                          field.onChange(
+                            values
+                              .map((v) => parseInt(v, 10))
+                              .filter((n) => !isNaN(n))
+                          )
+                        }}
+                        placeholder={
+                          t('Select exclusive users') || '留空表示不限制用户，所有用户均可使用'
+                        }
                       />
                     )}
                   </FormControl>

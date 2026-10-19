@@ -208,6 +208,7 @@ export const channelFormSchema = z
     openai_organization: z.string().optional(),
     models: z.string().min(1, ERROR_MESSAGES.REQUIRED_MODELS),
     group: z.array(z.string()).min(1, ERROR_MESSAGES.REQUIRED_GROUP),
+    allowed_user_ids: z.array(z.number()).optional(),
     model_mapping: z
       .string()
       .optional()
@@ -449,6 +450,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   openai_organization: '',
   models: '',
   group: ['default'],
+  allowed_user_ids: [],
   model_mapping: '',
   priority: 0,
   weight: 0,
@@ -569,10 +571,16 @@ export function transformChannelToFormDefaults(
   let upstreamModelUpdateAutoSyncEnabled = false
   let upstreamModelUpdateIgnoredModels = ''
   let advancedCustom = ''
+  let allowedUserIds: number[] = []
 
   if (channel.settings) {
     try {
       const parsed = JSON.parse(channel.settings)
+      if (Array.isArray(parsed.allowed_user_ids)) {
+        allowedUserIds = parsed.allowed_user_ids
+          .map(Number)
+          .filter((n: number) => Number.isFinite(n) && n > 0)
+      }
       vertexKeyType = parsed.vertex_key_type || 'json'
       azureResponsesVersion = parsed.azure_responses_version || ''
       isEnterpriseAccount = parsed.openrouter_enterprise === true
@@ -658,6 +666,7 @@ export function transformChannelToFormDefaults(
     upstream_model_update_auto_sync_enabled: upstreamModelUpdateAutoSyncEnabled,
     upstream_model_update_ignored_models: upstreamModelUpdateIgnoredModels,
     advanced_custom: advancedCustom,
+    allowed_user_ids: allowedUserIds,
   }
 }
 
@@ -826,6 +835,12 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
     }
   } else if ('advanced_custom' in settingsObj) {
     delete settingsObj.advanced_custom
+  }
+
+  if (Array.isArray(formData.allowed_user_ids) && formData.allowed_user_ids.length > 0) {
+    settingsObj.allowed_user_ids = formData.allowed_user_ids
+  } else {
+    delete settingsObj.allowed_user_ids
   }
 
   return JSON.stringify(settingsObj)
