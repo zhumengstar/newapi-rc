@@ -67,9 +67,9 @@ func TestApplyChannelGroupPriorityOrderUpdatesChannelAndAbilityPriorities(t *tes
 	assert.Equal(t, int64(9), storedChannels[0].GetPriority())
 	assert.Equal(t, int64(9), storedChannels[1].GetPriority())
 	assert.Equal(t, int64(19), storedChannels[2].GetPriority())
-	assert.Equal(t, uint(100), *storedChannels[0].Weight)
-	assert.Equal(t, uint(200), *storedChannels[1].Weight)
-	assert.Equal(t, uint(100), *storedChannels[2].Weight)
+	assert.Equal(t, uint(1), *storedChannels[0].Weight)
+	assert.Equal(t, uint(2), *storedChannels[1].Weight)
+	assert.Equal(t, uint(1), *storedChannels[2].Weight)
 
 	var abilities []Ability
 	require.NoError(t, DB.Order("channel_id ASC, "+commonGroupCol+" ASC").Find(&abilities).Error)
@@ -78,20 +78,58 @@ func TestApplyChannelGroupPriorityOrderUpdatesChannelAndAbilityPriorities(t *tes
 		require.NotNil(t, ability.Priority)
 		if ability.Group == "alpha" {
 			assert.Equal(t, int64(9), *ability.Priority)
-			if ability.ChannelId == channels[0].Id {
-				assert.Equal(t, uint(100), ability.Weight)
-			} else {
-				assert.Equal(t, uint(200), ability.Weight)
-			}
 		} else {
 			assert.Equal(t, int64(19), *ability.Priority)
-			if ability.ChannelId == channels[1].Id {
-				assert.Equal(t, uint(200), ability.Weight)
-			} else {
-				assert.Equal(t, uint(100), ability.Weight)
-			}
 		}
 	}
+}
+
+func TestChannelWeightEditDoesNotAffectOtherChannels(t *testing.T) {
+	setupChannelStatusTest(t)
+
+	w1, w2, w3 := uint(99), uint(53), uint(42)
+	ch1 := Channel{Name: "ch-1", Key: "k1", Group: "gemini-group", Weight: &w1, Status: common.ChannelStatusEnabled, Models: "gpt-4o"}
+	ch2 := Channel{Name: "ch-2", Key: "k2", Group: "gemini-group", Weight: &w2, Status: common.ChannelStatusEnabled, Models: "gpt-4o"}
+	ch3 := Channel{Name: "ch-3", Key: "k3", Group: "gemini-group", Weight: &w3, Status: common.ChannelStatusEnabled, Models: "gpt-4o"}
+
+	require.NoError(t, DB.Create(&ch1).Error)
+	require.NoError(t, ch1.AddAbilities(nil))
+	require.NoError(t, DB.Create(&ch2).Error)
+	require.NoError(t, ch2.AddAbilities(nil))
+	require.NoError(t, DB.Create(&ch3).Error)
+	require.NoError(t, ch3.AddAbilities(nil))
+
+	// Now simulate editing ch1 weight to 150
+	newW1 := uint(150)
+	ch1Edit := ch1
+	ch1Edit.Weight = &newW1
+	require.NoError(t, ch1Edit.Update())
+
+	// Verify ch1 is updated to 150
+	var dbCh1 Channel
+	require.NoError(t, DB.First(&dbCh1, ch1.Id).Error)
+	assert.Equal(t, uint(150), *dbCh1.Weight)
+
+	// Verify ch2 and ch3 weights remain COMPLETELY UNCHANGED
+	var dbCh2 Channel
+	require.NoError(t, DB.First(&dbCh2, ch2.Id).Error)
+	assert.Equal(t, uint(53), *dbCh2.Weight, "ch2 weight must NOT be auto-adjusted when ch1 is edited")
+
+	var dbCh3Channel Channel
+	require.NoError(t, DB.First(&dbCh3Channel, ch3.Id).Error)
+	assert.Equal(t, uint(42), *dbCh3Channel.Weight, "ch3 weight must NOT be auto-adjusted when ch1 is edited")
+
+	// Verify abilities for ch2 and ch3 also remain unchanged
+	var ab2, ab3 Ability
+	require.NoError(t, DB.Where("channel_id = ?", ch2.Id).First(&ab2).Error)
+	assert.Equal(t, uint(53), ab2.Weight)
+
+	require.NoError(t, DB.Where("channel_id = ?", ch3.Id).First(&ab3).Error)
+	assert.Equal(t, uint(42), ab3.Weight)
+
+	var ab1 Ability
+	require.NoError(t, DB.Where("channel_id = ?", ch1.Id).First(&ab1).Error)
+	assert.Equal(t, uint(150), ab1.Weight)
 }
 
 func TestChannelGroupOrderSortUsesPriorityThenWeight(t *testing.T) {

@@ -700,178 +700,19 @@ func ApplyChannelGroupPriorityOrderWithStep(ctx context.Context, groups []string
 			}
 			updated += result.RowsAffected
 		}
-		// Keep every group's actual routing weights within a fixed 300-point
-		// budget. Multi-group channels receive a separate ability weight for each
-		// group; a channel-level weight alone cannot represent that relationship.
-		if err := rebalanceChannelGroupWeights(tx, ordered, channels, 0); err != nil {
-			return err
-		}
 		return nil
 	})
 	return updated, err
 }
 
-const channelGroupWeightBudget uint = 300
-
-func rebalanceChannelGroupWeights(tx *gorm.DB, groups []string, channels []Channel, fixedChannelID int) error {
-	visibleWeightAssigned := make(map[int]bool)
-	for _, group := range groups {
-		members := make([]Channel, 0)
-		for _, channel := range channels {
-			for _, member := range channel.GetGroups() {
-				if member == group {
-					members = append(members, channel)
-					break
-				}
-			}
-		}
-		if len(members) == 0 {
-			continue
-		}
-		weights := make([]uint, len(members))
-		var total uint64
-		for index := range members {
-			if members[index].Weight != nil {
-				weights[index] = *members[index].Weight
-			}
-			total += uint64(weights[index])
-		}
-		fixedIndex := -1
-		if fixedChannelID > 0 {
-			for index := range members {
-				if members[index].Id == fixedChannelID {
-					fixedIndex = index
-					break
-				}
-			}
-		}
-		remaining := channelGroupWeightBudget
-		if fixedIndex >= 0 {
-			fixed := weights[fixedIndex]
-			if len(weights) == 1 {
-				fixed = channelGroupWeightBudget
-			}
-			if fixed > channelGroupWeightBudget {
-				fixed = channelGroupWeightBudget
-			}
-			weights[fixedIndex] = fixed
-			remaining -= fixed
-			var otherTotal uint64
-			for index, weight := range weights {
-				if index != fixedIndex {
-					otherTotal += uint64(weight)
-				}
-			}
-			if otherTotal == 0 {
-				others := uint(len(weights) - 1)
-				if others > 0 {
-					for index := range weights {
-						if index != fixedIndex {
-							weights[index] = remaining / others
-							remaining -= weights[index]
-						}
-					}
-				}
-			} else {
-				for index, weight := range weights {
-					if index != fixedIndex {
-						weights[index] = uint((uint64(weight) * uint64(remaining)) / otherTotal)
-						remaining -= weights[index]
-					}
-				}
-			}
-		} else if total == 0 {
-			for index := range weights {
-				weights[index] = channelGroupWeightBudget / uint(len(weights))
-				remaining -= weights[index]
-			}
-		} else {
-			for index := range weights {
-				weights[index] = uint((uint64(weights[index]) * uint64(channelGroupWeightBudget)) / total)
-				remaining -= weights[index]
-			}
-		}
-		for index := uint(0); remaining > 0; index++ {
-			target := index % uint(len(weights))
-			if int(target) == fixedIndex {
-				continue
-			}
-			weights[target]++
-			remaining--
-		}
-		for index, channel := range members {
-			// The table has one channel-level weight, so expose the first group in
-			// the supplied order. Every group still receives its own ability weight
-			// below, which is what routing actually consumes.
-			if !visibleWeightAssigned[channel.Id] {
-				if err := tx.Model(&Channel{}).Where("id = ?", channel.Id).Update("weight", weights[index]).Error; err != nil {
-					return err
-				}
-				visibleWeightAssigned[channel.Id] = true
-			}
-			// Routing uses abilities, so update every model ability in this group
-			// together with the visible channel weight. This keeps manual edits and
-			// the actual selection path consistent.
-			if err := tx.Model(&Ability{}).
-				Where("channel_id = ? AND "+commonGroupCol+" = ?", channel.Id, group).
-				Update("weight", weights[index]).Error; err != nil {
-				return err
-			}
-		}
-	}
+// RebalanceChannelWeightsForChannel is a no-op now.
+// Channel weights are independently controlled by administrators and must not be auto-adjusted.
+func RebalanceChannelWeightsForChannel(channelID int) error {
 	return nil
 }
 
-// RebalanceChannelWeightsForChannel keeps the 300-point invariant after a
-// direct channel or tag weight edit. When channelID is set, that channel's
-// edited weight is preserved and the other channels are scaled proportionally.
-// Group order is taken from persisted ability priorities.
-func RebalanceChannelWeightsForChannel(channelID int) error {
-	if commonGroupCol == "" {
-		initCol()
-	}
-	return DB.Transaction(func(tx *gorm.DB) error {
-		var channels []Channel
-		if err := lockForUpdate(tx.Model(&Channel{})).Select("id", commonGroupCol, "weight").Find(&channels).Error; err != nil {
-			return err
-		}
-		groupSet := make(map[string]struct{})
-		for _, channel := range channels {
-			for _, group := range channel.GetGroups() {
-				groupSet[group] = struct{}{}
-			}
-		}
-		groups := make([]string, 0, len(groupSet))
-		for group := range groupSet {
-			groups = append(groups, group)
-		}
-		var abilities []Ability
-		if err := lockForUpdate(tx.Model(&Ability{})).Select(commonGroupCol, "priority").Find(&abilities).Error; err != nil {
-			return err
-		}
-		groupPriority := make(map[string]int64)
-		for _, ability := range abilities {
-			priority := int64(0)
-			if ability.Priority != nil {
-				priority = *ability.Priority
-			}
-			if current, ok := groupPriority[ability.Group]; !ok || priority < current {
-				groupPriority[ability.Group] = priority
-			}
-		}
-		sort.SliceStable(groups, func(i, j int) bool {
-			pi, iok := groupPriority[groups[i]]
-			pj, jok := groupPriority[groups[j]]
-			if iok != jok {
-				return iok
-			}
-			if iok && pi != pj {
-				return pi < pj
-			}
-			return groups[i] < groups[j]
-		})
-		return rebalanceChannelGroupWeights(tx, groups, channels, channelID)
-	})
+func rebalanceChannelGroupWeights(tx *gorm.DB, groups []string, channels []Channel, fixedChannelID int) error {
+	return nil
 }
 
 func (channel *Channel) GetOtherInfo() map[string]any {

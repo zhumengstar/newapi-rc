@@ -1265,10 +1265,6 @@ func AddChannel(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	if err := model.RebalanceChannelWeightsForChannel(0); err != nil {
-		common.ApiError(c, err)
-		return
-	}
 	model.InitChannelCache()
 	createAudit := map[string]any{
 		"name":   addChannelRequest.Channel.Name,
@@ -1485,12 +1481,6 @@ func EditTagChannels(c *gin.Context) {
 				common.ApiError(c, priorityErr)
 				return
 			}
-		}
-	}
-	if channelTag.Weight != nil {
-		if err := model.RebalanceChannelWeightsForChannel(0); err != nil {
-			common.ApiError(c, err)
-			return
 		}
 	}
 	model.InitChannelCache()
@@ -1767,11 +1757,6 @@ func UpdateChannel(c *gin.Context) {
 		return
 	}
 	originProxy := originChannel.GetSetting().Proxy
-	if channel.Weight != nil && *channel.Weight > 300 {
-		// A single channel can never consume more than the group's 300-point
-		// budget. Clamp first, then rebalance the complete group below.
-		*channel.Weight = 300
-	}
 	// Detect group change (切组)
 	targetGroup := originChannel.Group
 	if g, ok := requestData["group"].(string); ok && strings.TrimSpace(g) != "" {
@@ -1903,12 +1888,6 @@ func UpdateChannel(c *gin.Context) {
 	if err != nil {
 		common.ApiError(c, err)
 		return
-	}
-	if channel.Weight != nil && !isChannelRatioOnlyUpdate(requestData) {
-		if err := model.RebalanceChannelWeightsForChannel(channel.Id); err != nil {
-			common.ApiError(c, err)
-			return
-		}
 	}
 	if err := updateAdaptiveRoutingConfig(&channel, requestData); err != nil {
 		common.ApiError(c, err)
