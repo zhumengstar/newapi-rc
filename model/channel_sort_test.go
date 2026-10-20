@@ -86,3 +86,57 @@ func TestGetAllChannelsSortsByChannelRatio(t *testing.T) {
 	}
 	assert.Equal(t, []string{"ratio-high", "ratio-low", "ratio-unset"}, names)
 }
+
+func TestGetAllChannelsSortsByPriorityAndWeight(t *testing.T) {
+	truncateTables(t)
+	require.NoError(t, DB.Exec("DELETE FROM channels").Error)
+
+	p10 := int64(10)
+	p20 := int64(20)
+	w50 := uint(50)
+	w80 := uint(80)
+	w30 := uint(30)
+
+	channels := []Channel{
+		{Name: "p20-w50", Key: "k1", Priority: &p20, Weight: &w50},
+		{Name: "p20-w80", Key: "k2", Priority: &p20, Weight: &w80},
+		{Name: "p10-w30", Key: "k3", Priority: &p10, Weight: &w30},
+	}
+	require.NoError(t, DB.Create(&channels).Error)
+
+	// Test priority desc (should tie-break by weight desc)
+	got, err := GetAllChannels(0, 10, false, false, NewChannelSortOptions("priority", "desc", false))
+	require.NoError(t, err)
+	names := make([]string, len(got))
+	for i, ch := range got {
+		names[i] = ch.Name
+	}
+	assert.Equal(t, []string{"p20-w80", "p20-w50", "p10-w30"}, names)
+
+	// Test priority asc (should tie-break by weight asc)
+	got, err = GetAllChannels(0, 10, false, false, NewChannelSortOptions("priority", "asc", false))
+	require.NoError(t, err)
+	names = make([]string, len(got))
+	for i, ch := range got {
+		names[i] = ch.Name
+	}
+	assert.Equal(t, []string{"p10-w30", "p20-w50", "p20-w80"}, names)
+
+	// Test weight desc (should tie-break by priority desc)
+	got, err = GetAllChannels(0, 10, false, false, NewChannelSortOptions("weight", "desc", false))
+	require.NoError(t, err)
+	names = make([]string, len(got))
+	for i, ch := range got {
+		names[i] = ch.Name
+	}
+	assert.Equal(t, []string{"p20-w80", "p20-w50", "p10-w30"}, names)
+
+	// Test weight asc
+	got, err = GetAllChannels(0, 10, false, false, NewChannelSortOptions("weight", "asc", false))
+	require.NoError(t, err)
+	names = make([]string, len(got))
+	for i, ch := range got {
+		names[i] = ch.Name
+	}
+	assert.Equal(t, []string{"p10-w30", "p20-w50", "p20-w80"}, names)
+}

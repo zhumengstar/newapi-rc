@@ -318,6 +318,7 @@ export type ChannelSortBy =
   | 'site_type'
   | 'type'
   | 'priority'
+  | 'weight'
   | 'balance'
   | 'channel_ratio'
   | 'used_quota'

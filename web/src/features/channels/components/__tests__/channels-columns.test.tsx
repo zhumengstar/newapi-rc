@@ -75,6 +75,24 @@ function useChannelsTableForTest() {
   })
 }
 
+test('allows sorting the priority column with sortDescFirst', () => {
+  const { result } = renderHook(useChannelsTableForTest)
+  const column = result.current.getColumn('priority')
+
+  expect(column).toBeDefined()
+  expect(column?.getCanSort()).toBe(true)
+  expect(column?.columnDef.sortDescFirst).toBe(true)
+})
+
+test('allows sorting the weight column with sortDescFirst', () => {
+  const { result } = renderHook(useChannelsTableForTest)
+  const column = result.current.getColumn('weight')
+
+  expect(column).toBeDefined()
+  expect(column?.getCanSort()).toBe(true)
+  expect(column?.columnDef.sortDescFirst).toBe(true)
+})
+
 test('allows sorting the used quota column', () => {
   const { result } = renderHook(useChannelsTableForTest)
   const column = result.current.getColumn('used_quota')

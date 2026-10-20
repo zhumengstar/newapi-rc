@@ -1730,6 +1730,7 @@ export function useChannelsColumns(
         meta: { mobileHidden: true },
         cell: ({ row }) => <PriorityCell channel={row.original} />,
         size: 100,
+        sortDescFirst: true,
       },
 
       // Weight column
@@ -1739,7 +1740,7 @@ export function useChannelsColumns(
         meta: { mobileHidden: true },
         cell: ({ row }) => <WeightCell channel={row.original} />,
         size: 90,
-        enableSorting: false,
+        sortDescFirst: true,
       },
 
       // Adaptive routing column

@@ -119,6 +119,7 @@ var channelSortColumns = map[string]string{
 	"site_type":     "site_type",
 	"type":          "type",
 	"priority":      "priority",
+	"weight":        "weight",
 	"balance":       "balance",
 	"channel_ratio": "channel_ratio",
 	"used_quota":    "used_quota",
@@ -165,10 +166,22 @@ func (options ChannelSortOptions) Apply(query *gorm.DB) *gorm.DB {
 			// PostgreSQL otherwise puts NULLs first for descending order.
 			query = query.Order(gorm.Expr("CASE WHEN channel_ratio IS NULL THEN 1 ELSE 0 END ASC"))
 		}
+		isDesc := options.SortOrder != "asc"
 		query = query.Order(clause.OrderByColumn{
 			Column: clause.Column{Name: columnName},
-			Desc:   options.SortOrder != "asc",
+			Desc:   isDesc,
 		})
+		if columnName == "priority" {
+			query = query.Order(clause.OrderByColumn{
+				Column: clause.Column{Name: "weight"},
+				Desc:   isDesc,
+			})
+		} else if columnName == "weight" {
+			query = query.Order(clause.OrderByColumn{
+				Column: clause.Column{Name: "priority"},
+				Desc:   isDesc,
+			})
+		}
 		// Keep pagination deterministic when multiple channels have the same
 		// value for the selected column.
 		if columnName != "id" {

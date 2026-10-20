@@ -20,6 +20,7 @@ import { type Column } from '@tanstack/react-table'
 import {
   ArrowDown as ArrowDownIcon,
   ArrowUp as ArrowUpIcon,
+  ChevronDown as ChevronDownIcon,
   ChevronsUpDown as CaretSortIcon,
   EyeOff as EyeNoneIcon,
 } from 'lucide-react'
@@ -51,36 +52,90 @@ export function DataTableColumnHeader<TData, TValue>({
     return <div className={cn(className)}>{title}</div>
   }
 
+  const sortDescFirst = Boolean(column.columnDef.sortDescFirst)
+  const isSorted = column.getIsSorted()
+
+  const handleToggleSort = (e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    if (!isSorted) {
+      column.toggleSorting(sortDescFirst)
+    } else if (sortDescFirst) {
+      if (isSorted === 'desc') {
+        column.toggleSorting(false)
+      } else {
+        column.clearSorting()
+      }
+    } else {
+      if (isSorted === 'asc') {
+        column.toggleSorting(true)
+      } else {
+        column.clearSorting()
+      }
+    }
+  }
+
   return (
-    <div className={cn('flex items-center space-x-2', className)}>
+    <div className={cn('flex items-center space-x-0.5', className)}>
+      <Button
+        variant='ghost'
+        size='sm'
+        className='-ms-3 h-8 px-2 font-medium hover:bg-accent'
+        onClick={handleToggleSort}
+        title={t('Click to sort')}
+      >
+        <span>{title}</span>
+        {isSorted === 'desc' ? (
+          <ArrowDownIcon className='ms-1.5 h-4 w-4 text-primary' />
+        ) : isSorted === 'asc' ? (
+          <ArrowUpIcon className='ms-1.5 h-4 w-4 text-primary' />
+        ) : (
+          <CaretSortIcon className='ms-1.5 h-4 w-4 text-muted-foreground/70' />
+        )}
+      </Button>
       <DropdownMenu>
         <DropdownMenuTrigger
           render={
             <Button
               variant='ghost'
               size='sm'
-              className='data-popup-open:bg-accent -ms-3 h-8'
+              className='data-popup-open:bg-accent h-8 w-4 p-0 opacity-40 hover:opacity-100 hover:bg-accent'
+              aria-label={t('Sort options')}
             />
           }
         >
-          <span>{title}</span>
-          {column.getIsSorted() === 'desc' ? (
-            <ArrowDownIcon className='ms-2 h-4 w-4' />
-          ) : column.getIsSorted() === 'asc' ? (
-            <ArrowUpIcon className='ms-2 h-4 w-4' />
-          ) : (
-            <CaretSortIcon className='ms-2 h-4 w-4' />
-          )}
+          <ChevronDownIcon className='h-3 w-3 text-muted-foreground' />
         </DropdownMenuTrigger>
         <DropdownMenuContent align='start'>
-          <DropdownMenuItem onClick={() => column.toggleSorting(false)}>
-            <ArrowUpIcon className='text-muted-foreground/70 size-3.5' />
-            {t('Asc')}
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => column.toggleSorting(true)}>
-            <ArrowDownIcon className='text-muted-foreground/70 size-3.5' />
-            {t('Desc')}
-          </DropdownMenuItem>
+          {sortDescFirst ? (
+            <>
+              <DropdownMenuItem onClick={() => column.toggleSorting(true)}>
+                <ArrowDownIcon className='text-muted-foreground/70 size-3.5' />
+                {t('Desc')}
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => column.toggleSorting(false)}>
+                <ArrowUpIcon className='text-muted-foreground/70 size-3.5' />
+                {t('Asc')}
+              </DropdownMenuItem>
+            </>
+          ) : (
+            <>
+              <DropdownMenuItem onClick={() => column.toggleSorting(false)}>
+                <ArrowUpIcon className='text-muted-foreground/70 size-3.5' />
+                {t('Asc')}
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => column.toggleSorting(true)}>
+                <ArrowDownIcon className='text-muted-foreground/70 size-3.5' />
+                {t('Desc')}
+              </DropdownMenuItem>
+            </>
+          )}
+          {Boolean(isSorted) && (
+            <DropdownMenuItem onClick={() => column.clearSorting()}>
+              <CaretSortIcon className='text-muted-foreground/70 size-3.5' />
+              {t('Reset')}
+            </DropdownMenuItem>
+          )}
           {column.getCanHide() && (
             <>
               <DropdownMenuSeparator />
