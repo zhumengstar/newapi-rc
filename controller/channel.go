@@ -2271,6 +2271,9 @@ func CopyChannel(c *gin.Context) {
 		suffix := c.DefaultQuery("suffix", "_复制")
 		clone.Name = origin.Name + suffix
 	}
+	if contactVal, hasContact := c.GetQuery("contact"); hasContact {
+		clone.Contact = strings.TrimSpace(contactVal)
+	}
 	clone.TestTime = 0
 	clone.ResponseTime = 0
 	if resetBalance {

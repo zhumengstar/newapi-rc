@@ -2849,7 +2849,7 @@ export function ChannelMutateDrawer({
   const basicSection = (
     <div className='scroll-mt-4'>
       <ChannelBasicSection>
-        <div className='grid gap-4'>
+        <div className='grid gap-4 sm:grid-cols-2'>
           <FormField
             control={form.control}
             name='name'
@@ -2858,6 +2858,29 @@ export function ChannelMutateDrawer({
                 <FormLabel required>{t('Name')}</FormLabel>
                 <FormControl>
                   <Input placeholder={t(FIELD_PLACEHOLDERS.NAME)} {...field} />
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          <FormField
+            control={form.control}
+            name='contact'
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>
+                  {t('Channel Source / Contact', '来源联系方式')}
+                </FormLabel>
+                <FormControl>
+                  <Input
+                    placeholder={t(
+                      'e.g. TG / WeChat / User ID / Email',
+                      '例如：TG/微信/用户ID/邮箱等来源联系方式'
+                    )}
+                    {...field}
+                    value={field.value ?? ''}
+                  />
                 </FormControl>
                 <FormMessage />
               </FormItem>

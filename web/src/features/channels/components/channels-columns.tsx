@@ -1220,6 +1220,14 @@ export function useChannelsColumns(
                     channel={channel}
                     sensitiveVisible={sensitiveVisible}
                   />
+                  {channel.contact && (
+                    <span
+                      className='inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-mono font-medium bg-muted/80 text-muted-foreground border border-border/60 shrink-0 max-w-[140px] truncate'
+                      title={`来源联系方式: ${channel.contact}`}
+                    >
+                      {channel.contact}
+                    </span>
+                  )}
                   {isPassThrough && (
                     <TooltipProvider delay={100}>
                       <Tooltip>

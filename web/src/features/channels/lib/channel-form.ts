@@ -200,6 +200,7 @@ function addRequiredIssue(
 export const channelFormSchema = z
   .object({
     name: z.string().min(1, ERROR_MESSAGES.REQUIRED_NAME),
+    contact: z.string().max(255).optional(),
     type: z.number().min(0, ERROR_MESSAGES.REQUIRED_TYPE),
     site_type: z.enum(['', 'newapi', 'sub2api', 'unknown']).optional(),
     base_url: z.string().optional(),
@@ -442,6 +443,7 @@ export type ChannelFormValues = z.infer<typeof channelFormSchema>
 
 export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   name: '',
+  contact: '',
   type: 1,
   site_type: '',
   base_url: '',
@@ -613,6 +615,7 @@ export function transformChannelToFormDefaults(
 
   return {
     name: channel.name || '',
+    contact: channel.contact || '',
     type: channel.type,
     site_type: channel.site_type || '',
     base_url: channel.base_url || '',
@@ -865,6 +868,7 @@ export function transformFormDataToCreatePayload(formData: ChannelFormValues): {
 
   const channel: Partial<Channel> = {
     name: formData.name,
+    contact: formData.contact ? formData.contact.trim() : null,
     type: formData.type,
     site_type: formData.site_type || null,
     base_url: normalizeBaseUrl(formData.base_url) || null,
@@ -924,6 +928,7 @@ export function transformFormDataToUpdatePayload(
   const payload: Partial<Channel> = {
     id: channelId,
     name: formData.name,
+    contact: formData.contact !== undefined ? formData.contact.trim() : '',
     type: formData.type,
     site_type: formData.site_type || null,
     base_url: normalizeBaseUrl(formData.base_url) || null,

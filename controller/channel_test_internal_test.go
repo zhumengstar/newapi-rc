@@ -302,6 +302,23 @@ func TestCopyChannelNameOverride(t *testing.T) {
 		require.NoError(t, db.Where("name = ?", "original-channel_v2").First(&copied).Error)
 		assert.Equal(t, "original-channel_v2", copied.Name)
 	}
+
+	// 3. Copy with custom contact override
+	{
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		ctx.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", origin.Id)}}
+		ctx.Request = httptest.NewRequest(http.MethodPost, "/api/channel/copy?name=channel-with-contact&contact=tg:@alice_dev", nil)
+
+		CopyChannel(ctx)
+		require.Equal(t, http.StatusOK, recorder.Code)
+		assert.Contains(t, recorder.Body.String(), `"success":true`)
+
+		var copied model.Channel
+		require.NoError(t, db.Where("name = ?", "channel-with-contact").First(&copied).Error)
+		assert.Equal(t, "channel-with-contact", copied.Name)
+		assert.Equal(t, "tg:@alice_dev", copied.Contact)
+	}
 }
 
 func TestDeleteChannelResetsProxyCacheWhenPreReadFails(t *testing.T) {

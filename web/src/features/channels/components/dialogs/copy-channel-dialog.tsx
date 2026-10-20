@@ -53,6 +53,7 @@ export function CopyChannelDialog({
   const { currentRow } = useChannels()
   const queryClient = useQueryClient()
   const [name, setName] = useState('')
+  const [contact, setContact] = useState('')
   const [targetGroup, setTargetGroup] = useState('')
   const [resetBalance, setResetBalance] = useState(true)
   const [isCopying, setIsCopying] = useState(false)
@@ -72,6 +73,7 @@ export function CopyChannelDialog({
   useEffect(() => {
     if (open && currentRow) {
       setName(currentRow.name || '')
+      setContact(currentRow.contact || '')
       setTargetGroup(currentRow.group || '')
     }
   }, [open, currentRow])
@@ -108,6 +110,7 @@ export function CopyChannelDialog({
       currentRow.id,
       {
         name: trimmedName,
+        contact: contact.trim(),
         reset_balance: resetBalance,
         group: targetGroup || undefined,
       },
@@ -159,6 +162,22 @@ export function CopyChannelDialog({
             onChange={(e) => setName(e.target.value)}
             disabled={isCopying}
             autoFocus
+          />
+        </div>
+
+        <div className='space-y-2'>
+          <Label htmlFor='channel-contact'>
+            {t('Channel Source / Contact', '来源联系方式')}
+          </Label>
+          <Input
+            id='channel-contact'
+            placeholder={t(
+              'e.g. TG / WeChat / User ID / Email',
+              '例如：TG/微信/用户ID/邮箱等来源联系方式'
+            )}
+            value={contact}
+            onChange={(e) => setContact(e.target.value)}
+            disabled={isCopying}
           />
         </div>
 

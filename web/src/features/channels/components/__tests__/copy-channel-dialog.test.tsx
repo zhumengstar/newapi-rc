@@ -45,6 +45,7 @@ function TestWrapper({ channelName = 'https://api.valxv.cn' }: { channelName?: s
           setCurrentRow({
             id: 42,
             name: channelName,
+            contact: 'tg:@test_origin',
             type: 1,
             key: 'sk-test',
             status: 1,
@@ -101,9 +102,15 @@ describe('CopyChannelDialog', () => {
     expect(input.value).toBe('https://api.valxv.cn')
     expect(input.value).not.toContain('_copy')
 
-    // Directly override the channel name
+    // Contact input should pre-fill from original channel
+    const contactInput = (await screen.findByLabelText(/来源联系方式|Channel Source \/ Contact/i)) as HTMLInputElement
+    expect(contactInput.value).toBe('tg:@test_origin')
+
+    // Directly override the channel name and contact
     fireEvent.change(input, { target: { value: 'https://new-endpoint.cn' } })
     expect(input.value).toBe('https://new-endpoint.cn')
+    fireEvent.change(contactInput, { target: { value: 'wechat:new_contact' } })
+    expect(contactInput.value).toBe('wechat:new_contact')
 
     // Submit copy
     const submitButton = screen.getByRole('button', { name: /复制渠道|Copy Channel/i })
@@ -115,6 +122,7 @@ describe('CopyChannelDialog', () => {
         42,
         expect.objectContaining({
           name: 'https://new-endpoint.cn',
+          contact: 'wechat:new_contact',
           reset_balance: true,
           group: 'default',
         })
