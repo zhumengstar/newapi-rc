@@ -502,12 +502,6 @@ func GeminiChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.R
 	}
 	markGeminiGoogleSearchCall(c, &geminiResponse)
 	countGeminiBillableFunctionCalls(info, &geminiResponse)
-	if IsImageGenerationModel(info) {
-		if len(geminiResponse.Candidates) == 0 || !HasGeminiInlineImages(&geminiResponse) {
-			common.SetContextKey(c, constant.ContextKeyAdminRejectReason, "gemini_image_empty_candidates_or_blocked")
-			return nil, NewImageModerationRejectError()
-		}
-	}
 	if len(geminiResponse.Candidates) == 0 {
 		if geminiResponse.PromptFeedback != nil && geminiResponse.PromptFeedback.BlockReason != nil {
 			blockReason := *geminiResponse.PromptFeedback.BlockReason
@@ -683,8 +677,7 @@ func GeminiImageHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.
 	}
 
 	if len(openAIResponse.Data) == 0 {
-		common.SetContextKey(c, constant.ContextKeyAdminRejectReason, "gemini_image_predictions_filtered")
-		return nil, NewImageModerationRejectError()
+		return nil, types.NewOpenAIError(fmt.Errorf("no images generated: %s", string(responseBody)), types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
 
 	jsonResponse, jsonErr := common.Marshal(openAIResponse)

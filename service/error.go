@@ -102,25 +102,6 @@ func RelayErrorHandler(ctx context.Context, resp *http.Response, showBodyWhenFai
 	responseBodyText := string(responseBody)
 	responseBodyPreview := common.LocalLogPreview(responseBodyText)
 
-	// 统一归一化内容安全与审核拦截（451 或上游审核/空 candidate 拒绝）
-	isAuditReject := resp.StatusCode == 451 ||
-		strings.Contains(responseBodyText, "已被上游内容审核拒绝") ||
-		strings.Contains(responseBodyText, "empty candidate parts") ||
-		strings.Contains(responseBodyText, "content_refused") ||
-		strings.Contains(responseBodyText, "content_policy_violation") ||
-		strings.Contains(responseBodyText, "blocked by upstream safety policy") ||
-		strings.Contains(responseBodyText, "PROHIBITED_CONTENT")
-
-	if isAuditReject {
-		newApiErr = types.NewOpenAIError(
-			errors.New("提示词或参考图此前已被上游内容审核拒绝,请修改内容后重试。"),
-			"content_refused",
-			451,
-			types.ErrOptionWithSkipRetry(),
-		)
-		return
-	}
-
 	buildErrWithBody := func(message string) error {
 		if message == "" {
 			return fmt.Errorf("bad response status code %d, body: %s", resp.StatusCode, responseBodyText)

@@ -1,63 +1,9 @@
 package gemini
 
 import (
-	"errors"
 	"fmt"
 	"strings"
-
-	relaycommon "github.com/QuantumNous/new-api/relay/common"
-	relayconstant "github.com/QuantumNous/new-api/relay/constant"
-	"github.com/QuantumNous/new-api/relaykit/dto"
-	"github.com/QuantumNous/new-api/relaykit/types"
 )
-
-const (
-	ImageModerationRejectMessage = "提示词或参考图此前已被上游内容审核拒绝,请修改内容后重试。"
-	ImageModerationErrorCode     = "content_refused"
-)
-
-func IsImageGenerationModel(info *relaycommon.RelayInfo) bool {
-	if info == nil {
-		return false
-	}
-	if info.RelayMode == relayconstant.RelayModeImagesGenerations || info.RelayMode == relayconstant.RelayModeImagesEdits {
-		return true
-	}
-	matchName := func(name string) bool {
-		lower := strings.ToLower(name)
-		return strings.Contains(lower, "image") ||
-			strings.Contains(lower, "imagen") ||
-			strings.Contains(lower, "banana") ||
-			strings.Contains(lower, "drawing") ||
-			strings.Contains(lower, "flux") ||
-			strings.Contains(lower, "sd3") ||
-			strings.Contains(lower, "midjourney")
-	}
-	return matchName(info.OriginModelName) || matchName(info.UpstreamModelName)
-}
-
-func NewImageModerationRejectError() *types.NewAPIError {
-	return types.NewOpenAIError(
-		errors.New(ImageModerationRejectMessage),
-		ImageModerationErrorCode,
-		451,
-		types.ErrOptionWithSkipRetry(),
-	)
-}
-
-func HasGeminiInlineImages(geminiResponse *dto.GeminiChatResponse) bool {
-	if geminiResponse == nil {
-		return false
-	}
-	for _, candidate := range geminiResponse.Candidates {
-		for _, part := range candidate.Content.Parts {
-			if part.InlineData != nil && part.InlineData.Data != "" {
-				return true
-			}
-		}
-	}
-	return false
-}
 
 var ModelList = []string{
 	// stable version
