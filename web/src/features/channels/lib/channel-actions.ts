@@ -242,7 +242,26 @@ export async function handleUpdateChannelField(
           value,
         })
       )
-      queryClient?.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+      if (queryClient) {
+        queryClient.setQueriesData(
+          { queryKey: channelsQueryKeys.lists() },
+          (oldData: any) => {
+            if (!oldData) return oldData
+            if (oldData?.data?.items && Array.isArray(oldData.data.items)) {
+              return {
+                ...oldData,
+                data: {
+                  ...oldData.data,
+                  items: oldData.data.items.map((item: any) =>
+                    item.id === id ? { ...item, [fieldName]: value } : item
+                  ),
+                },
+              }
+            }
+            return oldData
+          }
+        )
+      }
       onSuccess?.()
     } else {
       handleServerError(response, i18next.t(ERROR_MESSAGES.UPDATE_FAILED))

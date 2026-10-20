@@ -135,7 +135,7 @@ import {
   getTaskPluginOptions,
   refreshCodexCredential,
 } from '../../api'
-import { searchUsers } from '@/features/users/api'
+import { getUser, searchUsers } from '@/features/users/api'
 import type { User } from '@/features/users/types'
 import { useDebounce } from '@/hooks/use-debounce'
 import {
@@ -534,67 +534,31 @@ export function ChannelMutateDrawer({
     return []
   }, [formValues?.group])
 
-  // 1. Fetch all users with auto-pagination so no user is ever omitted
-  const { data: allUsersList, isLoading: isLoadingUsers } = useQuery({
-    queryKey: ['all_users_for_channel_select'],
-    queryFn: async () => {
-      try {
-        const all: User[] = []
-        let page = 1
-        while (page <= 10) {
-          const res = requireServerSuccess(
-            await searchUsers({ p: page, page_size: 100 })
+  // 1. Fetch a lightweight first page of candidates (20 users) for the primary channel group
+  const primaryChannelGroup = channelGroupsArray[0] || ''
+  const { data: initialGroupUsersData, isLoading: isLoadingInitialUsers } =
+    useQuery({
+      queryKey: ['initial_group_users_for_channel', primaryChannelGroup],
+      queryFn: async () => {
+        if (!primaryChannelGroup) return null
+        try {
+          return requireServerSuccess(
+            await searchUsers({
+              group: primaryChannelGroup,
+              p: 1,
+              page_size: 20,
+            })
           )
-          const items = res?.data?.items || []
-          all.push(...items)
-          const total = res?.data?.total || 0
-          if (all.length >= total || items.length === 0) {
-            break
-          }
-          page++
+        } catch (err) {
+          console.warn('Failed to fetch initial group users for channel select:', err)
+          return null
         }
-        return all
-      } catch (err) {
-        console.warn('Failed to fetch all users for channel select:', err)
-        return []
-      }
-    },
-    enabled: open && !showProviderPicker,
-  })
+      },
+      enabled: open && !showProviderPicker && Boolean(primaryChannelGroup),
+      staleTime: 5 * 60 * 1000,
+    })
 
-  // 2. Fetch users specifically belonging to currently selected channel groups
-  const currentGroupsKey = channelGroupsArray.join(',')
-  const { data: groupUsersList } = useQuery({
-    queryKey: ['group_users_for_channel_select', currentGroupsKey],
-    queryFn: async () => {
-      if (channelGroupsArray.length === 0) return []
-      try {
-        const results: User[] = []
-        for (const g of channelGroupsArray) {
-          let page = 1
-          while (page <= 5) {
-            const res = requireServerSuccess(
-              await searchUsers({ group: g, p: page, page_size: 100 })
-            )
-            const items = res?.data?.items || []
-            results.push(...items)
-            const total = res?.data?.total || 0
-            if (results.length >= total || items.length === 0) {
-              break
-            }
-            page++
-          }
-        }
-        return results
-      } catch (err) {
-        console.warn('Failed to fetch group users for channel select:', err)
-        return []
-      }
-    },
-    enabled: open && !showProviderPicker && channelGroupsArray.length > 0,
-  })
-
-  // 3. Fetch users dynamically when user types a search keyword
+  // 2. Fetch users dynamically when user types a search keyword (single request, page_size: 20)
   const { data: searchedUsersData } = useQuery({
     queryKey: ['users_for_channel_search', debouncedUserSearch],
     queryFn: async () => {
@@ -602,7 +566,7 @@ export function ChannelMutateDrawer({
       if (!kw) return null
       try {
         return requireServerSuccess(
-          await searchUsers({ keyword: kw, p: 1, page_size: 100 })
+          await searchUsers({ keyword: kw, p: 1, page_size: 20 })
         )
       } catch (err) {
         console.warn('Failed to search users for channel:', err)
@@ -611,33 +575,26 @@ export function ChannelMutateDrawer({
     },
     enabled:
       open && !showProviderPicker && debouncedUserSearch.trim().length > 0,
+    staleTime: 60 * 1000,
   })
 
-  // User pool to accumulate known users across auto-pagination, group fetch, and searches
+  // User pool to accumulate known users across initial candidates, searches, and bound users
   const [userPool, setUserPool] = useState<Map<number, User>>(new Map())
 
+  // Merge initial candidates
   useEffect(() => {
-    if (!allUsersList || allUsersList.length === 0) return
+    const items = initialGroupUsersData?.data?.items || []
+    if (items.length === 0) return
     setUserPool((prev) => {
       const next = new Map(prev)
-      for (const u of allUsersList) {
+      for (const u of items) {
         next.set(u.id, u)
       }
       return next
     })
-  }, [allUsersList])
+  }, [initialGroupUsersData])
 
-  useEffect(() => {
-    if (!groupUsersList || groupUsersList.length === 0) return
-    setUserPool((prev) => {
-      const next = new Map(prev)
-      for (const u of groupUsersList) {
-        next.set(u.id, u)
-      }
-      return next
-    })
-  }, [groupUsersList])
-
+  // Merge searched users
   useEffect(() => {
     const items = searchedUsersData?.data?.items || []
     if (items.length === 0) return
@@ -649,6 +606,50 @@ export function ChannelMutateDrawer({
       return next
     })
   }, [searchedUsersData])
+
+  // 3. Fetch details for already bound allowed_user_ids that are not yet in userPool
+  const allowedUserIds = formValues?.allowed_user_ids || []
+  const boundMissingIds = useMemo(() => {
+    return allowedUserIds.filter((id) => id && !userPool.has(id))
+  }, [allowedUserIds, userPool])
+
+  const boundMissingKey = boundMissingIds.slice().sort().join(',')
+  useQuery({
+    queryKey: ['channel_bound_user_details', boundMissingKey],
+    queryFn: async () => {
+      if (boundMissingIds.length === 0) return []
+      try {
+        const fetched = await Promise.all(
+          boundMissingIds.map(async (id) => {
+            try {
+              const res = await getUser(id)
+              return res?.data || null
+            } catch {
+              return null
+            }
+          })
+        )
+        const validUsers = fetched.filter((u): u is User => Boolean(u))
+        if (validUsers.length > 0) {
+          setUserPool((prev) => {
+            const next = new Map(prev)
+            for (const u of validUsers) {
+              next.set(u.id, u)
+            }
+            return next
+          })
+        }
+        return validUsers
+      } catch (err) {
+        console.warn('Failed to fetch bound user details:', err)
+        return []
+      }
+    },
+    enabled: open && !showProviderPicker && boundMissingIds.length > 0,
+    staleTime: 10 * 60 * 1000,
+  })
+
+  const isLoadingUsers = isLoadingInitialUsers && userPool.size === 0
 
   const [userSortOrder, setUserSortOrder] = useState<'asc' | 'desc'>('asc')
 
