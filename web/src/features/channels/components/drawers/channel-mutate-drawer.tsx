@@ -1064,10 +1064,32 @@ export function ChannelMutateDrawer({
   const basicModels = useMemo(() => {
     if (!allModelsList.length) return []
     // Filter models based on common patterns for specific types
-    if (currentType === 1) {
+    if (currentType === 1 || currentType === 40) {
       return allModelsList.filter(
-        (model) => model.startsWith('gpt-') || model.startsWith('text-')
+        (model) =>
+          model.startsWith('gpt-') ||
+          model.startsWith('text-') ||
+          model.startsWith('o1-') ||
+          model.startsWith('o3-') ||
+          model.startsWith('chatgpt-')
       )
+    }
+    if (currentType === 14) {
+      return allModelsList.filter((model) => model.startsWith('claude-'))
+    }
+    if (currentType === 24 || currentType === 41) {
+      return allModelsList.filter((model) => model.startsWith('gemini-'))
+    }
+    if (currentType === 43) {
+      return allModelsList.filter((model) => model.startsWith('deepseek-'))
+    }
+    if (currentType === 27) {
+      return allModelsList.filter(
+        (model) => model.startsWith('kimi-') || model.startsWith('moonshot-')
+      )
+    }
+    if (currentType === 25) {
+      return allModelsList.filter((model) => model.startsWith('glm-'))
     }
     return allModelsList
   }, [allModelsList, currentType])
