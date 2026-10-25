@@ -20,7 +20,31 @@ import type { Channel } from '@/features/channels/types'
 import { api } from '@/lib/api'
 import { requireServerSuccess } from '@/lib/server-error-message'
 
-import type { ChannelExclusiveUpdateRequest } from './types'
+import type {
+  ChannelExclusiveUpdateRequest,
+  UpstreamSourceDTO,
+  UpdateUpstreamSourceRequest,
+} from './types'
+
+export async function getChannelSources(): Promise<UpstreamSourceDTO[]> {
+  const response = await api.get<{
+    success: boolean
+    message?: string
+    data: UpstreamSourceDTO[]
+  }>('/api/channel/sources')
+  return requireServerSuccess(response.data).data
+}
+
+export async function updateChannelSource(
+  data: UpdateUpstreamSourceRequest
+): Promise<any> {
+  const response = await api.put<{
+    success: boolean
+    message?: string
+    data: any
+  }>('/api/channel/sources', data)
+  return requireServerSuccess(response.data).data
+}
 
 export async function updateChannelExclusive(
   id: number,

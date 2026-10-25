@@ -986,6 +986,8 @@
     "channel(s)? This action cannot be undone.": "渠道？此操作无法撤销。",
     "Channels": "渠道",
     "Exclusive Channels": "专属渠道",
+    "Exclusive & Cost": "专属与来源成本",
+    "Address Sources & Cost": "地址来源与成本管理",
     "Channels {{channels}} · Groups {{groups}}": "渠道 {{channels}} · 分组 {{groups}}",
     "Channels and groups": "渠道与分组",
     "Channels deleted successfully": "渠道删除成功",

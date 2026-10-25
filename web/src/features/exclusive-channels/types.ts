@@ -35,3 +35,27 @@ export type UserChannelBindingInfo = {
   user: User
   exclusiveChannels: EnrichedChannel[]
 }
+
+export interface UpstreamSourceDTO {
+  base_url: string
+  display_base_url: string
+  wechat_name: string
+  channel_count: number
+  enabled_channel_count: number
+  channel_ids: number[]
+  channel_names: string[]
+  groups: string[]
+  channel_ratio: number
+  cost_tier: number
+  models: string[]
+  model_prices: Record<string, number>
+}
+
+export interface UpdateUpstreamSourceRequest {
+  base_url: string
+  wechat_name?: string
+  channel_ratio?: number
+  group?: string
+  cost_tier?: number
+  model_prices?: Record<string, number>
+}

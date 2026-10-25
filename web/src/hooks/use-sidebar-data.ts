@@ -144,7 +144,7 @@ export function useSidebarData(): SidebarData {
             icon: Radio,
           },
           {
-            title: t('Exclusive Channels', '专属渠道'),
+            title: t('Exclusive & Cost', '专属与来源成本'),
             url: '/channels/exclusive',
             icon: ShieldCheck,
           },

@@ -348,6 +348,12 @@ func GetModelPriceMap() map[string]float64 {
 	return modelPriceMap.ReadAll()
 }
 
+func SetModelPrice(name string, price float64) {
+	name = FormatMatchingModelName(name)
+	modelPriceMap.Set(name, price)
+	InvalidateExposedDataCache()
+}
+
 func ModelPrice2JSONString() string {
 	return modelPriceMap.MarshalJSONString()
 }

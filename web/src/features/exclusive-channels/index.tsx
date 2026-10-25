@@ -20,6 +20,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import {
   ExternalLink,
+  Globe,
   Layers,
   Loader2,
   RefreshCw,
@@ -40,6 +41,7 @@ import type { User } from '@/features/users/types'
 import { ExclusiveChannelsTable } from './components/exclusive-channels-table'
 import { ExclusiveSummaryCards } from './components/exclusive-summary-cards'
 import { QuickExclusiveDialog } from './components/quick-exclusive-dialog'
+import { UpstreamSourcesView } from './components/upstream-sources-view'
 import { UserExclusiveView } from './components/user-exclusive-view'
 import type { EnrichedChannel } from './types'
 
@@ -58,7 +60,9 @@ export function ExclusiveChannels() {
   // 弹窗状态
   const [editingChannel, setEditingChannel] = useState<EnrichedChannel | null>(null)
   const [dialogOpen, setDialogOpen] = useState(false)
-  const [activeTab, setActiveTab] = useState<'channels' | 'users'>('channels')
+  const [activeTab, setActiveTab] = useState<'sources' | 'channels' | 'users'>(
+    targetChannelId ? 'channels' : 'sources'
+  )
 
   // 拉取所有渠道列表
   const {
@@ -224,11 +228,15 @@ export function ExclusiveChannels() {
           {/* 视图切换 Tabs */}
           <Tabs
             value={activeTab}
-            onValueChange={(v) => setActiveTab(v as 'channels' | 'users')}
+            onValueChange={(v) => setActiveTab(v as 'sources' | 'channels' | 'users')}
             className='w-full'
           >
             <div className='flex items-center justify-between pb-2 border-b'>
               <TabsList className='h-8'>
+                <TabsTrigger value='sources' className='text-xs px-3 gap-1.5'>
+                  <Globe className='size-3.5 text-blue-500' />
+                  <span>{t('Address Sources & Cost', '地址来源与成本管理')}</span>
+                </TabsTrigger>
                 <TabsTrigger value='channels' className='text-xs px-3 gap-1.5'>
                   <Layers className='size-3.5' />
                   <span>{t('Channel Perspective', '渠道与分组视角')}</span>
@@ -247,6 +255,20 @@ export function ExclusiveChannels() {
               </div>
             ) : (
               <>
+                <TabsContent value='sources' className='mt-3 space-y-4'>
+                  <UpstreamSourcesView
+                    allGroups={allGroups}
+                    onNavigateToChannelsWithFilter={(filterText) => {
+                      navigate({
+                        to: '/channels',
+                        search: {
+                          filter: filterText,
+                        },
+                      })
+                    }}
+                  />
+                </TabsContent>
+
                 <TabsContent value='channels' className='mt-3 space-y-4'>
                   <ExclusiveChannelsTable
                     channels={enrichedChannels}
