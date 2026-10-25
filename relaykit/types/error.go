@@ -206,6 +206,11 @@ func (e *NewAPIError) ToOpenAIError() OpenAIError {
 		}
 	}
 	if e.errorCode != ErrorCodeCountTokenFailed {
+		if e.errorCode != ErrorCodeInsufficientUserQuota && e.errorCode != ErrorCodePreConsumeTokenQuotaFailed {
+			if e.StatusCode == http.StatusPaymentRequired || IsChannelBalanceExhaustedMessage(result.Message) {
+				result.Message = MaskChannelBalanceInString(result.Message)
+			}
+		}
 		result.Message = kitutil.MaskSensitiveInfo(result.Message)
 	}
 	if result.Message == "" {
@@ -235,6 +240,11 @@ func (e *NewAPIError) ToClaudeError() ClaudeError {
 		}
 	}
 	if e.errorCode != ErrorCodeCountTokenFailed {
+		if e.errorCode != ErrorCodeInsufficientUserQuota && e.errorCode != ErrorCodePreConsumeTokenQuotaFailed {
+			if e.StatusCode == http.StatusPaymentRequired || IsChannelBalanceExhaustedMessage(result.Message) {
+				result.Message = MaskChannelBalanceInString(result.Message)
+			}
+		}
 		result.Message = kitutil.MaskSensitiveInfo(result.Message)
 	}
 	if result.Message == "" {
@@ -422,3 +432,101 @@ func IsRecordErrorLog(e *NewAPIError) bool {
 	}
 	return *e.recordErrorLog
 }
+
+const ChannelBalanceExhaustedMaskedMessage = "The service is temporarily unavailable. Please try again shortly."
+
+// IsChannelBalanceExhaustedMessage detects whether an error message from an upstream
+// channel indicates that the channel/account/group quota or balance is exhausted.
+func IsChannelBalanceExhaustedMessage(msg string) bool {
+	if msg == "" {
+		return false
+	}
+	lower := strings.ToLower(msg)
+
+	chineseMarkers := []string{
+		"余额不足",
+		"额度不足",
+		"余额已用完",
+		"额度已用完",
+		"余额已用尽",
+		"额度已用尽",
+		"无可用额度",
+		"可用额度不足",
+		"账户余额不足",
+		"账号余额不足",
+		"分组余额不足",
+		"当前分组余额不足",
+		"渠道余额不足",
+		"渠道额度不足",
+		"余额不够",
+		"额度不够",
+		"已经欠费",
+		"账号已欠费",
+		"账户已欠费",
+	}
+	for _, m := range chineseMarkers {
+		if strings.Contains(lower, m) {
+			if strings.Contains(lower, "用户额度") || strings.Contains(lower, "用户余额") {
+				return false
+			}
+			return true
+		}
+	}
+
+	englishMarkers := []string{
+		"payment required",
+		"insufficient balance",
+		"insufficient account balance",
+		"insufficient funds",
+		"insufficient credit",
+		"insufficient credits",
+		"insufficient quota",
+		"insufficient_quota",
+		"insufficient_balance",
+		"credit balance is too low",
+		"credit balance",
+		"no credits",
+		"out of credits",
+		"run out of credits",
+		"billing hard limit",
+		"balance is not enough",
+		"not enough balance",
+		"you exceeded your current quota",
+		"exceeded your current quota",
+		"quota reached. please upgrade",
+		"check quota",
+	}
+	for _, m := range englishMarkers {
+		if strings.Contains(lower, m) {
+			if strings.Contains(lower, "user quota") || strings.Contains(lower, "user balance") {
+				return false
+			}
+			return true
+		}
+	}
+
+	hasInsufficient := strings.Contains(lower, "insufficient") || strings.Contains(lower, "exceeded") || strings.Contains(lower, "exhausted") || strings.Contains(lower, "out of")
+	hasBalanceOrQuota := strings.Contains(lower, "balance") || strings.Contains(lower, "quota") || strings.Contains(lower, "credit") || strings.Contains(lower, "funds")
+	if hasInsufficient && hasBalanceOrQuota {
+		if !strings.Contains(lower, "user quota") && !strings.Contains(lower, "user balance") && !strings.Contains(lower, "用户额度") && !strings.Contains(lower, "用户余额") {
+			return true
+		}
+	}
+
+	return false
+}
+
+// MaskChannelBalanceInString replaces upstream channel balance error messages with a neutral,
+// client-friendly unavailable message while preserving any request id already appended.
+func MaskChannelBalanceInString(msg string) string {
+	if !IsChannelBalanceExhaustedMessage(msg) {
+		return msg
+	}
+	idx := strings.Index(msg, "(request id:")
+	if idx != -1 {
+		reqIdPart := strings.TrimSpace(msg[idx:])
+		return ChannelBalanceExhaustedMaskedMessage + " " + reqIdPart
+	}
+	return ChannelBalanceExhaustedMaskedMessage
+}
+

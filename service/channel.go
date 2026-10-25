@@ -70,7 +70,13 @@ func IsFastCircuitError(err *types.NewAPIError) bool {
 	if err == nil {
 		return false
 	}
+	if err.GetErrorCode() == types.ErrorCodeInsufficientUserQuota || err.GetErrorCode() == types.ErrorCodePreConsumeTokenQuotaFailed {
+		return false
+	}
 	if err.GetErrorCode() == types.ErrorCodeChannelInvalidKey || err.StatusCode == 401 || err.StatusCode == 402 {
+		return true
+	}
+	if types.IsChannelBalanceExhaustedMessage(err.Error()) {
 		return true
 	}
 	lower := strings.ToLower(err.Error())

@@ -219,7 +219,7 @@ func channelGuardSignature(event channelGuardEvent) (string, bool, bool) {
 	switch {
 	case strings.Contains(lower, "payload too large"), strings.Contains(lower, "request entity too large"), strings.Contains(lower, "model not found"), strings.Contains(lower, "no available channel"), strings.Contains(lower, "分组无权访问"):
 		return "", false, false
-	case strings.Contains(lower, "insufficient quota"), strings.Contains(lower, "insufficient balance"), strings.Contains(lower, "insufficient_balance"), strings.Contains(lower, "余额不足"), strings.Contains(lower, "额度不足"):
+	case types.IsChannelBalanceExhaustedMessage(lower):
 		category = "quota"
 	case strings.Contains(lower, "invalid api key"), strings.Contains(lower, "invalid token"), strings.Contains(lower, "security token"):
 		category = "invalid_token"

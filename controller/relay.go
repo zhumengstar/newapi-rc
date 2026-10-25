@@ -94,6 +94,13 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	defer func() {
 		if newAPIError != nil {
 			logger.LogError(c, fmt.Sprintf("relay error: %s", common.LocalLogPreview(newAPIError.Error())))
+			if !common.GetContextKeyBool(c, constant.ContextKeyErrorLogRecorded) {
+				recordChannelErrorLog(c, 0, newAPIError, nil)
+			}
+			if isChannelBalanceExhaustedError(newAPIError) {
+				newAPIError.StatusCode = http.StatusServiceUnavailable
+				newAPIError.SetMessage(types.ChannelBalanceExhaustedMaskedMessage)
+			}
 			newAPIError.SetMessage(common.MessageWithRequestId(newAPIError.Error(), requestId))
 			if !c.Writer.Written() {
 				switch relayFormat {
@@ -109,9 +116,6 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 						"error": newAPIError.ToOpenAIError(),
 					})
 				}
-			}
-			if !common.GetContextKeyBool(c, constant.ContextKeyErrorLogRecorded) {
-				recordChannelErrorLog(c, 0, newAPIError, nil)
 			}
 		}
 	}()
@@ -669,26 +673,13 @@ func isEmptyResponsesOutputError(err *types.NewAPIError) bool {
 }
 
 func isChannelBalanceExhaustedError(err *types.NewAPIError) bool {
-	if err == nil || err.GetErrorCode() == types.ErrorCodeInsufficientUserQuota {
+	if err == nil || err.GetErrorCode() == types.ErrorCodeInsufficientUserQuota || err.GetErrorCode() == types.ErrorCodePreConsumeTokenQuotaFailed {
 		return false
 	}
 	if err.StatusCode == http.StatusPaymentRequired {
 		return true
 	}
-	if err.StatusCode != http.StatusForbidden {
-		return false
-	}
-	message := strings.ToLower(err.Error())
-	for _, marker := range []string{
-		"insufficient balance", "insufficient funds", "insufficient credit",
-		"insufficient quota", "credit balance", "no credits", "billing hard limit",
-		"balance is not enough", "余额不足", "额度不足", "余额已用完", "额度已用完",
-	} {
-		if strings.Contains(message, marker) {
-			return true
-		}
-	}
-	return false
+	return types.IsChannelBalanceExhaustedMessage(err.Error())
 }
 
 func isCapacityUnavailableError(err *types.NewAPIError) bool {
@@ -1281,6 +1272,10 @@ func respondTaskError(c *gin.Context, taskErr *taskdto.TaskError) {
 	if taskErr.StatusCode == http.StatusTooManyRequests {
 		taskErr.Message = "当前分组上游负载已饱和，请稍后再试"
 	}
+	if types.IsChannelBalanceExhaustedMessage(taskErr.Message) {
+		taskErr.StatusCode = http.StatusServiceUnavailable
+		taskErr.Message = types.ChannelBalanceExhaustedMaskedMessage
+	}
 	c.JSON(taskErr.StatusCode, taskErr)
 }
 
@@ -1296,6 +1291,9 @@ func shouldRetryTaskRelay(c *gin.Context, channelId int, taskErr *taskdto.TaskEr
 	}
 	if service.GetChannelConstraints(c).SuppressesRetry() {
 		return false
+	}
+	if taskErr.StatusCode == http.StatusPaymentRequired || types.IsChannelBalanceExhaustedMessage(taskErr.Message) {
+		return true
 	}
 	if taskErr.StatusCode == http.StatusTooManyRequests {
 		return true
