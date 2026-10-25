@@ -39,7 +39,7 @@ import type { Channel } from '@/features/channels/types'
 import { getGroups, getUser } from '@/features/users/api'
 import type { User } from '@/features/users/types'
 
-import { getChannelTodayIncome } from './api'
+import { getChannelTodayIncome, getChannelSources } from './api'
 import { ExclusiveChannelsTable } from './components/exclusive-channels-table'
 import { ExclusiveSummaryCards } from './components/exclusive-summary-cards'
 import { QuickExclusiveDialog } from './components/quick-exclusive-dialog'
@@ -104,6 +104,19 @@ export function ExclusiveChannels() {
     refetchInterval: 30 * 60 * 1000, // 每30分钟自动更新
     staleTime: 5 * 60 * 1000,
   })
+
+  // 拉取来源数据用于顶部统计唯一地址数与微信供应商数
+  const { data: sourcesData } = useQuery({
+    queryKey: ['channel-sources-list'],
+    queryFn: async () => {
+      const data = await getChannelSources()
+      return data || []
+    },
+    staleTime: 30 * 1000,
+  })
+
+  const totalSourcesCount = sourcesData?.length || 0
+  const wechatConfiguredCount = sourcesData?.filter((s) => !!s.wechat_name)?.length || 0
 
   const handleForceRefreshIncome = async () => {
     try {
@@ -248,12 +261,14 @@ export function ExclusiveChannels() {
       {/* 主体内容 */}
       <SectionPageLayout.Content>
         <div className='flex h-full min-h-0 flex-col gap-4 overflow-y-auto pb-6'>
-          {/* 统计指标卡片 */}
+          {/* 统计指标卡片 (紧凑小巧、全局唯一不重复) */}
           <ExclusiveSummaryCards
             channels={enrichedChannels}
             todayIncomeData={todayIncomeData}
             isRefreshingIncome={isRefetchingIncome}
             onRefreshIncome={handleForceRefreshIncome}
+            totalSourcesCount={totalSourcesCount}
+            wechatConfiguredCount={wechatConfiguredCount}
           />
 
           {/* 视图切换 Tabs */}
