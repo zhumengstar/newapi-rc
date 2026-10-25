@@ -36,6 +36,12 @@ export type UserChannelBindingInfo = {
   exclusiveChannels: EnrichedChannel[]
 }
 
+export interface GroupIncomeItem {
+  group: string
+  today_quota: number
+  today_income: number
+}
+
 export interface UpstreamSourceDTO {
   base_url: string
   display_base_url: string
@@ -51,6 +57,7 @@ export interface UpstreamSourceDTO {
   model_prices: Record<string, number>
   today_quota?: number
   today_income?: number
+  group_incomes?: Record<string, GroupIncomeItem>
 }
 
 export interface ChannelIncomeItem {
@@ -61,6 +68,7 @@ export interface ChannelIncomeItem {
 
 export interface ChannelTodayIncomeResponse {
   incomes: Record<number, ChannelIncomeItem>
+  channel_group_incomes?: Record<number, Record<string, GroupIncomeItem>>
   total_quota: number
   total_income: number
   next_update_at: number

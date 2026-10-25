@@ -57,7 +57,7 @@ import { CHANNEL_TYPES } from '@/features/channels/constants'
 import type { User } from '@/features/users/types'
 
 import { updateChannelStatus } from '../api'
-import type { ChannelIncomeItem, EnrichedChannel } from '../types'
+import type { ChannelIncomeItem, EnrichedChannel, GroupIncomeItem } from '../types'
 
 interface ExclusiveChannelsTableProps {
   channels: EnrichedChannel[]
@@ -67,6 +67,7 @@ interface ExclusiveChannelsTableProps {
   onNavigateToChannelConfig: (channelId: number) => void
   highlightChannelId?: number | null
   incomeMap?: Record<number, ChannelIncomeItem>
+  channelGroupIncomes?: Record<number, Record<string, GroupIncomeItem>>
 }
 
 function formatQuota(quota: number) {
@@ -85,6 +86,7 @@ export function ExclusiveChannelsTable({
   onNavigateToChannelConfig,
   highlightChannelId,
   incomeMap,
+  channelGroupIncomes,
 }: ExclusiveChannelsTableProps) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
@@ -229,7 +231,13 @@ export function ExclusiveChannelsTable({
           >
             <SelectTrigger className='h-8 w-32 text-xs'>
               <ShieldCheck className='size-3 mr-1 text-muted-foreground' />
-              <SelectValue placeholder={t('Filter scope', '全部类型')} />
+              <SelectValue>
+                {exclusiveTypeFilter === 'all'
+                  ? t('All Channels', '全部渠道')
+                  : exclusiveTypeFilter === 'exclusive'
+                    ? t('Exclusive Only', '仅专属渠道')
+                    : t('Public Only', '仅公共渠道')}
+              </SelectValue>
             </SelectTrigger>
             <SelectContent>
               <SelectItem value='all' className='text-xs'>
@@ -256,7 +264,9 @@ export function ExclusiveChannelsTable({
           >
             <SelectTrigger className='h-8 w-36 text-xs'>
               <Layers className='size-3 mr-1 text-muted-foreground' />
-              <SelectValue placeholder={t('Group filter', '全部分组')} />
+              <SelectValue>
+                {selectedGroupFilter === 'all' ? t('All Groups', '全部分组') : selectedGroupFilter}
+              </SelectValue>
             </SelectTrigger>
             <SelectContent>
               <SelectItem value='all' className='text-xs'>
@@ -282,7 +292,13 @@ export function ExclusiveChannelsTable({
           >
             <SelectTrigger className='h-8 w-28 text-xs'>
               <Filter className='size-3 mr-1 text-muted-foreground' />
-              <SelectValue placeholder={t('Status', '全部状态')} />
+              <SelectValue>
+                {statusFilter === 'all'
+                  ? t('All Status', '全部状态')
+                  : statusFilter === '1'
+                    ? t('Enabled', '仅启用')
+                    : t('Disabled', '仅禁用')}
+              </SelectValue>
             </SelectTrigger>
             <SelectContent>
               <SelectItem value='all' className='text-xs'>
@@ -307,9 +323,15 @@ export function ExclusiveChannelsTable({
               }
             }}
           >
-            <SelectTrigger className='h-8 w-36 text-xs'>
+            <SelectTrigger className='h-8 w-44 text-xs'>
               <ArrowUpDown className='size-3 mr-1 text-muted-foreground' />
-              <SelectValue placeholder={t('Sort by', '排序方式')} />
+              <SelectValue>
+                {sortBy === 'income_desc'
+                  ? t('Today Revenue (High to Low)', '今日收入从高到低')
+                  : sortBy === 'id_desc'
+                    ? t('Channel ID (Newest)', '渠道 ID 倒序')
+                    : t('Channel ID (Ascending)', '渠道 ID 正序')}
+              </SelectValue>
             </SelectTrigger>
             <SelectContent>
               <SelectItem value='income_desc' className='text-xs font-medium text-emerald-600 dark:text-emerald-400'>
@@ -495,20 +517,33 @@ export function ExclusiveChannelsTable({
                             default
                           </Badge>
                         ) : (
-                          c.groupsList.map((g) => (
-                            <Badge
-                              key={g}
-                              variant='secondary'
-                              className='cursor-pointer text-[10px] font-mono hover:bg-primary/20 transition-colors'
-                              onClick={() => {
-                                setSelectedGroupFilter(g)
-                                setCurrentPage(1)
-                              }}
-                              title={t('Click to filter channels in this group', '点击筛选该分组的渠道')}
-                            >
-                              {g}
-                            </Badge>
-                          ))
+                          c.groupsList.map((g) => {
+                            const gItem = channelGroupIncomes?.[c.id]?.[g]
+                            const income = gItem?.today_income || 0
+                            return (
+                              <Badge
+                                key={g}
+                                variant={income > 0 ? 'default' : 'secondary'}
+                                className={`cursor-pointer text-[10px] font-mono transition-colors ${
+                                  income > 0
+                                    ? 'bg-emerald-600/90 text-white hover:bg-emerald-700 shadow-2xs'
+                                    : 'hover:bg-primary/20'
+                                }`}
+                                onClick={() => {
+                                  setSelectedGroupFilter(g)
+                                  setCurrentPage(1)
+                                }}
+                                title={
+                                  income > 0
+                                    ? `该渠道在 [${g}] 分组今日产生: $${income.toFixed(2)} (${formatQuota(gItem?.today_quota || 0)} quota)`
+                                    : t('Click to filter channels in this group', '点击筛选该分组的渠道')
+                                }
+                              >
+                                {g}
+                                {income > 0 && <span className='ml-1 opacity-90 font-semibold'>${income.toFixed(2)}</span>}
+                              </Badge>
+                            )
+                          })
                         )}
                       </div>
                     </TableCell>

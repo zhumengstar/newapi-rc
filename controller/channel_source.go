@@ -33,21 +33,28 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+type GroupIncomeItem struct {
+	Group       string  `json:"group"`
+	TodayQuota  int64   `json:"today_quota"`
+	TodayIncome float64 `json:"today_income"`
+}
+
 type UpstreamSourceDTO struct {
-	BaseURL             string             `json:"base_url"`
-	DisplayBaseURL      string             `json:"display_base_url"`
-	WechatName          string             `json:"wechat_name"`
-	ChannelCount        int                `json:"channel_count"`
-	EnabledChannelCount int                `json:"enabled_channel_count"`
-	ChannelIds          []int              `json:"channel_ids"`
-	ChannelNames        []string           `json:"channel_names"`
-	Groups              []string           `json:"groups"`
-	ChannelRatio        float64            `json:"channel_ratio"`
-	CostTier            int                `json:"cost_tier"`
-	Models              []string           `json:"models"`
-	ModelPrices         map[string]float64 `json:"model_prices"`
-	TodayQuota          int64              `json:"today_quota"`
-	TodayIncome         float64            `json:"today_income"`
+	BaseURL             string                     `json:"base_url"`
+	DisplayBaseURL      string                     `json:"display_base_url"`
+	WechatName          string                     `json:"wechat_name"`
+	ChannelCount        int                        `json:"channel_count"`
+	EnabledChannelCount int                        `json:"enabled_channel_count"`
+	ChannelIds          []int                      `json:"channel_ids"`
+	ChannelNames        []string                   `json:"channel_names"`
+	Groups              []string                   `json:"groups"`
+	ChannelRatio        float64                    `json:"channel_ratio"`
+	CostTier            int                        `json:"cost_tier"`
+	Models              []string                   `json:"models"`
+	ModelPrices         map[string]float64         `json:"model_prices"`
+	TodayQuota          int64                      `json:"today_quota"`
+	TodayIncome         float64                    `json:"today_income"`
+	GroupIncomes        map[string]GroupIncomeItem `json:"group_incomes"`
 }
 
 type ChannelIncomeItem struct {
@@ -57,11 +64,12 @@ type ChannelIncomeItem struct {
 }
 
 type ChannelTodayIncomeResponse struct {
-	Incomes        map[int]ChannelIncomeItem `json:"incomes"`
-	TotalQuota     int64                     `json:"total_quota"`
-	TotalIncome    float64                   `json:"total_income"`
-	NextUpdateAt   int64                     `json:"next_update_at"`
-	IntervalMinute int                       `json:"interval_minutes"`
+	Incomes             map[int]ChannelIncomeItem          `json:"incomes"`
+	ChannelGroupIncomes map[int]map[string]GroupIncomeItem `json:"channel_group_incomes,omitempty"`
+	TotalQuota          int64                              `json:"total_quota"`
+	TotalIncome         float64                            `json:"total_income"`
+	NextUpdateAt        int64                              `json:"next_update_at"`
+	IntervalMinute      int                                `json:"interval_minutes"`
 }
 
 type UpdateUpstreamSourceRequest struct {
@@ -90,7 +98,7 @@ func GetChannelSources(c *gin.Context) {
 	}
 
 	globalModelPrices := ratio_setting.GetModelPriceMap()
-	incomeMap, _, _ := model.GetCachedChannelTodayIncomeMap(false)
+	incomeDetail, _, _ := model.GetCachedChannelTodayIncomeDetail(false)
 
 	sourceMap := make(map[string]*UpstreamSourceDTO)
 	groupSets := make(map[string]map[string]struct{})
@@ -124,8 +132,8 @@ func GetChannelSources(c *gin.Context) {
 		src.ChannelIds = append(src.ChannelIds, ch.Id)
 		src.ChannelNames = append(src.ChannelNames, ch.Name)
 
-		if incomeMap != nil {
-			src.TodayQuota += incomeMap[ch.Id]
+		if incomeDetail != nil && incomeDetail.ChannelIncomes != nil {
+			src.TodayQuota += incomeDetail.ChannelIncomes[ch.Id]
 		}
 
 		if src.WechatName == "" && ch.Contact != "" {
@@ -198,6 +206,28 @@ func GetChannelSources(c *gin.Context) {
 
 		if src.TodayQuota > 0 {
 			src.TodayIncome = float64(src.TodayQuota) / common.QuotaPerUnit
+		}
+
+		src.GroupIncomes = make(map[string]GroupIncomeItem)
+		for _, g := range groups {
+			src.GroupIncomes[g] = GroupIncomeItem{
+				Group:       g,
+				TodayQuota:  0,
+				TodayIncome: 0,
+			}
+		}
+		if incomeDetail != nil && incomeDetail.ChannelGroupIncomes != nil {
+			for _, chId := range src.ChannelIds {
+				if gMap, ok := incomeDetail.ChannelGroupIncomes[chId]; ok {
+					for g, q := range gMap {
+						item := src.GroupIncomes[g]
+						item.Group = g
+						item.TodayQuota += q
+						item.TodayIncome = float64(item.TodayQuota) / common.QuotaPerUnit
+						src.GroupIncomes[g] = item
+					}
+				}
+			}
 		}
 
 		result = append(result, src)
@@ -347,15 +377,16 @@ func UpdateChannelSource(c *gin.Context) {
 // GetChannelTodayIncome 获取所有渠道当天的消耗额度与美元收入（30分钟自动刷新缓存）
 func GetChannelTodayIncome(c *gin.Context) {
 	force, _ := strconv.ParseBool(c.DefaultQuery("force", "false"))
-	incomeMap, exp, err := model.GetCachedChannelTodayIncomeMap(force)
+	detail, exp, err := model.GetCachedChannelTodayIncomeDetail(force)
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
 
-	incomes := make(map[int]ChannelIncomeItem, len(incomeMap))
+	incomes := make(map[int]ChannelIncomeItem, len(detail.ChannelIncomes))
+	channelGroupIncomes := make(map[int]map[string]GroupIncomeItem, len(detail.ChannelGroupIncomes))
 	var totalQuota int64
-	for chId, quota := range incomeMap {
+	for chId, quota := range detail.ChannelIncomes {
 		totalQuota += quota
 		incomes[chId] = ChannelIncomeItem{
 			ChannelId:   chId,
@@ -364,15 +395,27 @@ func GetChannelTodayIncome(c *gin.Context) {
 		}
 	}
 
+	for chId, gMap := range detail.ChannelGroupIncomes {
+		channelGroupIncomes[chId] = make(map[string]GroupIncomeItem, len(gMap))
+		for g, q := range gMap {
+			channelGroupIncomes[chId][g] = GroupIncomeItem{
+				Group:       g,
+				TodayQuota:  q,
+				TodayIncome: float64(q) / common.QuotaPerUnit,
+			}
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
 		"data": ChannelTodayIncomeResponse{
-			Incomes:        incomes,
-			TotalQuota:     totalQuota,
-			TotalIncome:    float64(totalQuota) / common.QuotaPerUnit,
-			NextUpdateAt:   exp.Unix(),
-			IntervalMinute: 30,
+			Incomes:             incomes,
+			ChannelGroupIncomes: channelGroupIncomes,
+			TotalQuota:          totalQuota,
+			TotalIncome:         float64(totalQuota) / common.QuotaPerUnit,
+			NextUpdateAt:        exp.Unix(),
+			IntervalMinute:      30,
 		},
 	})
 }

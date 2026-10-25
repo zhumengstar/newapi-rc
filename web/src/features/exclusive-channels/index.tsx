@@ -306,6 +306,7 @@ export function ExclusiveChannels() {
                     allGroups={allGroups}
                     userMap={userMap}
                     incomeMap={todayIncomeData?.incomes}
+                    channelGroupIncomes={todayIncomeData?.channel_group_incomes}
                     onOpenEditDialog={handleOpenEdit}
                     onNavigateToChannelConfig={handleNavigateToChannelConfig}
                     highlightChannelId={Number.isFinite(targetChannelId) ? targetChannelId : null}

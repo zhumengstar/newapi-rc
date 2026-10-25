@@ -1028,37 +1028,42 @@ func CanAccessGeneratedImageAsset(userId int, role int, date string, filename st
 	return count > 0
 }
 
+type ChannelTodayIncomeDetail struct {
+	ChannelIncomes      map[int]int64            // channel_id -> quota
+	ChannelGroupIncomes map[int]map[string]int64 // channel_id -> group -> quota
+}
+
 var (
-	channelTodayIncomeCacheLock sync.RWMutex
-	channelTodayIncomeCache     map[int]int64
-	channelTodayIncomeCacheExp  time.Time
-	channelTodayIncomeGroup     singleflight.Group
+	channelTodayIncomeDetailCacheLock sync.RWMutex
+	channelTodayIncomeDetailCache     *ChannelTodayIncomeDetail
+	channelTodayIncomeDetailCacheExp  time.Time
+	channelTodayIncomeDetailGroup     singleflight.Group
 )
 
-// GetCachedChannelTodayIncomeMap 获取每个渠道当天的消耗额度 (Quota)，每 30 分钟缓存刷新一次
-func GetCachedChannelTodayIncomeMap(force bool) (map[int]int64, time.Time, error) {
+// GetCachedChannelTodayIncomeDetail 获取每个渠道及渠道在各个分组下的当天消耗，每 30 分钟缓存刷新一次
+func GetCachedChannelTodayIncomeDetail(force bool) (*ChannelTodayIncomeDetail, time.Time, error) {
 	now := time.Now()
 	if !force {
-		channelTodayIncomeCacheLock.RLock()
-		if now.Before(channelTodayIncomeCacheExp) && channelTodayIncomeCache != nil {
-			res := channelTodayIncomeCache
-			exp := channelTodayIncomeCacheExp
-			channelTodayIncomeCacheLock.RUnlock()
+		channelTodayIncomeDetailCacheLock.RLock()
+		if now.Before(channelTodayIncomeDetailCacheExp) && channelTodayIncomeDetailCache != nil {
+			res := channelTodayIncomeDetailCache
+			exp := channelTodayIncomeDetailCacheExp
+			channelTodayIncomeDetailCacheLock.RUnlock()
 			return res, exp, nil
 		}
-		channelTodayIncomeCacheLock.RUnlock()
+		channelTodayIncomeDetailCacheLock.RUnlock()
 	}
 
-	val, err, _ := channelTodayIncomeGroup.Do("channel_today_income", func() (any, error) {
+	val, err, _ := channelTodayIncomeDetailGroup.Do("channel_today_income_detail", func() (any, error) {
 		now := time.Now()
 		if !force {
-			channelTodayIncomeCacheLock.RLock()
-			if now.Before(channelTodayIncomeCacheExp) && channelTodayIncomeCache != nil {
-				res := channelTodayIncomeCache
-				channelTodayIncomeCacheLock.RUnlock()
+			channelTodayIncomeDetailCacheLock.RLock()
+			if now.Before(channelTodayIncomeDetailCacheExp) && channelTodayIncomeDetailCache != nil {
+				res := channelTodayIncomeDetailCache
+				channelTodayIncomeDetailCacheLock.RUnlock()
 				return res, nil
 			}
-			channelTodayIncomeCacheLock.RUnlock()
+			channelTodayIncomeDetailCacheLock.RUnlock()
 		}
 
 		todayStart := ShanghaiTodayStartUnix()
@@ -1067,36 +1072,61 @@ func GetCachedChannelTodayIncomeMap(force bool) (map[int]int64, time.Time, error
 			quotaDB = DB
 		}
 
-		type channelQuotaRow struct {
-			ChannelId  int   `gorm:"column:channel_id"`
-			TodayQuota int64 `gorm:"column:today_quota"`
+		type channelGroupQuotaRow struct {
+			ChannelId  int    `gorm:"column:channel_id"`
+			Group      string `gorm:"column:group"`
+			TodayQuota int64  `gorm:"column:today_quota"`
 		}
-		var rows []channelQuotaRow
+		var rows []channelGroupQuotaRow
 		err := quotaDB.Table("logs").
-			Select("channel_id, COALESCE(SUM(quota), 0) AS today_quota").
+			Select("channel_id, COALESCE(\"group\", 'default') AS \"group\", COALESCE(SUM(quota), 0) AS today_quota").
 			Where("type = ? AND created_at >= ? AND channel_id > 0", LogTypeConsume, todayStart).
-			Group("channel_id").
+			Group("channel_id, \"group\"").
 			Scan(&rows).Error
 		if err != nil {
 			return nil, err
 		}
 
-		incomeMap := make(map[int]int64, len(rows))
+		channelIncomes := make(map[int]int64, len(rows))
+		channelGroupIncomes := make(map[int]map[string]int64, len(rows))
+
 		for _, r := range rows {
-			incomeMap[r.ChannelId] = r.TodayQuota
+			channelIncomes[r.ChannelId] += r.TodayQuota
+			if _, exists := channelGroupIncomes[r.ChannelId]; !exists {
+				channelGroupIncomes[r.ChannelId] = make(map[string]int64)
+			}
+			grp := strings.TrimSpace(r.Group)
+			if grp == "" {
+				grp = "default"
+			}
+			channelGroupIncomes[r.ChannelId][grp] += r.TodayQuota
 		}
 
-		channelTodayIncomeCacheLock.Lock()
-		channelTodayIncomeCache = incomeMap
-		channelTodayIncomeCacheExp = now.Add(30 * time.Minute) // 严格遵循每半小时更新一次
-		channelTodayIncomeCacheLock.Unlock()
+		detail := &ChannelTodayIncomeDetail{
+			ChannelIncomes:      channelIncomes,
+			ChannelGroupIncomes: channelGroupIncomes,
+		}
 
-		return incomeMap, nil
+		channelTodayIncomeDetailCacheLock.Lock()
+		channelTodayIncomeDetailCache = detail
+		channelTodayIncomeDetailCacheExp = now.Add(30 * time.Minute) // 严格遵循每半小时更新一次
+		channelTodayIncomeDetailCacheLock.Unlock()
+
+		return detail, nil
 	})
 
 	if err != nil {
 		return nil, time.Time{}, err
 	}
-	return val.(map[int]int64), channelTodayIncomeCacheExp, nil
+	return val.(*ChannelTodayIncomeDetail), channelTodayIncomeDetailCacheExp, nil
+}
+
+// GetCachedChannelTodayIncomeMap 获取每个渠道当天的消耗额度 (Quota)，兼容老函数
+func GetCachedChannelTodayIncomeMap(force bool) (map[int]int64, time.Time, error) {
+	detail, exp, err := GetCachedChannelTodayIncomeDetail(force)
+	if err != nil {
+		return nil, exp, err
+	}
+	return detail.ChannelIncomes, exp, nil
 }
 
