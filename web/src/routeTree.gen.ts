@@ -36,6 +36,7 @@ import { Route as SetupIndexRouteImport } from './routes/setup/index'
 import { Route as authUserResetRouteImport } from './routes/(auth)/user/reset'
 import { Route as AuthenticatedCanvasIndexRouteImport } from './routes/_authenticated/canvas/index'
 import { Route as AuthenticatedChannelsIndexRouteImport } from './routes/_authenticated/channels/index'
+import { Route as AuthenticatedChannelsExclusiveRouteImport } from './routes/_authenticated/channels/exclusive'
 import { Route as AuthenticatedChatChatIdRouteImport } from './routes/_authenticated/chat/$chatId'
 import { Route as AuthenticatedConsoleCanvasRouteImport } from './routes/_authenticated/console/canvas'
 import { Route as AuthenticatedDashboardIndexRouteImport } from './routes/_authenticated/dashboard/index'
@@ -207,6 +208,12 @@ const AuthenticatedChannelsIndexRoute =
   AuthenticatedChannelsIndexRouteImport.update({
     id: '/channels/',
     path: '/channels/',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
+const AuthenticatedChannelsExclusiveRoute =
+  AuthenticatedChannelsExclusiveRouteImport.update({
+    id: '/channels/exclusive',
+    path: '/channels/exclusive',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
 const AuthenticatedChatChatIdRoute = AuthenticatedChatChatIdRouteImport.update({
@@ -446,6 +453,7 @@ export interface FileRoutesByFullPath {
   '/rankings/': typeof RankingsIndexRoute
   '/setup/': typeof SetupIndexRoute
   '/user/reset': typeof authUserResetRoute
+  '/channels/exclusive': typeof AuthenticatedChannelsExclusiveRoute
   '/chat/$chatId': typeof AuthenticatedChatChatIdRoute
   '/console/canvas': typeof AuthenticatedConsoleCanvasRoute
   '/dashboard/$section': typeof AuthenticatedDashboardSectionRoute
@@ -508,6 +516,7 @@ export interface FileRoutesByTo {
   '/rankings': typeof RankingsIndexRoute
   '/setup': typeof SetupIndexRoute
   '/user/reset': typeof authUserResetRoute
+  '/channels/exclusive': typeof AuthenticatedChannelsExclusiveRoute
   '/chat/$chatId': typeof AuthenticatedChatChatIdRoute
   '/console/canvas': typeof AuthenticatedConsoleCanvasRoute
   '/dashboard/$section': typeof AuthenticatedDashboardSectionRoute
@@ -574,6 +583,7 @@ export interface FileRoutesById {
   '/rankings/': typeof RankingsIndexRoute
   '/setup/': typeof SetupIndexRoute
   '/(auth)/user/reset': typeof authUserResetRoute
+  '/_authenticated/channels/exclusive': typeof AuthenticatedChannelsExclusiveRoute
   '/_authenticated/chat/$chatId': typeof AuthenticatedChatChatIdRoute
   '/_authenticated/console/canvas': typeof AuthenticatedConsoleCanvasRoute
   '/_authenticated/dashboard/$section': typeof AuthenticatedDashboardSectionRoute
@@ -639,6 +649,7 @@ export interface FileRouteTypes {
     | '/rankings/'
     | '/setup/'
     | '/user/reset'
+    | '/channels/exclusive'
     | '/chat/$chatId'
     | '/console/canvas'
     | '/dashboard/$section'
@@ -701,6 +712,7 @@ export interface FileRouteTypes {
     | '/rankings'
     | '/setup'
     | '/user/reset'
+    | '/channels/exclusive'
     | '/chat/$chatId'
     | '/console/canvas'
     | '/dashboard/$section'
@@ -766,6 +778,7 @@ export interface FileRouteTypes {
     | '/rankings/'
     | '/setup/'
     | '/(auth)/user/reset'
+    | '/_authenticated/channels/exclusive'
     | '/_authenticated/chat/$chatId'
     | '/_authenticated/console/canvas'
     | '/_authenticated/dashboard/$section'
@@ -1014,6 +1027,13 @@ declare module '@tanstack/react-router' {
       path: '/channels'
       fullPath: '/channels/'
       preLoaderRoute: typeof AuthenticatedChannelsIndexRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/channels/exclusive': {
+      id: '/_authenticated/channels/exclusive'
+      path: '/channels/exclusive'
+      fullPath: '/channels/exclusive'
+      preLoaderRoute: typeof AuthenticatedChannelsExclusiveRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
     '/_authenticated/chat/$chatId': {
@@ -1357,6 +1377,7 @@ const AuthenticatedSystemSettingsRouteRouteWithChildren =
 interface AuthenticatedRouteRouteChildren {
   AuthenticatedSystemSettingsRouteRoute: typeof AuthenticatedSystemSettingsRouteRouteWithChildren
   AuthenticatedChat2linkRoute: typeof AuthenticatedChat2linkRoute
+  AuthenticatedChannelsExclusiveRoute: typeof AuthenticatedChannelsExclusiveRoute
   AuthenticatedChatChatIdRoute: typeof AuthenticatedChatChatIdRoute
   AuthenticatedConsoleCanvasRoute: typeof AuthenticatedConsoleCanvasRoute
   AuthenticatedDashboardSectionRoute: typeof AuthenticatedDashboardSectionRoute
@@ -1385,6 +1406,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedSystemSettingsRouteRoute:
     AuthenticatedSystemSettingsRouteRouteWithChildren,
   AuthenticatedChat2linkRoute: AuthenticatedChat2linkRoute,
+  AuthenticatedChannelsExclusiveRoute: AuthenticatedChannelsExclusiveRoute,
   AuthenticatedChatChatIdRoute: AuthenticatedChatChatIdRoute,
   AuthenticatedConsoleCanvasRoute: AuthenticatedConsoleCanvasRoute,
   AuthenticatedDashboardSectionRoute: AuthenticatedDashboardSectionRoute,

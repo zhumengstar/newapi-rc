@@ -2002,6 +2002,122 @@ func BatchUpdateChannelStatus(c *gin.Context) {
 	})
 }
 
+type ChannelExclusiveUpdateRequest struct {
+	Group          *string `json:"group"`
+	AllowedUserIds *[]int  `json:"allowed_user_ids"`
+	Status         *int    `json:"status"`
+}
+
+func UpdateChannelExclusive(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
+		return
+	}
+	var req ChannelExclusiveUpdateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
+		return
+	}
+	existingChannel, err := model.GetChannelById(id, true)
+	if err != nil || existingChannel == nil {
+		common.ApiError(c, fmt.Errorf("渠道 #%d 不存在", id))
+		return
+	}
+
+	updates := make(map[string]any)
+	updateAudit := map[string]any{"id": id}
+
+	if req.Group != nil {
+		cleanGroup := strings.TrimSpace(*req.Group)
+		if cleanGroup == "" {
+			cleanGroup = "default"
+		}
+		existingChannel.Group = cleanGroup
+		updates["group"] = cleanGroup
+		updateAudit["group"] = cleanGroup
+	}
+
+	if req.Status != nil && isManageableChannelStatus(*req.Status) {
+		existingChannel.Status = *req.Status
+		updates["status"] = *req.Status
+		updateAudit["status"] = *req.Status
+	}
+
+	if req.AllowedUserIds != nil {
+		seen := make(map[int]struct{})
+		cleanedIds := make([]int, 0, len(*req.AllowedUserIds))
+		for _, uid := range *req.AllowedUserIds {
+			if uid <= 0 {
+				continue
+			}
+			if _, ok := seen[uid]; !ok {
+				seen[uid] = struct{}{}
+				cleanedIds = append(cleanedIds, uid)
+			}
+		}
+
+		if len(cleanedIds) > 0 {
+			channelGroups := strings.Split(existingChannel.Group, ",")
+			channelGroupMap := make(map[string]bool)
+			for _, g := range channelGroups {
+				g = strings.TrimSpace(g)
+				if g != "" {
+					channelGroupMap[g] = true
+				}
+			}
+			for _, uid := range cleanedIds {
+				user, err := model.GetUserById(uid, false)
+				if err != nil || user == nil {
+					common.ApiError(c, fmt.Errorf("指定的客户 ID #%d 不存在", uid))
+					return
+				}
+				userGroups := strings.Split(user.Group, ",")
+				hasGroup := false
+				for _, ug := range userGroups {
+					ug = strings.TrimSpace(ug)
+					if channelGroupMap[ug] {
+						hasGroup = true
+						break
+					}
+				}
+				if !hasGroup {
+					common.ApiError(c, fmt.Errorf("客户 %s(ID:%d) 未被分配到渠道所属分组(%s)，无法绑定为该渠道的专属客户", user.Username, user.Id, existingChannel.Group))
+					return
+				}
+			}
+		}
+
+		otherSettings := existingChannel.GetOtherSettings()
+		otherSettings.AllowedUserIds = cleanedIds
+		existingChannel.SetOtherSettings(otherSettings)
+		updates["settings"] = existingChannel.OtherSettings
+		updateAudit["allowed_user_ids"] = cleanedIds
+	}
+
+	if len(updates) > 0 {
+		err = model.DB.Model(&model.Channel{}).Where("id = ?", id).Updates(updates).Error
+		if err != nil {
+			common.ApiError(c, err)
+			return
+		}
+		if req.Group != nil || req.Status != nil {
+			_ = existingChannel.UpdateAbilities(nil)
+		}
+		model.InitChannelCache()
+		recordManageAudit(c, "channel.exclusive_update", updateAudit)
+	}
+
+	existingChannel.Key = ""
+	clearChannelInfo(existingChannel)
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "专属配置已更新",
+		"data":    existingChannel,
+	})
+}
+
 func isManageableChannelStatus(status int) bool {
 	return status == common.ChannelStatusEnabled || status == common.ChannelStatusManuallyDisabled || status == common.ChannelStatusAutoDisabled
 }

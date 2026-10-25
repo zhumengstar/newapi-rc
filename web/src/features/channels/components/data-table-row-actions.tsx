@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useQueryClient } from '@tanstack/react-query'
+import { useNavigate } from '@tanstack/react-router'
 import type { Row } from '@tanstack/react-table'
 import {
   MoreHorizontal,
@@ -33,6 +34,7 @@ import {
   Trash2,
   RefreshCw,
   Loader2,
+  UserCheck,
 } from 'lucide-react'
 import { useContext, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -85,6 +87,7 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
   const { setOpen, setCurrentRow, upstream } = useChannels()
   const queryClient = useQueryClient()
   const currentUser = useAuthStore((s) => s.auth.user)
+  const navigate = useNavigate()
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
   const [autoDisableConfirmOpen, setAutoDisableConfirmOpen] = useState(false)
   const [isTesting, setIsTesting] = useState(false)
@@ -337,6 +340,21 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
           )}
 
           <DropdownMenuSeparator />
+
+          {/* 专属与分组透视 */}
+          <DropdownMenuItem
+            onClick={() => {
+              navigate({
+                to: '/channels/exclusive',
+                search: { channel_id: channel.id },
+              })
+            }}
+          >
+            {t('Exclusive & Groups', '专属与分组透视')}
+            <DropdownMenuShortcut>
+              <UserCheck size={16} />
+            </DropdownMenuShortcut>
+          </DropdownMenuItem>
 
           {/* Copy Channel */}
           <DropdownMenuItem

@@ -144,6 +144,11 @@ export function useSidebarData(): SidebarData {
             icon: Radio,
           },
           {
+            title: t('Exclusive Channels', '专属渠道'),
+            url: '/channels/exclusive',
+            icon: ShieldCheck,
+          },
+          {
             title: t('Models'),
             url: '/models/metadata',
             icon: Box,
