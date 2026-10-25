@@ -350,9 +350,6 @@ export function UpstreamSourcesView({
               <TableHead className='w-28 font-semibold'>
                 {t('Channel / Group Ratio', '分组/渠道倍率')}
               </TableHead>
-              <TableHead className='min-w-[150px] font-semibold'>
-                {t('Aggregated Channels', '关联渠道')}
-              </TableHead>
               <TableHead className='min-w-[180px] font-semibold'>
                 {t('Model Per-Request Pricing', '模型单请求价格 (按次)')}
               </TableHead>
@@ -364,7 +361,7 @@ export function UpstreamSourcesView({
           <TableBody>
             {isLoading ? (
               <TableRow>
-                <TableCell colSpan={8} className='h-32 text-center text-xs text-muted-foreground'>
+                <TableCell colSpan={7} className='h-32 text-center text-xs text-muted-foreground'>
                   <div className='flex flex-col items-center justify-center gap-1.5'>
                     <Loader2 className='size-6 animate-spin text-primary opacity-80' />
                     <span>{t('Loading upstream sources...', '正在汇聚各来源地址数据...')}</span>
@@ -373,7 +370,7 @@ export function UpstreamSourcesView({
               </TableRow>
             ) : filteredSources.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={8} className='h-32 text-center text-xs text-muted-foreground'>
+                <TableCell colSpan={7} className='h-32 text-center text-xs text-muted-foreground'>
                   <div className='flex flex-col items-center justify-center gap-1.5'>
                     <Globe className='size-8 opacity-25' />
                     <span>{t('No upstream sources found matching criteria', '未找到符合条件的来源地址')}</span>
@@ -410,8 +407,10 @@ export function UpstreamSourcesView({
                             </button>
                           )}
                         </div>
-                        <div className='flex items-center gap-1 text-[11px] text-muted-foreground'>
+                        <div className='flex items-center gap-1.5 text-[11px] text-muted-foreground'>
                           <span>{source.models.length} {t('models supported', '个模型')}</span>
+                          <span>·</span>
+                          <span>{source.enabled_channel_count}/{source.channel_count} {t('channels online', '在线')}</span>
                           {source.cost_tier > 0 && (
                             <Badge variant='outline' className='text-[9px] px-1 py-0 h-3.5'>
                               Tier {source.cost_tier}
@@ -558,34 +557,6 @@ export function UpstreamSourcesView({
                       ) : (
                         <span className='text-xs text-muted-foreground font-mono'>1.0x (默认)</span>
                       )}
-                    </TableCell>
-
-                    {/* 关联渠道 */}
-                    <TableCell>
-                      <div className='space-y-1'>
-                        <div className='flex items-center gap-1.5 text-xs'>
-                          <span className='font-semibold text-foreground'>
-                            {source.enabled_channel_count} / {source.channel_count}
-                          </span>
-                          <span className='text-muted-foreground text-[11px]'>{t('channels online', '在线')}</span>
-                        </div>
-                        <div className='flex flex-wrap gap-1 max-w-[200px]'>
-                          {source.channel_names.slice(0, 3).map((name, idx) => (
-                            <span
-                              key={idx}
-                              className='inline-block truncate max-w-[90px] text-[10px] bg-muted px-1 rounded text-muted-foreground'
-                              title={name}
-                            >
-                              {name}
-                            </span>
-                          ))}
-                          {source.channel_names.length > 3 && (
-                            <span className='text-[10px] text-muted-foreground'>
-                              +{source.channel_names.length - 3}
-                            </span>
-                          )}
-                        </div>
-                      </div>
                     </TableCell>
 
                     {/* 模型单请求价格 */}
