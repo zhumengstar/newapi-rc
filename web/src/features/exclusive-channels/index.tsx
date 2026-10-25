@@ -29,6 +29,7 @@ import {
 } from 'lucide-react'
 import { useState, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
+import { toast } from 'sonner'
 
 import { SectionPageLayout } from '@/components/layout'
 import { Button } from '@/components/ui/button'
@@ -38,6 +39,7 @@ import type { Channel } from '@/features/channels/types'
 import { getGroups, getUser } from '@/features/users/api'
 import type { User } from '@/features/users/types'
 
+import { getChannelTodayIncome } from './api'
 import { ExclusiveChannelsTable } from './components/exclusive-channels-table'
 import { ExclusiveSummaryCards } from './components/exclusive-summary-cards'
 import { QuickExclusiveDialog } from './components/quick-exclusive-dialog'
@@ -88,6 +90,30 @@ export function ExclusiveChannels() {
     },
     staleTime: 5 * 60 * 1000,
   })
+
+  // 拉取今日渠道收入统计（严格30分钟缓存与自动刷新）
+  const {
+    data: todayIncomeData,
+    refetch: refetchIncome,
+    isRefetching: isRefetchingIncome,
+  } = useQuery({
+    queryKey: ['exclusive-channels-today-income'],
+    queryFn: async () => {
+      return await getChannelTodayIncome()
+    },
+    refetchInterval: 30 * 60 * 1000, // 每30分钟自动更新
+    staleTime: 5 * 60 * 1000,
+  })
+
+  const handleForceRefreshIncome = async () => {
+    try {
+      await getChannelTodayIncome(true)
+      await refetchIncome()
+      toast.success(t('Today revenue updated', '今日收入已成功更新'))
+    } catch (err: any) {
+      toast.error(err?.message || t('Failed to refresh revenue', '刷新今日收入失败'))
+    }
+  }
 
   const allGroups = groupsData || ['default']
 
@@ -223,7 +249,12 @@ export function ExclusiveChannels() {
       <SectionPageLayout.Content>
         <div className='flex h-full min-h-0 flex-col gap-4 overflow-y-auto pb-6'>
           {/* 统计指标卡片 */}
-          <ExclusiveSummaryCards channels={enrichedChannels} />
+          <ExclusiveSummaryCards
+            channels={enrichedChannels}
+            todayIncomeData={todayIncomeData}
+            isRefreshingIncome={isRefetchingIncome}
+            onRefreshIncome={handleForceRefreshIncome}
+          />
 
           {/* 视图切换 Tabs */}
           <Tabs
@@ -274,6 +305,7 @@ export function ExclusiveChannels() {
                     channels={enrichedChannels}
                     allGroups={allGroups}
                     userMap={userMap}
+                    incomeMap={todayIncomeData?.incomes}
                     onOpenEditDialog={handleOpenEdit}
                     onNavigateToChannelConfig={handleNavigateToChannelConfig}
                     highlightChannelId={Number.isFinite(targetChannelId) ? targetChannelId : null}

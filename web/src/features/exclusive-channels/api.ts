@@ -24,7 +24,21 @@ import type {
   ChannelExclusiveUpdateRequest,
   UpstreamSourceDTO,
   UpdateUpstreamSourceRequest,
+  ChannelTodayIncomeResponse,
 } from './types'
+
+export async function getChannelTodayIncome(
+  force?: boolean
+): Promise<ChannelTodayIncomeResponse> {
+  const response = await api.get<{
+    success: boolean
+    message?: string
+    data: ChannelTodayIncomeResponse
+  }>('/api/channel/today_income', {
+    params: force ? { force: 'true' } : undefined,
+  })
+  return requireServerSuccess(response.data).data
+}
 
 export async function getChannelSources(): Promise<UpstreamSourceDTO[]> {
   const response = await api.get<{

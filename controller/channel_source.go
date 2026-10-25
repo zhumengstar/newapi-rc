@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -45,6 +46,22 @@ type UpstreamSourceDTO struct {
 	CostTier            int                `json:"cost_tier"`
 	Models              []string           `json:"models"`
 	ModelPrices         map[string]float64 `json:"model_prices"`
+	TodayQuota          int64              `json:"today_quota"`
+	TodayIncome         float64            `json:"today_income"`
+}
+
+type ChannelIncomeItem struct {
+	ChannelId   int     `json:"channel_id"`
+	TodayQuota  int64   `json:"today_quota"`
+	TodayIncome float64 `json:"today_income"`
+}
+
+type ChannelTodayIncomeResponse struct {
+	Incomes        map[int]ChannelIncomeItem `json:"incomes"`
+	TotalQuota     int64                     `json:"total_quota"`
+	TotalIncome    float64                   `json:"total_income"`
+	NextUpdateAt   int64                     `json:"next_update_at"`
+	IntervalMinute int                       `json:"interval_minutes"`
 }
 
 type UpdateUpstreamSourceRequest struct {
@@ -73,6 +90,7 @@ func GetChannelSources(c *gin.Context) {
 	}
 
 	globalModelPrices := ratio_setting.GetModelPriceMap()
+	incomeMap, _, _ := model.GetCachedChannelTodayIncomeMap(false)
 
 	sourceMap := make(map[string]*UpstreamSourceDTO)
 	groupSets := make(map[string]map[string]struct{})
@@ -105,6 +123,10 @@ func GetChannelSources(c *gin.Context) {
 		}
 		src.ChannelIds = append(src.ChannelIds, ch.Id)
 		src.ChannelNames = append(src.ChannelNames, ch.Name)
+
+		if incomeMap != nil {
+			src.TodayQuota += incomeMap[ch.Id]
+		}
 
 		if src.WechatName == "" && ch.Contact != "" {
 			src.WechatName = ch.Contact
@@ -172,6 +194,10 @@ func GetChannelSources(c *gin.Context) {
 					src.ModelPrices[m] = gp
 				}
 			}
+		}
+
+		if src.TodayQuota > 0 {
+			src.TodayIncome = float64(src.TodayQuota) / common.QuotaPerUnit
 		}
 
 		result = append(result, src)
@@ -314,6 +340,39 @@ func UpdateChannelSource(c *gin.Context) {
 		"data": gin.H{
 			"updated_count": len(matchedChannelIds),
 			"base_url":      req.BaseURL,
+		},
+	})
+}
+
+// GetChannelTodayIncome 获取所有渠道当天的消耗额度与美元收入（30分钟自动刷新缓存）
+func GetChannelTodayIncome(c *gin.Context) {
+	force, _ := strconv.ParseBool(c.DefaultQuery("force", "false"))
+	incomeMap, exp, err := model.GetCachedChannelTodayIncomeMap(force)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+
+	incomes := make(map[int]ChannelIncomeItem, len(incomeMap))
+	var totalQuota int64
+	for chId, quota := range incomeMap {
+		totalQuota += quota
+		incomes[chId] = ChannelIncomeItem{
+			ChannelId:   chId,
+			TodayQuota:  quota,
+			TodayIncome: float64(quota) / common.QuotaPerUnit,
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data": ChannelTodayIncomeResponse{
+			Incomes:        incomes,
+			TotalQuota:     totalQuota,
+			TotalIncome:    float64(totalQuota) / common.QuotaPerUnit,
+			NextUpdateAt:   exp.Unix(),
+			IntervalMinute: 30,
 		},
 	})
 }

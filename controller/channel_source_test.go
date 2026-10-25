@@ -68,3 +68,26 @@ func TestUpdateUpstreamSourceRequestJSON(t *testing.T) {
 	require.Equal(t, 0.1, req.ModelPrices["midjourney"])
 	require.Equal(t, 0.005, req.ModelPrices["gpt-4o"])
 }
+
+func TestChannelTodayIncomeResponseJSON(t *testing.T) {
+	resp := ChannelTodayIncomeResponse{
+		Incomes: map[int]ChannelIncomeItem{
+			101: {ChannelId: 101, TodayQuota: 1000000, TodayIncome: 2.0},
+		},
+		TotalQuota:     1000000,
+		TotalIncome:    2.0,
+		NextUpdateAt:   1700000000,
+		IntervalMinute: 30,
+	}
+
+	bytes, err := json.Marshal(resp)
+	require.NoError(t, err)
+
+	var decoded ChannelTodayIncomeResponse
+	err = json.Unmarshal(bytes, &decoded)
+	require.NoError(t, err)
+	require.Equal(t, 2.0, decoded.TotalIncome)
+	require.Equal(t, int64(1000000), decoded.TotalQuota)
+	require.Equal(t, 30, decoded.IntervalMinute)
+	require.Equal(t, 2.0, decoded.Incomes[101].TodayIncome)
+}

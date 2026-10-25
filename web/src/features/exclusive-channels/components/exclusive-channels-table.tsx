@@ -18,6 +18,9 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import {
+  ArrowUpDown,
+  Coins,
+  DollarSign,
   ExternalLink,
   Filter,
   Layers,
@@ -54,7 +57,7 @@ import { CHANNEL_TYPES } from '@/features/channels/constants'
 import type { User } from '@/features/users/types'
 
 import { updateChannelStatus } from '../api'
-import type { EnrichedChannel } from '../types'
+import type { ChannelIncomeItem, EnrichedChannel } from '../types'
 
 interface ExclusiveChannelsTableProps {
   channels: EnrichedChannel[]
@@ -63,6 +66,15 @@ interface ExclusiveChannelsTableProps {
   onOpenEditDialog: (channel: EnrichedChannel) => void
   onNavigateToChannelConfig: (channelId: number) => void
   highlightChannelId?: number | null
+  incomeMap?: Record<number, ChannelIncomeItem>
+}
+
+function formatQuota(quota: number) {
+  if (!quota || quota <= 0) return '0'
+  if (quota >= 1000000000) return `${(quota / 1000000000).toFixed(2)}B`
+  if (quota >= 1000000) return `${(quota / 1000000).toFixed(2)}M`
+  if (quota >= 1000) return `${(quota / 1000).toFixed(1)}k`
+  return `${quota}`
 }
 
 export function ExclusiveChannelsTable({
@@ -72,6 +84,7 @@ export function ExclusiveChannelsTable({
   onOpenEditDialog,
   onNavigateToChannelConfig,
   highlightChannelId,
+  incomeMap,
 }: ExclusiveChannelsTableProps) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
@@ -83,6 +96,8 @@ export function ExclusiveChannelsTable({
   const [selectedGroupFilter, setSelectedGroupFilter] = useState<string>('all')
   const [exclusiveTypeFilter, setExclusiveTypeFilter] = useState<'all' | 'exclusive' | 'public'>('all')
   const [statusFilter, setStatusFilter] = useState<'all' | '1' | '0'>('all')
+  const [onlyWithIncome, setOnlyWithIncome] = useState<boolean>(false)
+  const [sortBy, setSortBy] = useState<'default' | 'income_desc' | 'id_desc'>('income_desc')
 
   // 分页状态
   const [pageSize, setPageSize] = useState<number>(20)
@@ -103,9 +118,9 @@ export function ExclusiveChannelsTable({
     },
   })
 
-  // 过滤列表
+  // 过滤列表与排序
   const filteredChannels = useMemo(() => {
-    return channels.filter((c) => {
+    const list = channels.filter((c) => {
       // 搜索关键词
       if (searchKeyword.trim()) {
         const kw = searchKeyword.trim().toLowerCase()
@@ -133,9 +148,43 @@ export function ExclusiveChannelsTable({
       if (statusFilter === '1' && c.status !== 1) return false
       if (statusFilter === '0' && c.status === 1) return false
 
+      // 仅展示有今日收入
+      if (onlyWithIncome) {
+        const inc = incomeMap ? (incomeMap[c.id]?.today_income || 0) : 0
+        if (inc <= 0) return false
+      }
+
       return true
     })
-  }, [channels, searchKeyword, exclusiveTypeFilter, selectedGroupFilter, statusFilter, userMap])
+
+    // 排序
+    list.sort((a, b) => {
+      if (sortBy === 'income_desc') {
+        const incA = incomeMap ? (incomeMap[a.id]?.today_income || 0) : 0
+        const incB = incomeMap ? (incomeMap[b.id]?.today_income || 0) : 0
+        if (incB !== incA) {
+          return incB - incA
+        }
+        return b.id - a.id
+      }
+      if (sortBy === 'id_desc') {
+        return b.id - a.id
+      }
+      return a.id - b.id
+    })
+
+    return list
+  }, [
+    channels,
+    searchKeyword,
+    exclusiveTypeFilter,
+    selectedGroupFilter,
+    statusFilter,
+    onlyWithIncome,
+    sortBy,
+    incomeMap,
+    userMap,
+  ])
 
   // 分页计算
   const totalItems = filteredChannels.length
@@ -247,13 +296,54 @@ export function ExclusiveChannelsTable({
               </SelectItem>
             </SelectContent>
           </Select>
+
+          {/* 排序选择 */}
+          <Select
+            value={sortBy}
+            onValueChange={(v) => {
+              if (v) {
+                setSortBy(v as 'default' | 'income_desc' | 'id_desc')
+                setCurrentPage(1)
+              }
+            }}
+          >
+            <SelectTrigger className='h-8 w-36 text-xs'>
+              <ArrowUpDown className='size-3 mr-1 text-muted-foreground' />
+              <SelectValue placeholder={t('Sort by', '排序方式')} />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value='income_desc' className='text-xs font-medium text-emerald-600 dark:text-emerald-400'>
+                {t('Today Revenue (High to Low)', '今日收入从高到低')}
+              </SelectItem>
+              <SelectItem value='id_desc' className='text-xs'>
+                {t('Channel ID (Newest)', '渠道 ID 倒序')}
+              </SelectItem>
+              <SelectItem value='default' className='text-xs'>
+                {t('Channel ID (Ascending)', '渠道 ID 正序')}
+              </SelectItem>
+            </SelectContent>
+          </Select>
+
+          {/* 仅看今日有收入快捷筛选 */}
+          <Button
+            variant={onlyWithIncome ? 'default' : 'outline'}
+            size='sm'
+            onClick={() => {
+              setOnlyWithIncome(!onlyWithIncome)
+              setCurrentPage(1)
+            }}
+            className='h-8 text-xs'
+          >
+            <DollarSign className='size-3 mr-1' />
+            {onlyWithIncome ? t('Showing with Revenue', '已筛选有收入') : t('Only with Revenue', '仅看有收入')}
+          </Button>
         </div>
 
         <div className='flex items-center gap-2 text-xs text-muted-foreground'>
           <span>
             {t('Found', '共筛选出')} <strong className='text-foreground'>{totalItems}</strong> {t('channels', '个渠道')}
           </span>
-          {(searchKeyword || selectedGroupFilter !== 'all' || exclusiveTypeFilter !== 'all' || statusFilter !== 'all') && (
+          {(searchKeyword || selectedGroupFilter !== 'all' || exclusiveTypeFilter !== 'all' || statusFilter !== 'all' || onlyWithIncome || sortBy !== 'income_desc') && (
             <Button
               variant='ghost'
               size='sm'
@@ -263,6 +353,8 @@ export function ExclusiveChannelsTable({
                 setSelectedGroupFilter('all')
                 setExclusiveTypeFilter('all')
                 setStatusFilter('all')
+                setOnlyWithIncome(false)
+                setSortBy('income_desc')
                 setCurrentPage(1)
               }}
             >
@@ -278,17 +370,23 @@ export function ExclusiveChannelsTable({
           <TableHeader>
             <TableRow className='bg-muted/40 text-xs hover:bg-muted/40'>
               <TableHead className='w-16 font-semibold'>ID</TableHead>
-              <TableHead className='min-w-[200px] font-semibold'>{t('Channel Name', '渠道名称')}</TableHead>
+              <TableHead className='min-w-[180px] font-semibold'>{t('Channel Name', '渠道名称')}</TableHead>
+              <TableHead className='min-w-[130px] font-semibold'>
+                <div className='flex items-center gap-1 text-emerald-700 dark:text-emerald-400'>
+                  <DollarSign className='size-3.5' />
+                  <span>{t('Today Revenue', '今日收入')}</span>
+                </div>
+              </TableHead>
               <TableHead className='w-28 font-semibold'>{t('Status', '状态')}</TableHead>
-              <TableHead className='min-w-[180px] font-semibold'>{t('Applied Groups', '在哪些分组中使用')}</TableHead>
-              <TableHead className='min-w-[240px] font-semibold'>{t('Dedicated Users', '绑定的专属客户')}</TableHead>
-              <TableHead className='w-44 text-right font-semibold'>{t('Actions', '快捷操作')}</TableHead>
+              <TableHead className='min-w-[160px] font-semibold'>{t('Applied Groups', '在哪些分组中使用')}</TableHead>
+              <TableHead className='min-w-[200px] font-semibold'>{t('Dedicated Users', '绑定的专属客户')}</TableHead>
+              <TableHead className='w-40 text-right font-semibold'>{t('Actions', '快捷操作')}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {paginatedChannels.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={6} className='h-32 text-center text-xs text-muted-foreground'>
+                <TableCell colSpan={7} className='h-32 text-center text-xs text-muted-foreground'>
                   <div className='flex flex-col items-center justify-center gap-1.5'>
                     <Users className='size-8 opacity-25' />
                     <span>{t('No channels found matching the criteria', '未找到符合条件的渠道')}</span>
@@ -342,6 +440,33 @@ export function ExclusiveChannelsTable({
                           )}
                         </div>
                       </div>
+                    </TableCell>
+
+                    {/* 今日收入 */}
+                    <TableCell>
+                      {(() => {
+                        const item = incomeMap ? incomeMap[c.id] : null
+                        const income = item ? item.today_income : 0
+                        const quota = item ? item.today_quota : 0
+                        if (income > 0) {
+                          return (
+                            <div className='flex flex-col gap-0.5'>
+                              <div className='flex items-baseline gap-1'>
+                                <span className='font-mono text-xs font-bold text-emerald-600 dark:text-emerald-400'>
+                                  ${income.toFixed(2)}
+                                </span>
+                                <span className='text-[10px] text-muted-foreground font-mono'>
+                                  ≈¥{(income * 7.3).toFixed(2)}
+                                </span>
+                              </div>
+                              <span className='text-[10px] text-muted-foreground font-mono'>
+                                {formatQuota(quota)} quota
+                              </span>
+                            </div>
+                          )
+                        }
+                        return <span className='text-xs text-muted-foreground/60 font-mono'>$0.00</span>
+                      })()}
                     </TableCell>
 
                     {/* 状态开关 */}

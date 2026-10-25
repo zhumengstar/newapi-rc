@@ -49,6 +49,22 @@ export interface UpstreamSourceDTO {
   cost_tier: number
   models: string[]
   model_prices: Record<string, number>
+  today_quota?: number
+  today_income?: number
+}
+
+export interface ChannelIncomeItem {
+  channel_id: number
+  today_quota: number
+  today_income: number
+}
+
+export interface ChannelTodayIncomeResponse {
+  incomes: Record<number, ChannelIncomeItem>
+  total_quota: number
+  total_income: number
+  next_update_at: number
+  interval_minutes: number
 }
 
 export interface UpdateUpstreamSourceRequest {

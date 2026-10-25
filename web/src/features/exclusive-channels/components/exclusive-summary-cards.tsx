@@ -16,17 +16,44 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { CheckCircle2, AlertTriangle, Users, Layers, ShieldCheck, Radio } from 'lucide-react'
+import {
+  CheckCircle2,
+  AlertTriangle,
+  Users,
+  Layers,
+  ShieldCheck,
+  Radio,
+  BadgeDollarSign,
+  RefreshCw,
+  Clock,
+} from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
+import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
-import type { EnrichedChannel } from '../types'
+import type { ChannelTodayIncomeResponse, EnrichedChannel } from '../types'
 
 interface ExclusiveSummaryCardsProps {
   channels: EnrichedChannel[]
+  todayIncomeData?: ChannelTodayIncomeResponse | null
+  isRefreshingIncome?: boolean
+  onRefreshIncome?: () => void
 }
 
-export function ExclusiveSummaryCards({ channels }: ExclusiveSummaryCardsProps) {
+function formatQuota(quota: number) {
+  if (!quota || quota <= 0) return '0'
+  if (quota >= 1000000000) return `${(quota / 1000000000).toFixed(2)}B`
+  if (quota >= 1000000) return `${(quota / 1000000).toFixed(2)}M`
+  if (quota >= 1000) return `${(quota / 1000).toFixed(1)}k`
+  return `${quota}`
+}
+
+export function ExclusiveSummaryCards({
+  channels,
+  todayIncomeData,
+  isRefreshingIncome = false,
+  onRefreshIncome,
+}: ExclusiveSummaryCardsProps) {
   const { t } = useTranslation()
 
   const totalChannels = channels.length
@@ -55,8 +82,55 @@ export function ExclusiveSummaryCards({ channels }: ExclusiveSummaryCardsProps) 
   const enabledExclusive = exclusiveChannels.filter((c) => c.status === 1).length
   const disabledExclusive = exclusiveCount - enabledExclusive
 
+  const totalIncome = todayIncomeData?.total_income || 0
+  const totalQuota = todayIncomeData?.total_quota || 0
+
   return (
-    <div className='grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4'>
+    <div className='grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5'>
+      {/* 今日全量总收入卡片 */}
+      <Card size='sm' className='relative overflow-hidden border shadow-xs bg-gradient-to-br from-emerald-500/5 via-background to-background border-emerald-500/20'>
+        <CardContent className='flex items-center justify-between p-4'>
+          <div className='space-y-1 min-w-0'>
+            <div className='flex items-center gap-1.5'>
+              <p className='text-xs font-semibold text-emerald-800 dark:text-emerald-300'>
+                {t('Today Revenue', '今日渠道总收入')}
+              </p>
+              {onRefreshIncome && (
+                <Button
+                  variant='ghost'
+                  size='icon'
+                  onClick={onRefreshIncome}
+                  disabled={isRefreshingIncome}
+                  className='size-5 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/10'
+                  title={t('Refresh today revenue', '强制刷新今日收入缓存')}
+                >
+                  <RefreshCw className={`size-3 ${isRefreshingIncome ? 'animate-spin' : ''}`} />
+                </Button>
+              )}
+            </div>
+            <div className='flex items-baseline gap-1.5'>
+              <span className='text-2xl font-black tracking-tight text-emerald-600 dark:text-emerald-400'>
+                ${totalIncome.toFixed(2)}
+              </span>
+              <span className='text-[11px] font-medium text-emerald-700/80 dark:text-emerald-400/80'>
+                ≈ ¥{(totalIncome * 7.3).toFixed(2)}
+              </span>
+            </div>
+            <div className='flex items-center gap-1.5 text-[10px] text-muted-foreground'>
+              <span>额度 {formatQuota(totalQuota)}</span>
+              <span>·</span>
+              <span className='inline-flex items-center gap-0.5 text-muted-foreground' title={t('Updated every 30 minutes', '数据每30分钟自动统计更新一次')}>
+                <Clock className='size-2.5' />
+                30m刷新
+              </span>
+            </div>
+          </div>
+          <div className='flex size-10 shrink-0 items-center justify-center rounded-lg bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 shadow-2xs'>
+            <BadgeDollarSign className='size-5' />
+          </div>
+        </CardContent>
+      </Card>
+
       <Card size='sm' className='relative overflow-hidden border shadow-xs'>
         <CardContent className='flex items-center justify-between p-4'>
           <div className='space-y-1'>
