@@ -71,7 +71,10 @@ func Distribute() func(c *gin.Context) {
 				}
 				return
 			}
-			if channel.Status != common.ChannelStatusEnabled {
+			userId := c.GetInt("id")
+			usingGroup := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
+			isDesignatedUser := userId > 0 && model.IsUserRestrictedInGroup(usingGroup, userId) && model.IsUserAllowedChannelInGroup(usingGroup, userId, channel.Id)
+			if channel.Status != common.ChannelStatusEnabled && !isDesignatedUser {
 				if pin.Source == taskdto.PinSourceOriginTask {
 					abortWithOpenAiMessage(c, http.StatusBadRequest, "origin_task_channel_disabled", types.ErrorCode("origin_task_channel_disabled"))
 				} else {
@@ -137,7 +140,9 @@ func Distribute() func(c *gin.Context) {
 					affinityUsable := false
 					preferred, err := model.CacheGetChannel(preferredChannelID)
 					affinitySatisfied := false
-					if err == nil && preferred != nil && preferred.Status == common.ChannelStatusEnabled {
+					userId := c.GetInt("id")
+					isDesignatedUser := userId > 0 && model.IsUserRestrictedInGroup(usingGroup, userId) && model.IsUserAllowedChannelInGroup(usingGroup, userId, preferredChannelID)
+					if err == nil && preferred != nil && (preferred.Status == common.ChannelStatusEnabled || isDesignatedUser) {
 						affinitySatisfied, _ = model.ChannelSatisfiesFilters(preferred, modelRequest.Model, constraints.Filters)
 					}
 					if affinitySatisfied {
@@ -145,7 +150,7 @@ func Distribute() func(c *gin.Context) {
 							userGroup := common.GetContextKeyString(c, constant.ContextKeyUserGroup)
 							autoGroups := service.GetRequestAutoGroups(c, userGroup)
 							for _, g := range autoGroups {
-								if model.IsChannelEnabledForGroupModel(g, modelRequest.Model, preferred.Id) {
+								if model.IsChannelEnabledForUserGroupModel(g, modelRequest.Model, preferred.Id, userId) {
 									selectGroup = g
 									common.SetContextKey(c, constant.ContextKeyAutoGroup, g)
 									channel = preferred
@@ -154,7 +159,7 @@ func Distribute() func(c *gin.Context) {
 									break
 								}
 							}
-						} else if model.IsChannelEnabledForGroupModel(usingGroup, modelRequest.Model, preferred.Id) {
+						} else if model.IsChannelEnabledForUserGroupModel(usingGroup, modelRequest.Model, preferred.Id, userId) {
 							channel = preferred
 							selectGroup = usingGroup
 							affinityUsable = true
@@ -196,6 +201,14 @@ func Distribute() func(c *gin.Context) {
 			}
 		}
 		if channel != nil {
+			userId := c.GetInt("id")
+			usingGroup := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
+			if userId > 0 && model.IsUserRestrictedInGroup(usingGroup, userId) {
+				if !model.IsUserAllowedChannelInGroup(usingGroup, userId, channel.Id) {
+					abortWithOpenAiMessage(c, http.StatusServiceUnavailable, noAvailableChannelMessage(c, usingGroup, modelRequest.Model), types.ErrorCodeModelNotFound)
+					return
+				}
+			}
 			if ok, kind := model.ChannelSatisfiesFilters(channel, modelRequest.Model, constraints.Filters); !ok {
 				if kind == taskdto.FilterTaskPluginIdentity {
 					logTaskPluginChannelDecision(c, channel, modelRequest.Model, "channel_rejected", "identity_mismatch")

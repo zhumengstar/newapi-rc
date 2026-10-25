@@ -8,6 +8,10 @@ import (
 )
 
 func IsChannelEnabledForGroupModel(group string, modelName string, channelID int) bool {
+	return IsChannelEnabledForUserGroupModel(group, modelName, channelID, 0)
+}
+
+func IsChannelEnabledForUserGroupModel(group string, modelName string, channelID int, userId int) bool {
 	if group == "" || modelName == "" || channelID <= 0 {
 		return false
 	}
@@ -17,6 +21,21 @@ func IsChannelEnabledForGroupModel(group string, modelName string, channelID int
 
 	channelSyncLock.RLock()
 	defer channelSyncLock.RUnlock()
+
+	// If userId is restricted in this group, check the user's dedicated pool
+	if userId > 0 && group2userRestricted != nil && group2userRestricted[group] != nil && group2userRestricted[group][userId] {
+		if group2userModel2channels == nil || group2userModel2channels[group] == nil || group2userModel2channels[group][userId] == nil {
+			return false
+		}
+		if isChannelIDInList(group2userModel2channels[group][userId][modelName], channelID) {
+			return true
+		}
+		normalized := ratio_setting.RoutingMatchModelName(modelName)
+		if normalized != "" && normalized != modelName {
+			return isChannelIDInList(group2userModel2channels[group][userId][normalized], channelID)
+		}
+		return false
+	}
 
 	if group2model2channels == nil {
 		return false

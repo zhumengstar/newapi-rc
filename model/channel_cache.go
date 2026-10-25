@@ -25,6 +25,12 @@ var group2userRestricted map[string]map[int]bool
 // group2userAllowedChannels tracks which channels a restricted user is allowed to access in group.
 // group -> userId -> map[channelId]bool
 var group2userAllowedChannels map[string]map[int]map[int]bool
+// group2userModel2channels tracks dedicated model channels for restricted users in group (regardless of channel status).
+// group -> userId -> model -> sorted []channelId
+var group2userModel2channels map[string]map[int]map[string][]int
+// groupRestrictedChannels tracks all channel IDs in group that have AllowedUserIds configured.
+// group -> map[channelId]bool
+var groupRestrictedChannels map[string]map[int]bool
 // channel2advancedCustomConfig caches parsed Advanced Custom (type 58) configs so
 // path-aware selection avoids re-parsing JSON per request. Refreshed on full sync.
 var channel2advancedCustomConfig map[int]*kitdto.AdvancedCustomConfig
@@ -57,15 +63,16 @@ func InitChannelCache() {
 	newGroup2model2channels := make(map[string]map[string][]int)
 	newGroup2userRestricted := make(map[string]map[int]bool)
 	newGroup2userAllowedChannels := make(map[string]map[int]map[int]bool)
+	newGroup2userModel2channels := make(map[string]map[int]map[string][]int)
+	newGroupRestrictedChannels := make(map[string]map[int]bool)
 	for group := range groups {
 		newGroup2model2channels[group] = make(map[string][]int)
 		newGroup2userRestricted[group] = make(map[int]bool)
 		newGroup2userAllowedChannels[group] = make(map[int]map[int]bool)
+		newGroup2userModel2channels[group] = make(map[int]map[string][]int)
+		newGroupRestrictedChannels[group] = make(map[int]bool)
 	}
 	for _, channel := range channels {
-		if channel.Status != common.ChannelStatusEnabled {
-			continue // skip disabled channels
-		}
 		allowedUsers := channel.GetOtherSettings().AllowedUserIds
 		groups := strings.SplitSeq(channel.Group, ",")
 		for group := range groups {
@@ -77,28 +84,46 @@ func InitChannelCache() {
 				if newGroup2userRestricted[group] == nil {
 					newGroup2userRestricted[group] = make(map[int]bool)
 					newGroup2userAllowedChannels[group] = make(map[int]map[int]bool)
+					newGroup2userModel2channels[group] = make(map[int]map[string][]int)
+					newGroupRestrictedChannels[group] = make(map[int]bool)
 				}
+				newGroupRestrictedChannels[group][channel.Id] = true
+				models := channel.GetModels()
 				for _, uid := range allowedUsers {
 					if uid > 0 {
 						newGroup2userRestricted[group][uid] = true
 						if newGroup2userAllowedChannels[group][uid] == nil {
 							newGroup2userAllowedChannels[group][uid] = make(map[int]bool)
+							newGroup2userModel2channels[group][uid] = make(map[string][]int)
 						}
 						newGroup2userAllowedChannels[group][uid][channel.Id] = true
+
+						// 指定后，无论是否禁用，都只能走指定的渠道
+						// 将该专属渠道的模型加入到该受限用户的专属渠道池中
+						for _, model := range models {
+							newGroup2userModel2channels[group][uid][model] = append(newGroup2userModel2channels[group][uid][model], channel.Id)
+						}
 					}
 				}
-			}
-			models := channel.GetModels()
-			for _, model := range models {
-				if _, ok := newGroup2model2channels[group][model]; !ok {
-					newGroup2model2channels[group][model] = make([]int, 0)
+			} else {
+				// 公共渠道：只有启用时才进入公共渠道池，且专属渠道绝对不进入公共池
+				if channel.Status == common.ChannelStatusEnabled {
+					if newGroup2model2channels[group] == nil {
+						newGroup2model2channels[group] = make(map[string][]int)
+					}
+					models := channel.GetModels()
+					for _, model := range models {
+						if _, ok := newGroup2model2channels[group][model]; !ok {
+							newGroup2model2channels[group][model] = make([]int, 0)
+						}
+						newGroup2model2channels[group][model] = append(newGroup2model2channels[group][model], channel.Id)
+					}
 				}
-				newGroup2model2channels[group][model] = append(newGroup2model2channels[group][model], channel.Id)
 			}
 		}
 	}
 
-	// sort by priority
+	// sort public channels by routing priority
 	for group, model2channels := range newGroup2model2channels {
 		for model, channels := range model2channels {
 			sort.Slice(channels, func(i, j int) bool {
@@ -108,10 +133,24 @@ func InitChannelCache() {
 		}
 	}
 
+	// sort restricted user channels by routing priority
+	for group, user2model2channels := range newGroup2userModel2channels {
+		for uid, model2channels := range user2model2channels {
+			for model, channels := range model2channels {
+				sort.Slice(channels, func(i, j int) bool {
+					return newChannelId2channel[channels[i]].GetRoutingPriority() > newChannelId2channel[channels[j]].GetRoutingPriority()
+				})
+				newGroup2userModel2channels[group][uid][model] = channels
+			}
+		}
+	}
+
 	channelSyncLock.Lock()
 	group2model2channels = newGroup2model2channels
 	group2userRestricted = newGroup2userRestricted
 	group2userAllowedChannels = newGroup2userAllowedChannels
+	group2userModel2channels = newGroup2userModel2channels
+	groupRestrictedChannels = newGroupRestrictedChannels
 	//channelsIDM = newChannelId2channel
 	for i, channel := range newChannelId2channel {
 		if channel.ChannelInfo.IsMultiKey {
@@ -181,13 +220,39 @@ func GetUserAllowedChannelsInGroup(group string, userId int) map[int]bool {
 }
 
 
+// IsUserAllowedChannelInGroup returns true if channelId is in userId's allowed channel set in group.
+func IsUserAllowedChannelInGroup(group string, userId int, channelId int) bool {
+	if userId <= 0 || channelId <= 0 {
+		return false
+	}
+	channelSyncLock.RLock()
+	defer channelSyncLock.RUnlock()
+	if group2userAllowedChannels == nil || group2userAllowedChannels[group] == nil || group2userAllowedChannels[group][userId] == nil {
+		return false
+	}
+	return group2userAllowedChannels[group][userId][channelId]
+}
+
+// IsChannelRestrictedInGroup returns true if the channel has AllowedUserIds configured in group.
+func IsChannelRestrictedInGroup(group string, channelId int) bool {
+	if channelId <= 0 {
+		return false
+	}
+	channelSyncLock.RLock()
+	defer channelSyncLock.RUnlock()
+	if groupRestrictedChannels == nil || groupRestrictedChannels[group] == nil {
+		return false
+	}
+	return groupRestrictedChannels[group][channelId]
+}
+
 func GetRandomSatisfiedChannel(
 	group string,
 	model string,
 	retry int,
 	filters []dto.ChannelFilter,
 ) (*Channel, error) {
-	return GetRandomSatisfiedChannelExcluding(group, model, retry, filters, nil)
+	return GetRandomSatisfiedChannelForUserExcluding(group, model, 0, retry, filters, nil)
 }
 
 // GetRandomSatisfiedChannelExcluding is the cache-backed counterpart of
@@ -200,6 +265,20 @@ func GetRandomSatisfiedChannelExcluding(
 	filters []dto.ChannelFilter,
 	excludedChannelIds map[int]bool,
 ) (*Channel, error) {
+	return GetRandomSatisfiedChannelForUserExcluding(group, model, 0, retry, filters, excludedChannelIds)
+}
+
+// GetRandomSatisfiedChannelForUserExcluding selects a channel considering user restriction:
+// - Restricted users ONLY pick from their dedicated channel pool (even if disabled).
+// - Unrestricted users ONLY pick from the public enabled pool (never touching dedicated channels).
+func GetRandomSatisfiedChannelForUserExcluding(
+	group string,
+	model string,
+	userId int,
+	retry int,
+	filters []dto.ChannelFilter,
+	excludedChannelIds map[int]bool,
+) (*Channel, error) {
 	// if memory cache is disabled, get channel directly from database
 	if !common.MemoryCacheEnabled {
 		return GetChannelExcluding(group, model, retry, filters, excludedChannelIds)
@@ -208,16 +287,41 @@ func GetRandomSatisfiedChannelExcluding(
 	channelSyncLock.RLock()
 	defer channelSyncLock.RUnlock()
 
-	// First, try to find channels with the exact model name.
-	channels, _ := filterCandidateIDs(group2model2channels[group][model], model, filters)
-	channels = filterChannelsByExcludedChannelIds(channels, excludedChannelIds)
+	var candidatePool []int
+	isRestricted := userId > 0 && group2userRestricted != nil && group2userRestricted[group] != nil && group2userRestricted[group][userId]
 
-	// If no channels found, try to find channels with the normalized model name.
-	if len(channels) == 0 {
-		normalizedModel := ratio_setting.RoutingMatchModelName(model)
-		channels, _ = filterCandidateIDs(group2model2channels[group][normalizedModel], model, filters)
-		channels = filterChannelsByExcludedChannelIds(channels, excludedChannelIds)
+	if isRestricted {
+		if group2userModel2channels != nil && group2userModel2channels[group] != nil && group2userModel2channels[group][userId] != nil {
+			candidatePool = group2userModel2channels[group][userId][model]
+			if len(candidatePool) == 0 {
+				normalizedModel := ratio_setting.RoutingMatchModelName(model)
+				if normalizedModel != "" && normalizedModel != model {
+					candidatePool = group2userModel2channels[group][userId][normalizedModel]
+				}
+			}
+		}
+		// 严禁逃逸：受限用户若专属池无该模型，绝对不走公共渠道，直接返回 nil
+		if len(candidatePool) == 0 {
+			return nil, nil
+		}
+	} else {
+		if group2model2channels != nil && group2model2channels[group] != nil {
+			candidatePool = group2model2channels[group][model]
+			if len(candidatePool) == 0 {
+				normalizedModel := ratio_setting.RoutingMatchModelName(model)
+				if normalizedModel != "" && normalizedModel != model {
+					candidatePool = group2model2channels[group][normalizedModel]
+				}
+			}
+		}
+		if len(candidatePool) == 0 {
+			return nil, nil
+		}
 	}
+
+	// First, filter candidates by constraints
+	channels, _ := filterCandidateIDs(candidatePool, model, filters)
+	channels = filterChannelsByExcludedChannelIds(channels, excludedChannelIds)
 
 	if len(channels) == 0 {
 		return nil, nil

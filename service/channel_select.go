@@ -73,7 +73,9 @@ func getRandomSatisfiedChannel(group string, param *RetryParam, priorityRetry in
 		priorityRetry = 0
 	}
 	excludedChannels := param.TriedChannelIds
+	var userId int
 	if param.Ctx != nil {
+		userId = param.Ctx.GetInt("id")
 		if userSetting, ok := common.GetContextKeyType[kitdto.UserSetting](param.Ctx, constant.ContextKeyUserSetting); ok {
 			if allowedIds, exists := userSetting.UserGroupChannels[group]; exists && len(allowedIds) > 0 {
 				allowedSet := make(map[int]struct{}, len(allowedIds))
@@ -98,7 +100,6 @@ func getRandomSatisfiedChannel(group string, param *RetryParam, priorityRetry in
 			}
 		}
 
-		userId := param.Ctx.GetInt("id")
 		if userId > 0 && model.IsUserRestrictedInGroup(group, userId) {
 			allowedSet := model.GetUserAllowedChannelsInGroup(group, userId)
 			candidates := model.GetGroupChannelIds(group)
@@ -116,7 +117,7 @@ func getRandomSatisfiedChannel(group string, param *RetryParam, priorityRetry in
 			excludedChannels = mergedExcluded
 		}
 	}
-	return model.GetRandomSatisfiedChannelExcluding(group, param.ModelName, priorityRetry, filters, excludedChannels)
+	return model.GetRandomSatisfiedChannelForUserExcluding(group, param.ModelName, userId, priorityRetry, filters, excludedChannels)
 }
 
 // CacheGetRandomSatisfiedChannel tries to get a random channel that satisfies the requirements.
