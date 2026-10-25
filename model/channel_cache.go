@@ -80,6 +80,21 @@ func InitChannelCache() {
 			if group == "" {
 				continue
 			}
+			// 1. 公共渠道池：启用状态的渠道均进入公共池供普通客户正常使用
+			if channel.Status == common.ChannelStatusEnabled {
+				if newGroup2model2channels[group] == nil {
+					newGroup2model2channels[group] = make(map[string][]int)
+				}
+				models := channel.GetModels()
+				for _, model := range models {
+					if _, ok := newGroup2model2channels[group][model]; !ok {
+						newGroup2model2channels[group][model] = make([]int, 0)
+					}
+					newGroup2model2channels[group][model] = append(newGroup2model2channels[group][model], channel.Id)
+				}
+			}
+
+			// 2. 指定受限用户池：配置了专属指定用户的渠道，无论是否启用，均建立受限映射与专属池
 			if len(allowedUsers) > 0 {
 				if newGroup2userRestricted[group] == nil {
 					newGroup2userRestricted[group] = make(map[int]bool)
@@ -103,20 +118,6 @@ func InitChannelCache() {
 						for _, model := range models {
 							newGroup2userModel2channels[group][uid][model] = append(newGroup2userModel2channels[group][uid][model], channel.Id)
 						}
-					}
-				}
-			} else {
-				// 公共渠道：只有启用时才进入公共渠道池，且专属渠道绝对不进入公共池
-				if channel.Status == common.ChannelStatusEnabled {
-					if newGroup2model2channels[group] == nil {
-						newGroup2model2channels[group] = make(map[string][]int)
-					}
-					models := channel.GetModels()
-					for _, model := range models {
-						if _, ok := newGroup2model2channels[group][model]; !ok {
-							newGroup2model2channels[group][model] = make([]int, 0)
-						}
-						newGroup2model2channels[group][model] = append(newGroup2model2channels[group][model], channel.Id)
 					}
 				}
 			}

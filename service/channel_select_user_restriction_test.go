@@ -150,7 +150,7 @@ func TestCacheGetRandomSatisfiedChannelRestrictedDisabledChannelRouting(t *testi
 	assert.NoError(t, err1Retry)
 	assert.Nil(t, selectedCh1Retry, "排除专属渠道后绝不能逃逸到公共渠道 365")
 
-	// 3. 普通用户 999 发起请求：绝不能路由到渠道 380，只能路由到公共渠道 365
+	// 3. 普通用户 999 发起请求：绝不能路由到已禁用的专属渠道 380，只能路由到公共渠道 365
 	w2 := httptest.NewRecorder()
 	ctx2, _ := gin.CreateTestContext(w2)
 	ctx2.Set("id", 999)
@@ -165,5 +165,58 @@ func TestCacheGetRandomSatisfiedChannelRestrictedDisabledChannelRouting(t *testi
 	selectedCh2, _, err2 := CacheGetRandomSatisfiedChannel(param2)
 	require.NoError(t, err2)
 	require.NotNil(t, selectedCh2)
-	assert.Equal(t, 365, selectedCh2.Id, "普通用户绝对只能走公共渠道 365")
+	assert.Equal(t, 365, selectedCh2.Id, "普通用户走公共渠道 365")
+
+	// 4. 核心安全验证：启用的渠道即使配置了指定专属用户，普通用户依然可以正常访问（确保普通大客户不发生断流）
+	priority20 := int64(20)
+	ch428 := &model.Channel{
+		Id:       428,
+		Type:     constant.ChannelTypeOpenAI,
+		Key:      "sk-428",
+		Status:   common.ChannelStatusEnabled, // 启用状态
+		Name:     "渠道428(启用的专属渠道)",
+		Group:    "cc反重力按量",
+		Models:   "claude-opus-4-6",
+		Priority: &priority20,
+		Weight:   &weight1,
+	}
+	ch428.SetOtherSettings(kitdto.ChannelOtherSettings{
+		AllowedUserIds: []int{382}, // 指定了客户 382
+	})
+	require.NoError(t, db.Create(ch428).Error)
+	model.InitChannelCache()
+
+	// 普通客户 435 请求该分组该模型，能够正常命中启用的渠道 428，绝不会报错无可用渠道
+	w3 := httptest.NewRecorder()
+	ctx3, _ := gin.CreateTestContext(w3)
+	ctx3.Set("id", 435)
+	retry3 := 0
+	param3 := &RetryParam{
+		Ctx:         ctx3,
+		TokenGroup:  "cc反重力按量",
+		ModelName:   "claude-opus-4-6",
+		RequestPath: "/v1/messages",
+		Retry:       &retry3,
+	}
+	selectedCh3, _, err3 := CacheGetRandomSatisfiedChannel(param3)
+	require.NoError(t, err3)
+	require.NotNil(t, selectedCh3)
+	assert.Equal(t, 428, selectedCh3.Id, "普通客户在无其他公共渠道时依然能正常访问启用的渠道，绝不断流")
+
+	// 受限客户 382 请求时，也正常且只能走渠道 428
+	w4 := httptest.NewRecorder()
+	ctx4, _ := gin.CreateTestContext(w4)
+	ctx4.Set("id", 382)
+	retry4 := 0
+	param4 := &RetryParam{
+		Ctx:         ctx4,
+		TokenGroup:  "cc反重力按量",
+		ModelName:   "claude-opus-4-6",
+		RequestPath: "/v1/messages",
+		Retry:       &retry4,
+	}
+	selectedCh4, _, err4 := CacheGetRandomSatisfiedChannel(param4)
+	require.NoError(t, err4)
+	require.NotNil(t, selectedCh4)
+	assert.Equal(t, 428, selectedCh4.Id, "专属客户只能走其指定的渠道 428")
 }
