@@ -409,8 +409,6 @@ export function UpstreamSourcesView({
                         </div>
                         <div className='flex items-center gap-1.5 text-[11px] text-muted-foreground'>
                           <span>{source.models.length} {t('models supported', '个模型')}</span>
-                          <span>·</span>
-                          <span>{source.enabled_channel_count}/{source.channel_count} {t('channels online', '在线')}</span>
                           {source.cost_tier > 0 && (
                             <Badge variant='outline' className='text-[9px] px-1 py-0 h-3.5'>
                               Tier {source.cost_tier}

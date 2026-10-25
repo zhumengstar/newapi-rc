@@ -18,19 +18,14 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import {
   CheckCircle2,
-  AlertTriangle,
-  Users,
   Layers,
-  ShieldCheck,
-  Radio,
   BadgeDollarSign,
   RefreshCw,
-  Clock,
+  Globe,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 import { Button } from '@/components/ui/button'
-import { Card, CardContent } from '@/components/ui/card'
 import type { ChannelTodayIncomeResponse, EnrichedChannel } from '../types'
 
 interface ExclusiveSummaryCardsProps {
@@ -74,151 +69,77 @@ export function ExclusiveSummaryCards({
   }
   const uniqueUsersCount = exclusiveUserSet.size
 
-  // 专属渠道健康度
-  const enabledExclusive = exclusiveChannels.filter((c) => c.status === 1).length
-  const disabledExclusive = exclusiveCount - enabledExclusive
-
   const totalIncome = todayIncomeData?.total_income || 0
   const totalQuota = todayIncomeData?.total_quota || 0
 
   return (
-    <div className='grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-5'>
-      {/* 1. 今日全量总收入卡片 (小巧紧凑) */}
-      <Card size='sm' className='relative overflow-hidden border shadow-2xs bg-gradient-to-br from-emerald-500/5 via-background to-background border-emerald-500/20 py-2'>
-        <CardContent className='flex items-center justify-between p-2.5'>
-          <div className='space-y-0.5 min-w-0'>
-            <div className='flex items-center gap-1'>
-              <p className='text-[11px] font-semibold text-emerald-800 dark:text-emerald-300'>
-                {t('Today Revenue', '今日总收入')}
-              </p>
-              {onRefreshIncome && (
-                <Button
-                  variant='ghost'
-                  size='icon'
-                  onClick={onRefreshIncome}
-                  disabled={isRefreshingIncome}
-                  className='size-4 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/10'
-                  title={t('Refresh today revenue', '强制刷新今日收入缓存')}
-                >
-                  <RefreshCw className={`size-2.5 ${isRefreshingIncome ? 'animate-spin' : ''}`} />
-                </Button>
-              )}
-            </div>
-            <div className='flex items-baseline gap-1'>
-              <span className='text-lg font-black tracking-tight text-emerald-600 dark:text-emerald-400'>
-                ${totalIncome.toFixed(2)}
-              </span>
-              <span className='text-[10px] font-medium text-emerald-700/80 dark:text-emerald-400/80'>
-                ≈¥{(totalIncome * 7.3).toFixed(2)}
-              </span>
-            </div>
-            <p className='text-[10px] text-muted-foreground truncate'>
-              {formatQuota(totalQuota)} quota · 30m刷新
-            </p>
-          </div>
-          <div className='flex size-7 shrink-0 items-center justify-center rounded-md bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'>
+    <div className='flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-card/60 px-3.5 py-2 text-xs shadow-2xs'>
+      <div className='flex flex-wrap items-center gap-4 sm:gap-6'>
+        {/* 1. 今日全量总收入 */}
+        <div className='flex items-center gap-2'>
+          <div className='flex size-6 shrink-0 items-center justify-center rounded-md bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'>
             <BadgeDollarSign className='size-3.5' />
           </div>
-        </CardContent>
-      </Card>
+          <div className='flex items-baseline gap-1.5'>
+            <span className='text-xs text-muted-foreground font-medium'>{t('Today Revenue', '今日总收入')}:</span>
+            <span className='font-mono font-black text-emerald-600 dark:text-emerald-400 text-sm'>
+              ${totalIncome.toFixed(2)}
+            </span>
+            <span className='text-[11px] text-muted-foreground font-mono'>
+              (≈¥{(totalIncome * 7.3).toFixed(2)} · {formatQuota(totalQuota)})
+            </span>
+            {onRefreshIncome && (
+              <Button
+                variant='ghost'
+                size='icon'
+                onClick={onRefreshIncome}
+                disabled={isRefreshingIncome}
+                className='size-4 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/10'
+                title={t('Refresh today revenue', '强制刷新今日收入缓存')}
+              >
+                <RefreshCw className={`size-2.5 ${isRefreshingIncome ? 'animate-spin' : ''}`} />
+              </Button>
+            )}
+          </div>
+        </div>
 
-      {/* 2. 专属通道与客户 */}
-      <Card size='sm' className='relative overflow-hidden border shadow-2xs py-2'>
-        <CardContent className='flex items-center justify-between p-2.5'>
-          <div className='space-y-0.5 min-w-0'>
-            <p className='text-[11px] font-medium text-muted-foreground'>
-              {t('Exclusive Channels', '专属渠道 / 客户')}
-            </p>
-            <div className='flex items-baseline gap-1'>
-              <span className='text-lg font-bold tracking-tight'>{exclusiveCount}</span>
-              <span className='text-[10px] text-muted-foreground'>
-                / {totalChannels} 渠道
-              </span>
-            </div>
-            <p className='text-[10px] text-muted-foreground truncate'>
-              服务 {uniqueUsersCount} 位专享客户
-            </p>
-          </div>
-          <div className='flex size-7 shrink-0 items-center justify-center rounded-md bg-blue-500/10 text-blue-600 dark:text-blue-400'>
-            <ShieldCheck className='size-3.5' />
-          </div>
-        </CardContent>
-      </Card>
+        <div className='h-3.5 w-px bg-border hidden sm:block' />
 
-      {/* 3. 专属通道健康度 */}
-      <Card size='sm' className='relative overflow-hidden border shadow-2xs py-2'>
-        <CardContent className='flex items-center justify-between p-2.5'>
-          <div className='space-y-0.5 min-w-0'>
-            <p className='text-[11px] font-medium text-muted-foreground'>
-              {t('Exclusive Health', '专属通道健康度')}
-            </p>
-            <div className='flex items-baseline gap-1.5'>
-              <span className='text-lg font-bold tracking-tight text-emerald-600 dark:text-emerald-400'>
-                {enabledExclusive} 在线
-              </span>
-              {disabledExclusive > 0 && (
-                <span className='text-[10px] font-semibold text-amber-600 dark:text-amber-400'>
-                  {disabledExclusive} 停用
-                </span>
-              )}
-            </div>
-            <p className='text-[10px] text-muted-foreground truncate'>
-              {disabledExclusive > 0 ? '注意避免客户请求断流' : '专属流量稳定保障'}
-            </p>
+        {/* 2. 供应商来源与微信标记 */}
+        <div className='flex items-center gap-2'>
+          <div className='flex size-6 shrink-0 items-center justify-center rounded-md bg-blue-500/10 text-blue-600 dark:text-blue-400'>
+            <Globe className='size-3.5' />
           </div>
-          <div className='flex size-7 shrink-0 items-center justify-center rounded-md bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'>
-            <Radio className='size-3.5' />
+          <div className='flex items-baseline gap-1.5'>
+            <span className='text-xs text-muted-foreground font-medium'>{t('Upstream Sources', '聚合来源')}:</span>
+            <span className='font-mono font-bold text-foreground'>
+              {typeof totalSourcesCount === 'number' ? totalSourcesCount : '--'}
+            </span>
+            <span className='text-muted-foreground text-[11px]'>个地址</span>
+            <span className='text-[10px] text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/50 px-1 rounded ml-0.5'>
+              {typeof wechatConfiguredCount === 'number' ? wechatConfiguredCount : 0} 微信标记
+            </span>
           </div>
-        </CardContent>
-      </Card>
+        </div>
 
-      {/* 4. 地址来源总数与微信标记 */}
-      <Card size='sm' className='relative overflow-hidden border shadow-2xs py-2'>
-        <CardContent className='flex items-center justify-between p-2.5'>
-          <div className='space-y-0.5 min-w-0'>
-            <p className='text-[11px] font-medium text-muted-foreground'>
-              {t('Unique Upstream Sources', '聚合来源 / 微信')}
-            </p>
-            <div className='flex items-baseline gap-1'>
-              <span className='text-lg font-bold tracking-tight'>
-                {typeof totalSourcesCount === 'number' ? totalSourcesCount : '--'}
-              </span>
-              <span className='text-[10px] text-muted-foreground'>个地址</span>
-            </div>
-            <p className='text-[10px] text-muted-foreground truncate'>
-              已标记 {typeof wechatConfiguredCount === 'number' ? wechatConfiguredCount : 0} 个微信供应商
-            </p>
-          </div>
-          <div className='flex size-7 shrink-0 items-center justify-center rounded-md bg-purple-500/10 text-purple-600 dark:text-purple-400'>
-            <Layers className='size-3.5' />
-          </div>
-        </CardContent>
-      </Card>
+        <div className='h-3.5 w-px bg-border hidden sm:block' />
 
-      {/* 5. 全渠道在线调度 */}
-      <Card size='sm' className='relative overflow-hidden border shadow-2xs py-2'>
-        <CardContent className='flex items-center justify-between p-2.5'>
-          <div className='space-y-0.5 min-w-0'>
-            <p className='text-[11px] font-medium text-muted-foreground'>
-              {t('Aggregated Channels', '下属渠道在线率')}
-            </p>
-            <div className='flex items-baseline gap-1'>
-              <span className='text-lg font-bold tracking-tight text-emerald-600 dark:text-emerald-400'>
-                {enabledChannels}
-              </span>
-              <span className='text-[10px] text-muted-foreground'>
-                / {totalChannels} 在线
-              </span>
-            </div>
-            <p className='text-[10px] text-muted-foreground truncate'>
-              按地址唯一聚合与成本调度
-            </p>
-          </div>
-          <div className='flex size-7 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary'>
+        {/* 3. 全局渠道在线率与专属通道 */}
+        <div className='flex items-center gap-2'>
+          <div className='flex size-6 shrink-0 items-center justify-center rounded-md bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'>
             <CheckCircle2 className='size-3.5' />
           </div>
-        </CardContent>
-      </Card>
+          <div className='flex items-baseline gap-1.5'>
+            <span className='text-xs text-muted-foreground font-medium'>{t('Channels Online', '渠道在线')}:</span>
+            <span className='font-mono font-bold text-emerald-600 dark:text-emerald-400'>
+              {enabledChannels} / {totalChannels}
+            </span>
+            <span className='text-[11px] text-muted-foreground'>
+              ({exclusiveCount} 专属 / {uniqueUsersCount} 客户)
+            </span>
+          </div>
+        </div>
+      </div>
     </div>
   )
 }
