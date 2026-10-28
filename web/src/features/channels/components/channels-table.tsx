@@ -188,7 +188,7 @@ export function ChannelsTable() {
 
   // Table state
   const [sorting, setSorting] = useState<SortingState>([
-    { id: 'type', desc: false },
+    { id: 'priority', desc: true },
   ])
 
   // URL state management
@@ -949,6 +949,7 @@ export function ChannelsTable() {
         searchPlaceholder: t('Filter by name, ID, or key...'),
         searchDebounceMs: 500,
         onReset: () => {
+          setSorting([{ id: 'priority', desc: true }])
           resetModelFilterInput()
           clearStoredChannelFilter(CHANNELS_STATUS_FILTER_STORAGE_KEY)
           clearStoredChannelFilter(CHANNELS_TYPE_FILTER_STORAGE_KEY)
