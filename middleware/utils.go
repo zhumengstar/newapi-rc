@@ -77,10 +77,25 @@ func recordMiddlewareAbortErrorLog(c *gin.Context, statusCode int, message strin
 		return
 	}
 
-	// 401 Unauthorized（鉴权失败、未携带密钥或使用已被删除/无效的 Token）一律不写入数据库 logs 表
-	// 彻底杜绝外部客户端脚本死循环报错或扫描器向 PostgreSQL 灌入数万条垃圾流水
-	if statusCode == http.StatusUnauthorized {
+	// 拦截正常权限控制阻断（401 未认证、403 无权访问/分组禁用/渠道禁用/用户封禁）或预期内无可用渠道拦截
+	// 彻底杜绝外部客户端脚本死循环报错或扫描器向 PostgreSQL logs 表高频写库，杜绝打爆数据库引发 502
+	if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
 		return
+	}
+	if statusCode == http.StatusServiceUnavailable || statusCode == http.StatusBadRequest || statusCode == http.StatusNotFound {
+		lowerMsg := strings.ToLower(message)
+		if strings.Contains(message, "无可用渠道") ||
+			strings.Contains(message, "渠道已禁用") ||
+			strings.Contains(message, "已被弃用") ||
+			strings.Contains(lowerMsg, "no available channel") ||
+			strings.Contains(lowerMsg, "no available gemini account") ||
+			strings.Contains(lowerMsg, "channel disabled") ||
+			strings.Contains(lowerMsg, "origin_task_channel_disabled") ||
+			strings.Contains(lowerMsg, "modelnotfound") ||
+			codeStr == "model_not_found" ||
+			codeStr == "channel_disabled" {
+			return
+		}
 	}
 
 	userId := c.GetInt("id")

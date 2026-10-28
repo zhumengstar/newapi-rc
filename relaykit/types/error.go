@@ -423,8 +423,19 @@ func IsRecordErrorLog(e *NewAPIError) bool {
 	if e == nil {
 		return false
 	}
-	if e.StatusCode == http.StatusUnauthorized {
+	if e.StatusCode == http.StatusUnauthorized || e.StatusCode == http.StatusForbidden {
 		return false
+	}
+	if e.StatusCode == http.StatusServiceUnavailable || e.StatusCode == http.StatusBadRequest {
+		errStr := e.Error()
+		lower := strings.ToLower(errStr)
+		if strings.Contains(errStr, "无可用渠道") ||
+			strings.Contains(lower, "no available channel") ||
+			strings.Contains(lower, "no available gemini account") ||
+			strings.Contains(errStr, "渠道已禁用") ||
+			strings.Contains(lower, "channel disabled") {
+			return false
+		}
 	}
 	if e.recordErrorLog == nil {
 		// default to true if not set

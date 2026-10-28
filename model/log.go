@@ -327,10 +327,48 @@ func RecordTopupLog(userId int, content string, callerIp string, paymentMethod s
 	}
 }
 
+func shouldFilterErrorLog(channelId int, content string) bool {
+	// 1. 渠道本身处于禁用状态：对已禁用渠道发起的调用报错绝不入库
+	if channelId > 0 {
+		channelSyncLock.RLock()
+		if channelsIDM != nil {
+			if ch, ok := channelsIDM[channelId]; ok && ch != nil {
+				if ch.Status != common.ChannelStatusEnabled {
+					channelSyncLock.RUnlock()
+					return true
+				}
+			}
+		}
+		channelSyncLock.RUnlock()
+	}
+	lower := strings.ToLower(content)
+	// 2. 403 权限/分组禁用/渠道禁用/封禁阻断
+	if strings.Contains(lower, "status_code=403") {
+		return true
+	}
+	// 3. 503 / 400 / 404 无可用渠道或账号已耗尽/未就绪/渠道已禁用
+	if strings.Contains(lower, "status_code=503") || strings.Contains(lower, "status_code=400") || strings.Contains(lower, "status_code=404") {
+		if strings.Contains(content, "无可用渠道") ||
+			strings.Contains(lower, "no available channel") ||
+			strings.Contains(lower, "no available gemini account") ||
+			strings.Contains(content, "渠道已禁用") ||
+			strings.Contains(lower, "channel disabled") ||
+			strings.Contains(lower, "origin_task_channel_disabled") ||
+			strings.Contains(content, "已被弃用") ||
+			strings.Contains(lower, "model_not_found") {
+			return true
+		}
+	}
+	return false
+}
+
 func RecordErrorLog(c *gin.Context, userId int, channelId int, modelName string, tokenName string, content string, tokenId int, useTimeSeconds int,
 	isStream bool, group string, other *LogOther) {
-	// 401 鉴权失败或无效 Token 绝不入库，防止死循环垃圾流水打爆数据库 logs 表
-	if (userId <= 0 && tokenId <= 0) || strings.Contains(content, "status_code=401") || strings.Contains(content, "Invalid token") {
+	// 401 鉴权失败、无效 Token、禁用策略或预期内无可用渠道阻断绝不入库，防止死循环垃圾流水打爆数据库 logs 表引发 502
+	if (userId <= 0 && tokenId <= 0) ||
+		strings.Contains(content, "status_code=401") ||
+		strings.Contains(content, "Invalid token") ||
+		shouldFilterErrorLog(channelId, content) {
 		return
 	}
 	logger.LogInfo(c, fmt.Sprintf("record error log: userId=%d, channelId=%d, modelName=%s, tokenName=%s, content=%s", userId, channelId, modelName, tokenName, common.LocalLogPreview(content)))
