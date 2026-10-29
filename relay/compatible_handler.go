@@ -111,7 +111,13 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 	var requestBody io.Reader
 	var convertedRequest any
 
-	if passThroughGlobal || info.ChannelSetting.PassThroughBodyEnabled {
+	// 跨协议异构防护：只有当上游渠道原生支持 OpenAI 兼容格式时，才允许透传客户端原始 OpenAI 请求体。
+	// 若上游渠道是 Gemini (type 24)、Claude (type 14) 等非 OpenAI 原生渠道，必须强制执行 adaptor.ConvertOpenAIRequest 转换，
+	// 避免未经转换的 messages 请求体被直传给原生端点导致上游报 "contents is required" 等协议格式错误。
+	canPassThrough := (passThroughGlobal || info.ChannelSetting.PassThroughBodyEnabled) &&
+		common.IsAPITypeOpenAICompatible(info.ApiType)
+
+	if canPassThrough {
 		storage, err := common.GetBodyStorage(c)
 		if err != nil {
 			return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())

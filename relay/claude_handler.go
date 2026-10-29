@@ -148,7 +148,11 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 	}
 
 	var requestBody io.Reader
-	if model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled {
+	// 跨协议异构防护：只有当上游渠道原生支持 Claude 格式时，才允许透传客户端原始 Claude 请求体。
+	// 若上游渠道是 OpenAI 兼容渠道等异构渠道，必须强制将 convertedRequest 序列化发送，避免透传原始 Claude body 导致上游报错。
+	canPassThrough := (model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled) &&
+		common.IsAPITypeClaudeCompatible(info.ApiType)
+	if canPassThrough {
 		storage, err := common.GetBodyStorage(c)
 		if err != nil {
 			return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())

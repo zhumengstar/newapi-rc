@@ -105,3 +105,44 @@ func SupportsResponsesCompact(channelType, apiType int) bool {
 		return false
 	}
 }
+
+// IsAPITypeOpenAICompatible reports whether the channel apiType natively accepts OpenAI-compatible chat requests.
+// When an upstream channel is NOT OpenAI compatible, pass-through body MUST be disabled during OpenAI relay
+// to ensure adaptor.ConvertOpenAIRequest converts messages to the upstream's native payload.
+func IsAPITypeOpenAICompatible(apiType int) bool {
+	switch apiType {
+	case constant.APITypeOpenAI,
+		constant.APITypeCodex,
+		constant.APITypeAdvancedCustom,
+		constant.APITypeSub2API,
+		constant.APITypeNewAPI,
+		constant.APITypeOpenRouter,
+		constant.APITypeXinference,
+		constant.APITypeSiliconFlow,
+		constant.APITypeDeepSeek,
+		constant.APITypeMistral,
+		constant.APITypeMoonshot,
+		constant.APITypeMiniMax,
+		constant.APITypeVolcEngine,
+		constant.APITypeXai,
+		constant.APITypeSubmodel,
+		constant.APITypeMokaAI,
+		constant.APITypePerplexity,
+		constant.APITypeOllama,
+		constant.APITypeAIProxyLibrary:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsAPITypeGeminiCompatible reports whether the channel apiType natively expects Gemini content requests.
+func IsAPITypeGeminiCompatible(apiType int) bool {
+	return apiType == constant.APITypeGemini
+}
+
+// IsAPITypeClaudeCompatible reports whether the channel apiType natively expects Claude message requests.
+func IsAPITypeClaudeCompatible(apiType int) bool {
+	return apiType == constant.APITypeAnthropic
+}
+
