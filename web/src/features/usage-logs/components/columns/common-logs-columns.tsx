@@ -70,7 +70,7 @@ import {
 } from '../../lib/utils'
 import type { LogOtherData } from '../../types'
 import { DetailsDialog } from '../dialogs/details-dialog'
-import { LogCostDisplay } from '../log-cost-display'
+import { LogCostDisplay, OriginalCostDisplay } from '../log-cost-display'
 import { ModelBadge } from '../model-badge'
 import { TimingMetricsCell, StreamTpsCell } from '../timing-metrics-cell'
 import { useUsageLogsContext } from '../usage-logs-provider'
@@ -104,6 +104,16 @@ function getGroupRatio(other: LogOtherData | null): number | null {
   }
 
   return null
+}
+
+function getOriginalQuota(log: UsageLog, other: LogOtherData | null): number {
+  const quota = other?.fee_quota ?? log.quota
+  if (!quota || quota <= 0) return 0
+  const ratio = getGroupRatio(other)
+  if (ratio != null && ratio > 0) {
+    return quota / ratio
+  }
+  return quota
 }
 
 function buildDetailSegments(
@@ -739,6 +749,47 @@ export function useCommonLogsColumns(
           </div>
         )
       },
+    },
+    {
+      id: 'original_cost',
+      accessorFn: (row) => {
+        const other = parseLogOther(row.other)
+        return getOriginalQuota(row, other)
+      },
+      header: () => (
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <span className='flex cursor-help items-center gap-1'>
+                {t('Request Cost')}
+              </span>
+            }
+          />
+          <TooltipContent>
+            <span>{t('Original cost before group ratio discount')}</span>
+          </TooltipContent>
+        </Tooltip>
+      ),
+      cell: ({ row }) => {
+        const log = row.original
+        if (!isDisplayableLogType(log.type) || log.type !== 2) {
+          return <span className='text-muted-foreground text-xs'>-</span>
+        }
+
+        const other = parseLogOther(log.other)
+        const originalQuota = getOriginalQuota(log, other)
+        const quota = other?.fee_quota ?? log.quota
+        const ratio = getGroupRatio(other)
+
+        return (
+          <OriginalCostDisplay
+            originalQuota={originalQuota}
+            actualQuota={quota}
+            ratio={ratio}
+          />
+        )
+      },
+      meta: { label: t('Request Cost') },
     },
     {
       accessorKey: 'quota',

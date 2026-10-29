@@ -37,6 +37,19 @@ interface LogCostDisplayProps {
   other: LogOtherData | null
 }
 
+export interface OriginalCostDisplayProps {
+  originalQuota: number
+  actualQuota: number
+  ratio: number | null
+}
+
+function formatRatioCompact(ratio: number | undefined | null): string {
+  if (ratio == null || !Number.isFinite(ratio)) return '-'
+  return ratio % 1 === 0
+    ? String(ratio)
+    : ratio.toFixed(4).replace(/\.?0+$/, '')
+}
+
 function splitQuotaDisplay(value: string): { prefix: string; amount: string } {
   const match = value.match(/^([^0-9+\-.,\s]+)(.+)$/)
   if (!match) return { prefix: '', amount: value }
@@ -139,3 +152,47 @@ export function LogCostDisplay(props: LogCostDisplayProps) {
     </div>
   )
 }
+
+export function OriginalCostDisplay(props: OriginalCostDisplayProps) {
+  const { t } = useTranslation()
+  const { originalQuota, actualQuota, ratio } = props
+
+  if (originalQuota <= 0 && actualQuota <= 0) {
+    return (
+      <span className='border-border/80 bg-muted/60 text-muted-foreground inline-flex h-6 w-fit items-center rounded-md border px-2 [font-family:var(--font-body)] text-sm leading-none font-semibold tabular-nums'>
+        $ 0
+      </span>
+    )
+  }
+
+  const quotaDisplay = splitQuotaDisplay(formatLogQuota(originalQuota))
+  const hasDiscount = ratio != null && ratio !== 1
+
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <span className='border-border/80 bg-muted/60 inline-flex h-6 w-fit items-center rounded-md border px-2 [font-family:var(--font-body)] text-sm leading-none font-semibold tabular-nums cursor-help'>
+            {quotaDisplay.prefix ? (
+              <span className='mr-1'>{quotaDisplay.prefix}</span>
+            ) : null}
+            <span>{quotaDisplay.amount}</span>
+          </span>
+        }
+      />
+      <TooltipContent>
+        <div className='flex flex-col gap-0.5 text-xs'>
+          <span>
+            {t('Original Cost')}: {formatLogQuota(originalQuota)}
+          </span>
+          {hasDiscount ? (
+            <span className='text-muted-foreground'>
+              {t('Ratio')}: {formatRatioCompact(ratio)}x · {t('Deducted')}: {formatLogQuota(actualQuota)}
+            </span>
+          ) : null}
+        </div>
+      </TooltipContent>
+    </Tooltip>
+  )
+}
+
