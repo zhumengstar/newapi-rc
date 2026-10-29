@@ -37,4 +37,19 @@ describe('OriginalCostDisplay', () => {
     expect(screen.getByText('$')).toBeInTheDocument()
     expect(screen.getByText('0.014188')).toBeInTheDocument()
   })
+
+  it('renders formatted actual model cost for per-call log', () => {
+    // e.g. Claude Opus per-call with $1.45352 -> 726,760 quota
+    render(
+      <OriginalCostDisplay
+        originalQuota={726760}
+        actualQuota={75000}
+        ratio={1}
+        actualModelName='claude-opus-4-6'
+        isCalculatedFromModel={true}
+      />
+    )
+    expect(screen.getByText('$')).toBeInTheDocument()
+    expect(screen.getByText('1.4535')).toBeInTheDocument()
+  })
 })

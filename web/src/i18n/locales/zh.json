@@ -1427,6 +1427,8 @@
     "Request Cost": "请求刀数",
     "Original Cost": "请求原价",
     "Original cost before group ratio discount": "未乘倍率的整个请求原始金额",
+    "Original cost calculated by actual model": "根据实际调用的底层模型价格计算的请求刀数",
+    "Actual Model": "实际模型",
     "Deducted": "实扣",
     "Cost = 10 × 0.3 = 3": "费用 = 10 × 0.3 = 3",
     "Cost = 10 × 0.8 = 8": "费用 = 10 × 0.8 = 8",

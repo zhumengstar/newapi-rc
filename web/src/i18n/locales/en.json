@@ -1424,6 +1424,8 @@
     "Request Cost": "Request Cost",
     "Original Cost": "Original Cost",
     "Original cost before group ratio discount": "Original request cost before group ratio discount",
+    "Original cost calculated by actual model": "Original request cost calculated by actual model pricing",
+    "Actual Model": "Actual Model",
     "Deducted": "Deducted",
     "Cost = 10 × 0.3 = 3": "Cost = 10 × 0.3 = 3",
     "Cost = 10 × 0.8 = 8": "Cost = 10 × 0.8 = 8",

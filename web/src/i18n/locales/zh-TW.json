@@ -1414,6 +1414,8 @@
     "Request Cost": "請求刀數",
     "Original Cost": "請求原價",
     "Original cost before group ratio discount": "未乘倍率的整個請求原始金額",
+    "Original cost calculated by actual model": "依實際調用的底層模型價格計算的請求刀數",
+    "Actual Model": "實際模型",
     "Deducted": "實扣",
     "Cost = 10 × 0.3 = 3": "費用 = 10 × 0.3 = 3",
     "Cost = 10 × 0.8 = 8": "費用 = 10 × 0.8 = 8",

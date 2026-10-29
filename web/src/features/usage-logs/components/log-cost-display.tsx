@@ -41,6 +41,8 @@ export interface OriginalCostDisplayProps {
   originalQuota: number
   actualQuota: number
   ratio: number | null
+  actualModelName?: string
+  isCalculatedFromModel?: boolean
 }
 
 function formatRatioCompact(ratio: number | undefined | null): string {
@@ -155,7 +157,13 @@ export function LogCostDisplay(props: LogCostDisplayProps) {
 
 export function OriginalCostDisplay(props: OriginalCostDisplayProps) {
   const { t } = useTranslation()
-  const { originalQuota, actualQuota, ratio } = props
+  const {
+    originalQuota,
+    actualQuota,
+    ratio,
+    actualModelName,
+    isCalculatedFromModel,
+  } = props
 
   if (originalQuota <= 0 && actualQuota <= 0) {
     return (
@@ -185,9 +193,18 @@ export function OriginalCostDisplay(props: OriginalCostDisplayProps) {
           <span>
             {t('Original Cost')}: {formatLogQuota(originalQuota)}
           </span>
+          {isCalculatedFromModel && actualModelName ? (
+            <span className='text-muted-foreground'>
+              {t('Actual Model')}: {actualModelName}
+            </span>
+          ) : null}
           {hasDiscount ? (
             <span className='text-muted-foreground'>
               {t('Ratio')}: {formatRatioCompact(ratio)}x · {t('Deducted')}: {formatLogQuota(actualQuota)}
+            </span>
+          ) : actualQuota !== originalQuota ? (
+            <span className='text-muted-foreground'>
+              {t('Deducted')}: {formatLogQuota(actualQuota)}
             </span>
           ) : null}
         </div>

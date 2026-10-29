@@ -71,6 +71,7 @@ import {
 import type { LogOtherData } from '../../types'
 import { DetailsDialog } from '../dialogs/details-dialog'
 import { LogCostDisplay, OriginalCostDisplay } from '../log-cost-display'
+import { computeOriginalCostResult, getGroupRatio } from '../../lib/original-cost'
 import { ModelBadge } from '../model-badge'
 import { TimingMetricsCell, StreamTpsCell } from '../timing-metrics-cell'
 import { useUsageLogsContext } from '../usage-logs-provider'
@@ -86,34 +87,6 @@ function formatRatioCompact(ratio: number | undefined): string {
   return ratio % 1 === 0
     ? String(ratio)
     : ratio.toFixed(4).replace(/\.?0+$/, '')
-}
-
-function getGroupRatio(other: LogOtherData | null): number | null {
-  const userGroupRatio = other?.user_group_ratio
-  if (
-    userGroupRatio != null &&
-    userGroupRatio !== -1 &&
-    Number.isFinite(userGroupRatio)
-  ) {
-    return userGroupRatio
-  }
-
-  const groupRatio = other?.group_ratio
-  if (groupRatio != null && groupRatio !== 1 && Number.isFinite(groupRatio)) {
-    return groupRatio
-  }
-
-  return null
-}
-
-function getOriginalQuota(log: UsageLog, other: LogOtherData | null): number {
-  const quota = other?.fee_quota ?? log.quota
-  if (!quota || quota <= 0) return 0
-  const ratio = getGroupRatio(other)
-  if (ratio != null && ratio > 0) {
-    return quota / ratio
-  }
-  return quota
 }
 
 function buildDetailSegments(
@@ -351,6 +324,7 @@ export function useCommonLogsColumns(
   isRoot: boolean
 ): ColumnDef<UsageLog>[] {
   const { t } = useTranslation()
+  const { models: pricingModels } = usePricingData()
   const columns: ColumnDef<UsageLog>[] = [
     {
       accessorKey: 'created_at',
@@ -754,7 +728,7 @@ export function useCommonLogsColumns(
       id: 'original_cost',
       accessorFn: (row) => {
         const other = parseLogOther(row.other)
-        return getOriginalQuota(row, other)
+        return computeOriginalCostResult(row, other, pricingModels).originalQuota
       },
       header: () => (
         <Tooltip>
@@ -766,7 +740,7 @@ export function useCommonLogsColumns(
             }
           />
           <TooltipContent>
-            <span>{t('Original cost before group ratio discount')}</span>
+            <span>{t('Original cost calculated by actual model')}</span>
           </TooltipContent>
         </Tooltip>
       ),
@@ -777,15 +751,17 @@ export function useCommonLogsColumns(
         }
 
         const other = parseLogOther(log.other)
-        const originalQuota = getOriginalQuota(log, other)
+        const costResult = computeOriginalCostResult(log, other, pricingModels)
         const quota = other?.fee_quota ?? log.quota
         const ratio = getGroupRatio(other)
 
         return (
           <OriginalCostDisplay
-            originalQuota={originalQuota}
+            originalQuota={costResult.originalQuota}
             actualQuota={quota}
             ratio={ratio}
+            actualModelName={costResult.actualModelName}
+            isCalculatedFromModel={costResult.isCalculatedFromModel}
           />
         )
       },
