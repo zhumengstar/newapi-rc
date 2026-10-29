@@ -147,4 +147,64 @@ describe('CopyChannelDialog', () => {
     const submitButton = screen.getByRole('button', { name: /复制渠道|Copy Channel/i })
     expect(submitButton).toBeDisabled()
   })
+
+  it('correctly splits multi-group channel into separate selectable chips and preserves them without conjoining at bottom', async () => {
+    function MultiGroupTestWrapper() {
+      const { setCurrentRow, setOpen } = useChannels()
+      return (
+        <div>
+          <button
+            onClick={() => {
+              setCurrentRow({
+                id: 99,
+                name: 'multi-group-channel',
+                contact: 'tg:@banana',
+                type: 1,
+                key: 'sk-test',
+                status: 1,
+                group: '小香蕉对接组,生成图片组',
+                priority: 10,
+                models: 'gpt-4',
+              } as any)
+              setOpen('copy')
+            }}
+          >
+            Open Multi-Group Dialog
+          </button>
+          <CopyChannelConsumer />
+        </div>
+      )
+    }
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ChannelsProvider>
+          <MultiGroupTestWrapper />
+        </ChannelsProvider>
+      </QueryClientProvider>
+    )
+
+    fireEvent.click(screen.getByText('Open Multi-Group Dialog'))
+
+    // Chips for each group should be rendered separately
+    expect(await screen.findByText('小香蕉对接组')).toBeInTheDocument()
+    expect(await screen.findByText('生成图片组')).toBeInTheDocument()
+
+    // Conjoined text should NOT exist anywhere in document
+    expect(screen.queryByText('小香蕉对接组,生成图片组')).not.toBeInTheDocument()
+
+    // Submit copy and verify joined groups
+    const submitButton = screen.getByRole('button', { name: /复制渠道|Copy Channel/i })
+    fireEvent.click(submitButton)
+
+    await waitFor(() => {
+      expect(channelApi.copyChannel).toHaveBeenCalledWith(
+        99,
+        expect.objectContaining({
+          name: 'multi-group-channel',
+          group: '小香蕉对接组,生成图片组',
+        })
+      )
+    })
+  })
 })

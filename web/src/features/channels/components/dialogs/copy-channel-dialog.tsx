@@ -22,18 +22,11 @@ import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Dialog } from '@/components/dialog'
+import { MultiSelect, type Option } from '@/components/multi-select'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { requireServerSuccess } from '@/lib/server-error-message'
 
 import { getChannelGroupPriorities, getGroups } from '../../api'
@@ -45,6 +38,14 @@ type CopyChannelDialogProps = {
   onOpenChange: (open: boolean) => void
 }
 
+function splitGroupStr(str?: string | null): string[] {
+  if (!str) return []
+  return str
+    .split(/[,，]+/)
+    .map((g) => g.trim())
+    .filter(Boolean)
+}
+
 export function CopyChannelDialog({
   open,
   onOpenChange,
@@ -54,7 +55,7 @@ export function CopyChannelDialog({
   const queryClient = useQueryClient()
   const [name, setName] = useState('')
   const [contact, setContact] = useState('')
-  const [targetGroup, setTargetGroup] = useState('')
+  const [targetGroups, setTargetGroups] = useState<string[]>([])
   const [resetBalance, setResetBalance] = useState(true)
   const [isCopying, setIsCopying] = useState(false)
 
@@ -74,29 +75,55 @@ export function CopyChannelDialog({
     if (open && currentRow) {
       setName(currentRow.name || '')
       setContact(currentRow.contact || '')
-      setTargetGroup(currentRow.group || '')
+      setTargetGroups(splitGroupStr(currentRow.group))
     }
   }, [open, currentRow])
 
-  const groupOptions = useMemo(() => {
+  const groupOptions: Option[] = useMemo(() => {
     const list = groupsData?.data || []
-    const set = new Set([
-      ...list,
-      ...(currentRow?.group ? [currentRow.group] : []),
-    ])
-    return Array.from(set).filter(Boolean)
-  }, [groupsData, currentRow?.group])
+    const allSet = new Set<string>()
+
+    for (const g of list) {
+      for (const item of splitGroupStr(g)) {
+        allSet.add(item)
+      }
+    }
+    for (const item of splitGroupStr(currentRow?.group)) {
+      allSet.add(item)
+    }
+    for (const item of targetGroups) {
+      allSet.add(item)
+    }
+
+    const allGroups = Array.from(allSet).filter(Boolean)
+    const selectedSet = new Set(targetGroups)
+
+    allGroups.sort((a, b) => {
+      const aSel = selectedSet.has(a)
+      const bSel = selectedSet.has(b)
+      if (aSel && !bSel) return -1
+      if (!aSel && bSel) return 1
+      return a.localeCompare(b, 'zh-CN')
+    })
+
+    return allGroups.map((g) => ({
+      value: g,
+      label: g,
+    }))
+  }, [groupsData, currentRow?.group, targetGroups])
 
   const remappedPriorityPreview = useMemo(() => {
-    if (!targetGroup || !currentRow || targetGroup === currentRow.group)
-      return null
-    const basePrio = groupPrioritiesData?.data?.[targetGroup]
+    const primaryTarget = targetGroups[0]
+    if (!primaryTarget || !currentRow) return null
+    const origPrimary = splitGroupStr(currentRow.group)[0]
+    if (!origPrimary || primaryTarget === origPrimary) return null
+    const basePrio = groupPrioritiesData?.data?.[primaryTarget]
     if (!basePrio || basePrio <= 0) return null
     const base = Math.floor((basePrio - 1) / 10) * 10
     const offset = (currentRow.priority ?? 1) % 10
     const validOffset = offset >= 1 && offset <= 9 ? offset : 1
     return base + validOffset
-  }, [targetGroup, currentRow, groupPrioritiesData])
+  }, [targetGroups, currentRow, groupPrioritiesData])
 
   if (!currentRow) return null
 
@@ -112,7 +139,7 @@ export function CopyChannelDialog({
         name: trimmedName,
         contact: contact.trim(),
         reset_balance: resetBalance,
-        group: targetGroup || undefined,
+        group: targetGroups.length > 0 ? targetGroups.join(',') : undefined,
       },
       queryClient,
       () => {
@@ -183,24 +210,15 @@ export function CopyChannelDialog({
 
         <div className='space-y-2'>
           <Label htmlFor='target-group'>{t('Target Group')}</Label>
-          <Select
-            value={targetGroup}
-            onValueChange={(val) => setTargetGroup(val || '')}
+          <MultiSelect
+            id='target-group'
+            options={groupOptions}
+            selected={targetGroups}
+            onChange={setTargetGroups}
+            allowCreate={true}
+            placeholder={t('Select target groups', '选择目标分组')}
             disabled={isCopying}
-          >
-            <SelectTrigger id='target-group' className='w-full'>
-              <SelectValue placeholder={t('Select target group')} />
-            </SelectTrigger>
-            <SelectContent alignItemWithTrigger={false}>
-              <SelectGroup>
-                {groupOptions.map((g) => (
-                  <SelectItem key={g} value={g}>
-                    {g}
-                  </SelectItem>
-                ))}
-              </SelectGroup>
-            </SelectContent>
-          </Select>
+          />
           {remappedPriorityPreview !== null && (
             <div className='rounded border border-amber-500/20 bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-300'>
               💡{' '}
