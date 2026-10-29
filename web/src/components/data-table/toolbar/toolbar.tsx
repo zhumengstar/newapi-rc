@@ -39,6 +39,7 @@ type FilterDef = {
   singleSelect?: boolean
   onClear?: () => void
   onOptionReorder?: (sourceValue: string, targetValue: string) => void
+  selectedFirst?: boolean
 }
 
 type SearchDraft = {
@@ -302,6 +303,7 @@ export function DataTableToolbar<TData>(props: DataTableToolbarProps<TData>) {
             onClear={filter.onClear}
             renderOptionActions={filter.renderOptionActions}
             onOptionReorder={filter.onOptionReorder}
+            selectedFirst={filter.selectedFirst ?? !filter.singleSelect}
             open={openFilterId === filter.columnId}
             onOpenChange={(nextOpen) => {
               if (nextOpen) {

@@ -117,6 +117,40 @@ describe('DataTableFacetedFilter', () => {
     expect(onClear).toHaveBeenCalledOnce()
     expect(onOpenChange).toHaveBeenCalledWith(false)
   })
+
+  test('places selected options at the top when selectedFirst is enabled', () => {
+    const column = {
+      getFacetedUniqueValues: () => new Map<string, number>(),
+      getFilterValue: () => ['group-c'],
+      setFilterValue: vi.fn(),
+    } as unknown as Column<unknown, unknown>
+
+    render(
+      <DataTableFacetedFilter
+        column={column}
+        title='Group'
+        open
+        selectedFirst
+        options={[
+          { label: 'All Groups', value: 'all' },
+          { label: 'Group A', value: 'group-a' },
+          { label: 'Group B', value: 'group-b' },
+          { label: 'Group C', value: 'group-c' },
+        ]}
+      />
+    )
+
+    // 获取所有渲染出来的选项文本
+    const renderedItems = screen.getAllByRole('option').map((el) => el.textContent?.trim())
+    // 已选中的 Group C 必须排在未选中的 Group A 和 Group B 之前
+    const indexC = renderedItems.findIndex((txt) => txt?.includes('Group C'))
+    const indexA = renderedItems.findIndex((txt) => txt?.includes('Group A'))
+    const indexB = renderedItems.findIndex((txt) => txt?.includes('Group B'))
+
+    expect(indexC).toBeGreaterThanOrEqual(0)
+    expect(indexC).toBeLessThan(indexA)
+    expect(indexC).toBeLessThan(indexB)
+  })
 })
 
 describe('DataTableToolbar mutual exclusive filter dropdowns', () => {

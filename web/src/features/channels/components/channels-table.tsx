@@ -991,6 +991,7 @@ export function ChannelsTable() {
             columnId: 'group',
             title: t('Group'),
             options: groupFilterOptions,
+            selectedFirst: true,
             renderOptionActions: (option) => {
               if (option.value === 'all') return null
               const enabled = groupAdaptiveState.get(option.value) ?? false

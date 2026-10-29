@@ -64,6 +64,8 @@ type DataTableFacetedFilterProps<TData, TValue> = {
   open?: boolean
   /** Callback fired when the open state changes */
   onOpenChange?: (open: boolean) => void
+  /** Place selected options at the top. Defaults to true. */
+  selectedFirst?: boolean
 }
 
 function DataTableFacetedFilterInner<TData, TValue>({
@@ -76,6 +78,7 @@ function DataTableFacetedFilterInner<TData, TValue>({
   onOptionReorder,
   open: controlledOpen,
   onOpenChange: controlledOnOpenChange,
+  selectedFirst = true,
 }: DataTableFacetedFilterProps<TData, TValue>) {
   const { t } = useTranslation()
   const facets = column?.getFacetedUniqueValues()
@@ -99,6 +102,42 @@ function DataTableFacetedFilterInner<TData, TValue>({
     },
     [isControlled, controlledOnOpenChange]
   )
+
+  // 记录下拉弹窗打开瞬间的已选中集合，用于将选中的选项默认置顶，
+  // 同时保证在弹窗打开期间选项位置保持稳定，避免点击时页面跳动
+  const [pinnedSelectedValues, setPinnedSelectedValues] = React.useState<Set<string>>(() => {
+    const raw = new Set(filterValue)
+    raw.delete('all')
+    return raw
+  })
+  const prevOpenRef = React.useRef(open)
+
+  React.useEffect(() => {
+    // 仅在弹窗由关闭切换到打开的一瞬间更新置顶集合
+    if (open && !prevOpenRef.current) {
+      const raw = new Set(filterValue)
+      raw.delete('all')
+      setPinnedSelectedValues(raw)
+    }
+    prevOpenRef.current = open
+  }, [open])
+
+  const sortedOptions = React.useMemo(() => {
+    if (!selectedFirst || singleSelect || pinnedSelectedValues.size === 0) {
+      return options
+    }
+    const selected: FacetedFilterOption[] = []
+    const unselected: FacetedFilterOption[] = []
+
+    for (const opt of options) {
+      if (opt.value !== 'all' && pinnedSelectedValues.has(opt.value)) {
+        selected.push(opt)
+      } else {
+        unselected.push(opt)
+      }
+    }
+    return [...selected, ...unselected]
+  }, [options, pinnedSelectedValues, selectedFirst, singleSelect])
 
   const handleOptionSelect = (optionValue: string) => {
     if (optionValue === 'all') {
@@ -133,8 +172,8 @@ function DataTableFacetedFilterInner<TData, TValue>({
   const [searchQuery, setSearchQuery] = React.useState('')
 
   const nonAllOptions = React.useMemo(() => {
-    return options.filter((opt) => opt.value !== 'all')
-  }, [options])
+    return sortedOptions.filter((opt) => opt.value !== 'all')
+  }, [sortedOptions])
 
   const filteredOptions = React.useMemo(() => {
     const q = searchQuery.trim().toLowerCase()
@@ -164,12 +203,12 @@ function DataTableFacetedFilterInner<TData, TValue>({
   }
 
   const groupedOptions = React.useMemo(() => {
-    const hasAnyGroup = options.some((opt) => Boolean(opt.group))
+    const hasAnyGroup = sortedOptions.some((opt) => Boolean(opt.group))
     if (!hasAnyGroup) {
-      return [{ group: undefined, items: options }]
+      return [{ group: undefined, items: sortedOptions }]
     }
     const groups: { group?: string; items: FacetedFilterOption[] }[] = []
-    for (const option of options) {
+    for (const option of sortedOptions) {
       const current = groups[groups.length - 1]
       if (current && current.group === option.group) {
         current.items.push(option)
@@ -178,7 +217,7 @@ function DataTableFacetedFilterInner<TData, TValue>({
       }
     }
     return groups
-  }, [options])
+  }, [sortedOptions])
 
   const renderItem = (option: FacetedFilterOption) => {
     const isSelected =
