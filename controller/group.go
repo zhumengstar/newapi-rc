@@ -21,8 +21,36 @@ func GetChannelGroups(c *gin.Context) {
 	common.ApiSuccess(c, groups)
 }
 
-func GetGroups(c *gin.Context) {
+func getAllConfiguredAndRankedGroups() []string {
 	groupNames := model.GetRankedGroups()
+	groupSet := make(map[string]struct{}, len(groupNames))
+	for _, name := range groupNames {
+		if name != "" {
+			groupSet[name] = struct{}{}
+		}
+	}
+	// 实时合并分组定价与可用分组中的所有分组，确保管理员在分组定价中配置后，渠道编辑等处立即立即可选
+	for group := range ratio_setting.GetGroupRatioCopy() {
+		if group != "" {
+			if _, exists := groupSet[group]; !exists {
+				groupNames = append(groupNames, group)
+				groupSet[group] = struct{}{}
+			}
+		}
+	}
+	for group := range setting.GetUserUsableGroupsCopy() {
+		if group != "" {
+			if _, exists := groupSet[group]; !exists {
+				groupNames = append(groupNames, group)
+				groupSet[group] = struct{}{}
+			}
+		}
+	}
+	return groupNames
+}
+
+func GetGroups(c *gin.Context) {
+	groupNames := getAllConfiguredAndRankedGroups()
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
@@ -60,7 +88,7 @@ func GetUserGroups(c *gin.Context) {
 }
 
 func GetGroupDetails(c *gin.Context) {
-	groupNames := model.GetRankedGroups()
+	groupNames := getAllConfiguredAndRankedGroups()
 	groupRatios := ratio_setting.GetGroupRatioCopy()
 	userUsableGroups := setting.GetUserUsableGroupsCopy()
 	userId := c.GetInt("id")

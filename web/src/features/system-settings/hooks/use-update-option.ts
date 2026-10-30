@@ -68,6 +68,19 @@ export function useUpdateOption() {
           }
         }
 
+        if (
+          variables.key === 'GroupRatio' ||
+          variables.key === 'UserUsableGroups' ||
+          variables.key === 'GroupGroupRatio' ||
+          variables.key === 'TopupGroupRatio' ||
+          variables.key === 'group_ratio_setting.group_special_usable_group'
+        ) {
+          queryClient.invalidateQueries({ queryKey: ['groups'] })
+          queryClient.invalidateQueries({ queryKey: ['user-groups'] })
+          queryClient.invalidateQueries({ queryKey: ['channel-groups'] })
+          queryClient.invalidateQueries({ queryKey: ['channel-group-priorities'] })
+        }
+
         toast.success(i18next.t('Setting updated successfully'))
       } else {
         handleServerError(data, i18next.t('Failed to update setting'))
