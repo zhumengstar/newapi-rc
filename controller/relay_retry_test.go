@@ -56,6 +56,9 @@ func TestShouldRetryRecoverableUpstreamFailures(t *testing.T) {
 		types.NewErrorWithStatusCode(errors.New("sensitive_words_detected"), types.ErrorCodeSensitiveWordsDetected, http.StatusInternalServerError),
 		types.NewOpenAIError(errors.New("status_code=500, sensitive_words_detected"), types.ErrorCodeBadResponseStatusCode, http.StatusInternalServerError),
 		types.NewOpenAIError(errors.New("status_code=500, prompt was blocked by content filter"), types.ErrorCodeBadResponseStatusCode, http.StatusInternalServerError),
+		// 上游代理或特定能力不支持错误（如 AI Studio ProxyUnaryCall HTTP 400 PROXY_GENERATION_DISABLED），必须允许重试换顺序下一个渠道
+		types.NewOpenAIError(errors.New("status_code=400, AI Studio ProxyUnaryCall 返回 HTTP 400、协议错误码 3: PROXY_GENERATION_DISABLED: generateContent is not supported"), types.ErrorCodeBadResponseStatusCode, http.StatusBadRequest),
+		types.NewOpenAIError(errors.New("status_code=400, image generation failed: NO_MEDIA_AFTER_STOP (finishReason=STOP) (textReturned=true)"), types.ErrorCodeBadResponseStatusCode, http.StatusBadRequest),
 	}
 	for _, testErr := range tests {
 		require.True(t, shouldRetry(ctx, testErr, 1), testErr.Error())

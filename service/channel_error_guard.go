@@ -229,6 +229,8 @@ func channelGuardSignature(event channelGuardEvent) (string, bool, bool) {
 		category = "timeout"
 	case strings.Contains(lower, "rate limit"), strings.Contains(lower, "too many requests"):
 		category = "rate_limit"
+	case strings.Contains(lower, "proxy_generation_disabled"), strings.Contains(lower, "generatecontent is not supported"), strings.Contains(lower, "streamgeneratecontent is not supported"):
+		category = "upstream"
 	case event.Status == http.StatusUnauthorized || event.Status == http.StatusForbidden:
 		category = "permission"
 	case event.Status == http.StatusRequestTimeout || event.Status == http.StatusTooManyRequests || event.Status >= 500:
@@ -236,7 +238,7 @@ func channelGuardSignature(event channelGuardEvent) (string, bool, bool) {
 	default:
 		return "", false, false
 	}
-	hard := category == "quota" || category == "permission" || category == "invalid_token"
+	hard := category == "quota" || category == "permission" || category == "invalid_token" || strings.Contains(lower, "proxy_generation_disabled")
 	return fmt.Sprintf("http_%d:%s", event.Status, category), true, hard
 }
 

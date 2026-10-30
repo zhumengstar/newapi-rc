@@ -80,7 +80,12 @@ func IsFastCircuitError(err *types.NewAPIError) bool {
 		return true
 	}
 	lower := strings.ToLower(err.Error())
-	for _, marker := range []string{"invalid api key", "invalid token", "authentication failed", "unauthorized", "insufficient quota", "insufficient balance", "余额不足", "额度不足"} {
+	for _, marker := range []string{
+		"invalid api key", "invalid token", "authentication failed", "unauthorized",
+		"insufficient quota", "insufficient balance", "余额不足", "额度不足",
+		"proxy_generation_disabled", "generatecontent is not supported", "streamgeneratecontent is not supported",
+		"proxyunarycall", "proxystreamcall",
+	} {
 		if strings.Contains(lower, marker) {
 			return true
 		}

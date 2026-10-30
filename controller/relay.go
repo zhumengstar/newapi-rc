@@ -505,7 +505,7 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 		}
 		c.Set("first_byte_retry_count", firstByteRetryCount+1)
 	}
-	if isCapacityUnavailableError(openaiErr) || isChannelBalanceExhaustedError(openaiErr) || isRetryableUpstreamError(openaiErr) || isRetryableImageDecodingError(openaiErr) || relaycommon.IsClaudeUnavailablePrompt(openaiErr.Error()) || isUpstream5xxContentFilterError(openaiErr) {
+	if isCapacityUnavailableError(openaiErr) || isChannelBalanceExhaustedError(openaiErr) || isRetryableUpstreamError(openaiErr) || isRetryableImageDecodingError(openaiErr) || relaycommon.IsClaudeUnavailablePrompt(openaiErr.Error()) || isUpstream5xxContentFilterError(openaiErr) || isUpstreamChannelUnavailableError(openaiErr) {
 		return true
 	}
 	if types.IsSkipRetryError(openaiErr) {
@@ -580,6 +580,10 @@ func isNonRetryableClientError(err *types.NewAPIError) bool {
 	if err.StatusCode >= 500 && err.StatusCode < 600 {
 		return false
 	}
+	// 上游特定代理或能力不支持错误（如 AI Studio ProxyUnaryCall 返回 HTTP 400 PROXY_GENERATION_DISABLED）属于渠道端故障，允许重试顺延下一个渠道
+	if isUpstreamChannelUnavailableError(err) {
+		return false
+	}
 	switch err.GetErrorCode() {
 	case types.ErrorCodeInvalidRequest,
 		types.ErrorCodeSensitiveWordsDetected,
@@ -616,6 +620,26 @@ func isUpstream5xxContentFilterError(err *types.NewAPIError) bool {
 		strings.Contains(msg, "blocked by content filter") ||
 		strings.Contains(msg, "content filter") ||
 		strings.Contains(msg, "safety filter")
+}
+
+func isUpstreamChannelUnavailableError(err *types.NewAPIError) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"proxy_generation_disabled",
+		"generatecontent is not supported",
+		"streamgeneratecontent is not supported",
+		"proxyunarycall",
+		"proxystreamcall",
+		"no_media_after_stop",
+	} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func isTokenLimitExceededError(err *types.NewAPIError) bool {
