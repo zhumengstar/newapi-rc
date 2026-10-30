@@ -54,7 +54,11 @@ func geminiCapabilitiesFor(model string) geminiCapabilities {
 		return geminiCapabilities{kind: geminiThinkingBudget, supportsDisable: true, minBudget: 512, maxBudget: 24576}
 	case strings.HasPrefix(model, "gemini-2.5-"):
 		return geminiCapabilities{kind: geminiThinkingBudget, supportsDisable: true, maxBudget: 24576}
-	case strings.HasPrefix(model, "gemini-3"):
+	case strings.HasPrefix(model, "gemini-3"),
+		strings.HasPrefix(model, "gemini-4"):
+		return geminiCapabilities{kind: geminiThinkingLevel}
+	case strings.HasPrefix(model, "gemini-"):
+		// 针对未来或未登记的前缀，如果带有 gemini-，安全 fallback 到 geminiThinkingLevel，避免阻断未知 Gemini 新模型
 		return geminiCapabilities{kind: geminiThinkingLevel}
 	default:
 		return geminiCapabilities{}
@@ -75,20 +79,25 @@ func RenderGemini(model string, intent Intent, maxOutputTokens *uint, adapterBud
 		if !intent.HasStrength() && capabilities.supportsIncludeThoughts {
 			return GeminiRender{Config: &dto.GeminiThinkingConfig{IncludeThoughts: intent.IncludeThoughts}, EffectiveEffort: EffortHigh}, nil
 		}
-		return GeminiRender{}, fmt.Errorf("model %q does not support configurable thinking", model)
+		// 深度兼容：若模型不可配置思考，宽容放行 IncludeThoughts，不抛出阻断性错误
+		return GeminiRender{Config: &dto.GeminiThinkingConfig{IncludeThoughts: intent.IncludeThoughts}}, nil
 	}
 	if capabilities.kind == geminiThinkingUnknown {
-		if intent.HasStrength() {
-			return GeminiRender{}, fmt.Errorf("model %q does not have a known Gemini thinking configuration", model)
-		}
-		return GeminiRender{Config: &dto.GeminiThinkingConfig{IncludeThoughts: intent.IncludeThoughts}}, nil
+		// 深度兼容：未知模型不报错阻断，默认作为 ThinkingLevel 自适应放行
+		capabilities = geminiCapabilities{kind: geminiThinkingLevel}
 	}
 
 	config := &dto.GeminiThinkingConfig{IncludeThoughts: intent.IncludeThoughts}
 	if capabilities.kind == geminiThinkingBudget {
 		if intent.Mode == ModeDisabled || intent.Effort == EffortNone {
 			if !capabilities.supportsDisable {
-				return GeminiRender{}, fmt.Errorf("%w for model %q", ErrThinkingNotDisabled, model)
+				// 深度兼容：对于不支持关闭思考的预算模型，优雅降级为最低允许预算
+				budget := 128
+				if capabilities.minBudget > 0 {
+					budget = capabilities.minBudget
+				}
+				config.ThinkingBudget = &budget
+				return GeminiRender{Config: config, EffectiveEffort: EffortMinimal}, nil
 			}
 			budget := 0
 			config.ThinkingBudget = &budget
@@ -122,9 +131,12 @@ func RenderGemini(model string, intent Intent, maxOutputTokens *uint, adapterBud
 		}
 		if hasBudget {
 			if err := validateGeminiBudget(model, budget, capabilities); err != nil {
-				return GeminiRender{}, err
+				// 深度兼容：超限时自动钳制在合法区间，不抛出阻断异常
+				clamped := clampGeminiBudget(budget, capabilities)
+				config.ThinkingBudget = &clamped
+			} else {
+				config.ThinkingBudget = &budget
 			}
-			config.ThinkingBudget = &budget
 		}
 		effort := intent.Effort
 		if hasBudget {
@@ -136,7 +148,9 @@ func RenderGemini(model string, intent Intent, maxOutputTokens *uint, adapterBud
 	}
 
 	if intent.Mode == ModeDisabled || intent.Effort == EffortNone {
-		return GeminiRender{}, fmt.Errorf("%w for model %q", ErrThinkingNotDisabled, model)
+		// 深度兼容：对于 Level 级别模型，如果请求关闭思考，优雅降级为最低思考级别 low，避免阻断对话
+		config.ThinkingLevel = string(EffortLow)
+		return GeminiRender{Config: config, EffectiveEffort: EffortLow}, nil
 	}
 	effort := intent.Effort
 	if effort == "" && intent.BudgetTokens != nil {
@@ -145,7 +159,7 @@ func RenderGemini(model string, intent Intent, maxOutputTokens *uint, adapterBud
 	if effort != "" {
 		level, err := geminiLevelForEffort(model, effort)
 		if err != nil {
-			return GeminiRender{}, err
+			level = string(EffortMedium)
 		}
 		config.ThinkingLevel = level
 		effort = Effort(level)
@@ -169,7 +183,8 @@ func geminiDefaultEffort(model string) Effort {
 	case model == "gemini-pro-latest",
 		strings.HasPrefix(model, "gemini-3.1-pro"),
 		strings.HasPrefix(model, "gemini-3-pro"),
-		strings.HasPrefix(model, "gemini-3-flash"):
+		strings.HasPrefix(model, "gemini-3-flash"),
+		strings.HasPrefix(model, "gemini-4"):
 		return EffortHigh
 	default:
 		return ""
@@ -196,17 +211,29 @@ func ValidateGeminiThinkingConfig(model string, config *dto.GeminiThinkingConfig
 	}
 	if capabilities.kind == geminiThinkingBudget {
 		if config.ThinkingLevel != "" {
-			return "", fmt.Errorf("Gemini 2.5 model %q requires thinkingBudget, not thinkingLevel", model)
+			// 深度兼容：自动将 Level 映射为 Budget，不抛出阻断异常
+			budget := gemini25BudgetForEffort(Effort(config.ThinkingLevel))
+			config.ThinkingBudget = &budget
+			config.ThinkingLevel = ""
+			return EffectiveEffort(intent), nil
 		}
 		if config.ThinkingBudget != nil {
 			if err := validateGeminiBudget(model, *config.ThinkingBudget, capabilities); err != nil {
-				return "", err
+				clamped := clampGeminiBudget(*config.ThinkingBudget, capabilities)
+				config.ThinkingBudget = &clamped
 			}
 		}
 		return EffectiveEffort(intent), nil
 	}
 	if config.ThinkingBudget != nil {
-		return "", fmt.Errorf("Gemini 3 model %q requires thinkingLevel, not thinkingBudget", model)
+		// 深度兼容：自动将 Budget 映射为 Level，不抛出阻断异常
+		level := string(EffortFromBudget(*config.ThinkingBudget))
+		if level == "" {
+			level = string(EffortMedium)
+		}
+		config.ThinkingLevel = level
+		config.ThinkingBudget = nil
+		return Effort(level), nil
 	}
 	if config.ThinkingLevel != "" {
 		level, err := geminiLevelForEffort(model, intent.Effort)
@@ -341,9 +368,18 @@ func geminiLevelForEffort(model string, effort Effort) (string, error) {
 	case EffortXHigh, EffortMax:
 		return string(EffortHigh), nil
 	case EffortNone:
-		return "", fmt.Errorf("%w for model %q", ErrThinkingNotDisabled, model)
+		// 深度兼容：对于不支持关闭的模型，若传入 none，优雅映射为 low
+		return string(EffortLow), nil
 	default:
-		return "", fmt.Errorf("%w %q for model %q", ErrUnsupportedEffort, effort, model)
+		// 深度兼容：容错客户端传入的任意非标字符串（auto, moderate, default 等）
+		effortLower := strings.ToLower(string(effort))
+		if strings.Contains(effortLower, "min") || strings.Contains(effortLower, "low") {
+			return string(EffortLow), nil
+		}
+		if strings.Contains(effortLower, "max") || strings.Contains(effortLower, "high") {
+			return string(EffortHigh), nil
+		}
+		return string(EffortMedium), nil
 	}
 }
 

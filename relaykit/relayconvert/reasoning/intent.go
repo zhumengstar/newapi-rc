@@ -128,6 +128,10 @@ func ParseEffort(value string) (Effort, error) {
 	switch effort {
 	case EffortNone, EffortMinimal, EffortLow, EffortMedium, EffortHigh, EffortXHigh, EffortMax:
 		return effort, nil
+	case "moderate", "normal":
+		return EffortMedium, nil
+	case "ultra", "extreme":
+		return EffortHigh, nil
 	default:
 		return "", fmt.Errorf("%w: %q", ErrUnsupportedEffort, value)
 	}
