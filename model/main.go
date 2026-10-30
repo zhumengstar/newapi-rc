@@ -64,6 +64,10 @@ func initCol() {
 	}
 }
 
+func init() {
+	initCol()
+}
+
 func mainLikeOp() string {
 	if DB != nil && DB.Dialector != nil && DB.Dialector.Name() == "postgres" {
 		return "ILIKE"

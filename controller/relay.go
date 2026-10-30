@@ -151,7 +151,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		contains, words := service.CheckSensitiveText(meta.CombineText)
 		if contains {
 			logger.LogWarn(c, fmt.Sprintf("user sensitive words detected: %s", strings.Join(words, ", ")))
-			newAPIError = types.NewError(err, types.ErrorCodeSensitiveWordsDetected)
+			newAPIError = types.NewError(err, types.ErrorCodeSensitiveWordsDetected, types.ErrOptionWithSkipRetry(), types.ErrOptionWithStatusCode(http.StatusBadRequest))
 			return
 		}
 	}
@@ -505,7 +505,7 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 		}
 		c.Set("first_byte_retry_count", firstByteRetryCount+1)
 	}
-	if isCapacityUnavailableError(openaiErr) || isChannelBalanceExhaustedError(openaiErr) || isRetryableUpstreamError(openaiErr) || isRetryableImageDecodingError(openaiErr) || relaycommon.IsClaudeUnavailablePrompt(openaiErr.Error()) {
+	if isCapacityUnavailableError(openaiErr) || isChannelBalanceExhaustedError(openaiErr) || isRetryableUpstreamError(openaiErr) || isRetryableImageDecodingError(openaiErr) || relaycommon.IsClaudeUnavailablePrompt(openaiErr.Error()) || isUpstream5xxContentFilterError(openaiErr) {
 		return true
 	}
 	if types.IsSkipRetryError(openaiErr) {
@@ -575,6 +575,11 @@ func isNonRetryableClientError(err *types.NewAPIError) bool {
 	if err == nil {
 		return false
 	}
+	// 5xx 服务端错误（包括上游返回的 500 sensitive_words_detected 等）属于上游服务端异常/风控，而非不可恢复的客户端请求格式错误，
+	// 允许顺延重试下一个渠道
+	if err.StatusCode >= 500 && err.StatusCode < 600 {
+		return false
+	}
 	switch err.GetErrorCode() {
 	case types.ErrorCodeInvalidRequest,
 		types.ErrorCodeSensitiveWordsDetected,
@@ -590,6 +595,27 @@ func isNonRetryableClientError(err *types.NewAPIError) bool {
 	default:
 		return false
 	}
+}
+
+func isUpstream5xxContentFilterError(err *types.NewAPIError) bool {
+	if err == nil {
+		return false
+	}
+	if err.StatusCode < 500 || err.StatusCode >= 600 {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	code := strings.ToLower(string(err.GetErrorCode()))
+	if code == "sensitive_words_detected" || code == "prompt_blocked" || code == "content_filter" {
+		return true
+	}
+	return strings.Contains(msg, "sensitive_words_detected") ||
+		strings.Contains(msg, "sensitive words") ||
+		strings.Contains(msg, "prompt was blocked") ||
+		strings.Contains(msg, "blocked by safety") ||
+		strings.Contains(msg, "blocked by content filter") ||
+		strings.Contains(msg, "content filter") ||
+		strings.Contains(msg, "safety filter")
 }
 
 func isTokenLimitExceededError(err *types.NewAPIError) bool {
@@ -622,7 +648,8 @@ func isRetryableUpstreamError(err *types.NewAPIError) bool {
 		types.ErrorCodeBadResponseBody,
 		types.ErrorCodeEmptyResponse,
 		types.ErrorCodeAwsInvokeError,
-		types.ErrorCodeBadResponseStatusCode:
+		types.ErrorCodeBadResponseStatusCode,
+		types.ErrorCodeSensitiveWordsDetected:
 		return retryableStatus(err.StatusCode)
 	default:
 		return false

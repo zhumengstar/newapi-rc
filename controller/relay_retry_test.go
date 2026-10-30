@@ -52,10 +52,22 @@ func TestShouldRetryRecoverableUpstreamFailures(t *testing.T) {
 		types.NewOpenAIError(errors.New("insufficient credit"), types.ErrorCodeBadResponseStatusCode, http.StatusForbidden),
 		types.NewErrorWithStatusCode(errors.New("no available capacity"), types.ErrorCodeBadResponseStatusCode, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry()),
 		types.NewOpenAIError(errors.New("Unable to process input image. Please retry or report in https://..."), types.ErrorCodeBadResponseStatusCode, http.StatusBadRequest),
+		// 上游返回 500 敏感词或内容安全拦截，必须允许重试换下一个渠道
+		types.NewErrorWithStatusCode(errors.New("sensitive_words_detected"), types.ErrorCodeSensitiveWordsDetected, http.StatusInternalServerError),
+		types.NewOpenAIError(errors.New("status_code=500, sensitive_words_detected"), types.ErrorCodeBadResponseStatusCode, http.StatusInternalServerError),
+		types.NewOpenAIError(errors.New("status_code=500, prompt was blocked by content filter"), types.ErrorCodeBadResponseStatusCode, http.StatusInternalServerError),
 	}
 	for _, testErr := range tests {
 		require.True(t, shouldRetry(ctx, testErr, 1), testErr.Error())
 	}
+}
+
+func TestShouldRetryLocalSensitiveWordsRejectsRetry(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(nil)
+	// 本地敏感词拦截带 skip_retry，禁止发起重试
+	localErr := types.NewError(errors.New("local sensitive words detected"), types.ErrorCodeSensitiveWordsDetected, types.ErrOptionWithSkipRetry(), types.ErrOptionWithStatusCode(http.StatusBadRequest))
+	require.False(t, shouldRetry(ctx, localErr, 1))
 }
 
 func TestShouldRetryRejectsNonRecoverableUpstreamFailure(t *testing.T) {
