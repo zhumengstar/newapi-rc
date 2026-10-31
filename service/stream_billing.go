@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -103,7 +104,26 @@ func ShouldSettleClientCanceled(c *gin.Context, info *relaycommon.RelayInfo, err
 	if info.StreamStatus != nil && info.StreamStatus.EndReason == relaycommon.StreamEndReasonClientGone {
 		return true
 	}
-	return IsClientCanceled(c, err)
+	if !IsClientCanceled(c, err) {
+		return false
+	}
+
+	// 针对按次固定计费模型（如出图、MJ等固定价格模型，info.PriceData.UsePrice 或 info.PriceData.ModelPrice > 0）：
+	// 严格防作弊与防误扣原则：
+	// 1. 若上游已产生返回（FirstResponseTime > 0 或 ReceivedResponseCount > 0 或 StreamContentSent），说明上游已交付内容，必须坚决扣费防白嫖；
+	// 2. 若上游毫无返回（零字节/零响应头/零Chunk），且客户端等待耗时达到超时级别（>= 30秒），
+	//    确认为上游假死/排队超时导致的客户端被迫超时断开，绝不扣除整次费用，应退款给客户端并判定为上游超时；
+	// 3. 若等待时间极短（< 30秒）秒断，不属于超时断开，按原有规则结算防恶意秒断滥刷。
+	if info.PriceData.UsePrice || info.PriceData.ModelPrice > 0 {
+		hasUpstreamResponse := !info.FirstResponseTime.IsZero() || info.ReceivedResponseCount > 0 || info.StreamContentSent
+		if !hasUpstreamResponse && !info.StartTime.IsZero() && time.Since(info.StartTime) >= 30*time.Second {
+			logger.LogWarn(c, fmt.Sprintf("按次模型客户端超时断开但上游零返回(等待%v): userId=%d, channelId=%d, model=%s, 判定为上游超时不予扣费并退款",
+				time.Since(info.StartTime), info.UserId, info.GetChannelID(), info.GetOriginModelName()))
+			return false
+		}
+	}
+
+	return true
 }
 
 // SettleInterruptedRequestIfNeeded 统一检查并结算因客户端断连或流式中途中断的请求

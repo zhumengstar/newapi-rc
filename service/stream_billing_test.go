@@ -13,6 +13,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	hosttypes "github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -240,6 +241,80 @@ func TestShouldSettleClientCanceled(t *testing.T) {
 		}
 
 		assert.False(t, ShouldSettleClientCanceled(c, info, nil))
+	})
+
+	t.Run("Per-call model with zero upstream response after 35s timeout should NOT settle", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(ctx)
+		info := &relaycommon.RelayInfo{
+			IsStream:  false,
+			StartTime: time.Now().Add(-35 * time.Second),
+			PriceData: hosttypes.PriceData{
+				UsePrice:   true,
+				ModelPrice: 0.04,
+			},
+		}
+
+		assert.False(t, ShouldSettleClientCanceled(c, info, nil))
+	})
+
+	t.Run("Per-call model with upstream response (FRT > 0) after 35s timeout MUST settle", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(ctx)
+		info := &relaycommon.RelayInfo{
+			IsStream:          false,
+			StartTime:         time.Now().Add(-35 * time.Second),
+			FirstResponseTime: time.Now().Add(-10 * time.Second),
+			PriceData: hosttypes.PriceData{
+				UsePrice:   true,
+				ModelPrice: 0.04,
+			},
+		}
+
+		assert.True(t, ShouldSettleClientCanceled(c, info, nil))
+	})
+
+	t.Run("Per-call model with upstream chunks (ReceivedResponseCount > 0) MUST settle", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(ctx)
+		info := &relaycommon.RelayInfo{
+			IsStream:              false,
+			StartTime:             time.Now().Add(-35 * time.Second),
+			ReceivedResponseCount: 1,
+			PriceData: hosttypes.PriceData{
+				UsePrice:   true,
+				ModelPrice: 0.04,
+			},
+		}
+
+		assert.True(t, ShouldSettleClientCanceled(c, info, nil))
+	})
+
+	t.Run("Per-call model canceled rapidly (5s < 30s) MUST settle to prevent rapid spam", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(ctx)
+		info := &relaycommon.RelayInfo{
+			IsStream:  false,
+			StartTime: time.Now().Add(-5 * time.Second),
+			PriceData: hosttypes.PriceData{
+				UsePrice:   true,
+				ModelPrice: 0.04,
+			},
+		}
+
+		assert.True(t, ShouldSettleClientCanceled(c, info, nil))
 	})
 }
 
