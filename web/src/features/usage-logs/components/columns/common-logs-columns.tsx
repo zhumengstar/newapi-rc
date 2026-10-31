@@ -110,13 +110,6 @@ function buildDetailSegments(
   if (isAdmin && other?.admin_info?.quota_saturation) {
     adminSegments.push({ text: t('Quota clamped'), danger: true })
   }
-  const effectiveStream = resolveEffectiveStreamStatus(log, other)
-  if (effectiveStream?.end_reason === 'client_gone') {
-    adminSegments.push({
-      text: t('Client Disconnected', '客户端断开'),
-      danger: true,
-    })
-  }
   return [...adminSegments, ...segments]
 }
 
@@ -841,7 +834,6 @@ export function useCommonLogsColumns(
           usageSchema
         )
         const primary = segments[0]
-        const secondary = segments[1]
         const hasMore = segments.length > 1
         let primaryTextClass = 'text-foreground'
         if (primary?.muted) {
@@ -851,38 +843,21 @@ export function useCommonLogsColumns(
         }
         let detailPreview = <span className='text-muted-foreground/40'>—</span>
         if (primary) {
-          if (primary.danger && secondary) {
-            detailPreview = (
-              <span className='truncate leading-snug group-hover:underline'>
-                <span className='font-medium text-red-600 dark:text-red-400'>
-                  {primary.text}
+          detailPreview = (
+            <span
+              className={cn(
+                'truncate leading-snug group-hover:underline',
+                primaryTextClass
+              )}
+            >
+              {primary.text}
+              {hasMore && (
+                <span className='text-muted-foreground/40 ml-0.5'>
+                  +{segments.length - 1}
                 </span>
-                <span className='text-muted-foreground/50 mx-1'>·</span>
-                <span className='text-foreground'>{secondary.text}</span>
-                {segments.length > 2 && (
-                  <span className='text-muted-foreground/40 ml-0.5'>
-                    +{segments.length - 2}
-                  </span>
-                )}
-              </span>
-            )
-          } else {
-            detailPreview = (
-              <span
-                className={cn(
-                  'truncate leading-snug group-hover:underline',
-                  primaryTextClass
-                )}
-              >
-                {primary.text}
-                {hasMore && (
-                  <span className='text-muted-foreground/40 ml-0.5'>
-                    +{segments.length - 1}
-                  </span>
-                )}
-              </span>
-            )
-          }
+              )}
+            </span>
+          )
         } else if (log.content) {
           detailPreview = (
             <span className='text-muted-foreground truncate group-hover:underline'>

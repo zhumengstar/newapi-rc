@@ -260,11 +260,6 @@ export function StreamTpsCell(props: StreamTpsCellProps) {
                     ? 'client_gone'
                     : props.streamStatus?.end_reason || 'unknown'}
                 </p>
-                {isClientGone && (
-                  <p className='text-red-300 font-medium'>
-                    {t('Client Disconnected', '客户端断开')}
-                  </p>
-                )}
                 {(props.streamStatus?.error_count ?? 0) > 0 && (
                   <p>
                     {t('Soft Errors')}: {props.streamStatus?.error_count}
@@ -275,22 +270,11 @@ export function StreamTpsCell(props: StreamTpsCellProps) {
           </Tooltip>
         )}
       </span>
-      {isClientGone ? (
-        <span className='inline-flex items-center gap-1 px-0.5 text-[11px] font-medium text-destructive whitespace-nowrap tabular-nums'>
-          <span>{t('Client Disconnected', '客户端断开')}</span>
-          {props.tokensPerSecond != null && (
-            <span className='text-muted-foreground/60 font-normal'>
-              · {tpsLabel}
-            </span>
-          )}
+      {(!props.compact ||
+        (props.isStream && props.tokensPerSecond != null)) && (
+        <span className='text-muted-foreground/60 px-0.5 tabular-nums'>
+          {tpsLabel}
         </span>
-      ) : (
-        (!props.compact ||
-          (props.isStream && props.tokensPerSecond != null)) && (
-          <span className='text-muted-foreground/60 px-0.5 tabular-nums'>
-            {tpsLabel}
-          </span>
-        )
       )}
     </div>
   )
