@@ -12,6 +12,18 @@ var (
 	maskIPPattern     = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
 	// maskApiKeyPattern matches patterns like 'api_key:xxx' or "api_key:xxx" to mask the API key value
 	maskApiKeyPattern = regexp.MustCompile(`(['"]?)api_key:([^\s'"]+)(['"]?)`)
+
+	// maskNoAvailableChannelPattern matches upstream/internal channel missing errors that expose models or private routing groups, e.g.:
+	// "No available channel for model gemini-4-argon under group Gemini老客折扣0.1x (distributor)"
+	// "No available channel for model gpt-4 under group default"
+	maskNoAvailableChannelPattern = regexp.MustCompile(`(?i)No available channel for model\s+[^\s,;]+(?:\s+under group\s+[^,;\(\)]+)?(?:\s*\([^\)]*distributor[^\)]*\))?`)
+
+	// maskNoChannelZhPattern matches internal Chinese channel routing errors, e.g.:
+	// "分组 Gemini4按量组 下模型 gemini-4-argon 的可用渠道不存在（retry）"
+	maskNoChannelZhPattern = regexp.MustCompile(`(?:获取)?分组\s+[^\s,;]+\s+下模型\s+[^\s,;]+\s+的可用渠道(?:不存在|失败)(?:（retry）|\(retry\))?`)
+
+	// maskDistributorPattern matches any remaining distributor tags
+	maskDistributorPattern = regexp.MustCompile(`(?i)\s*\([^\)]*distributor[^\)]*\)`)
 )
 
 // maskHostTail returns the tail parts of a domain/host that should be preserved.
@@ -126,6 +138,11 @@ func MaskSensitiveInfo(str string) string {
 
 	// Mask API keys (e.g., "api_key:AIzaSyAAAaUooTUni8AdaOkSRMda30n_Q4vrV70" -> "api_key:***")
 	str = maskApiKeyPattern.ReplaceAllString(str, "${1}api_key:***${3}")
+
+	// Mask upstream and internal channel missing / distributor routing errors
+	str = maskNoAvailableChannelPattern.ReplaceAllString(str, "The model is temporarily overloaded or unavailable. Please try again later.")
+	str = maskNoChannelZhPattern.ReplaceAllString(str, "模型当前服务能力暂不可用，请稍后重试")
+	str = maskDistributorPattern.ReplaceAllString(str, "")
 
 	return str
 }
