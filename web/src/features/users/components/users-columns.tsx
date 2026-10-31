@@ -45,6 +45,7 @@ import {
 import {
   parseUserDisabledGroups,
   parseUserGroupChannels,
+  parseUserModelPriceRules,
 } from '../lib/user-form'
 import type { User } from '../types'
 import { DataTableRowActions } from './data-table-row-actions'
@@ -330,10 +331,21 @@ export function useUsersColumns(): ColumnDef<User>[] {
         const effectiveRatios = row.original.effective_group_ratios
         const disabledGroups = new Set(parseUserDisabledGroups(row.original.setting))
         const groupChannels = parseUserGroupChannels(row.original.setting)
-        const groups = (
-          effectiveRatios && Object.keys(effectiveRatios).length > 0
-            ? Object.keys(effectiveRatios)
-            : rawGroup.split(',')
+        const priceRules = parseUserModelPriceRules(row.original.setting)
+        const rulesByGroup: Record<string, typeof priceRules> = {}
+        for (const rule of priceRules) {
+          if (!rulesByGroup[rule.group]) {
+            rulesByGroup[rule.group] = []
+          }
+          rulesByGroup[rule.group].push(rule)
+        }
+        const groups = Array.from(
+          new Set([
+            ...(effectiveRatios && Object.keys(effectiveRatios).length > 0
+              ? Object.keys(effectiveRatios)
+              : rawGroup.split(',')),
+            ...Object.keys(rulesByGroup),
+          ])
         )
           .map((g) => g.trim())
           .filter(Boolean)
@@ -345,6 +357,7 @@ export function useUsersColumns(): ColumnDef<User>[] {
               const ratio = effectiveRatios?.[group]
               const isDisabled = disabledGroups.has(group)
               const whitelistedCount = groupChannels[group]?.length || 0
+              const groupRules = rulesByGroup[group] || []
               const badge = (
                 <div key={group} className='inline-flex items-center gap-1'>
                   <GroupBadge
@@ -355,6 +368,30 @@ export function useUsersColumns(): ColumnDef<User>[] {
                       isDisabled && 'opacity-40 line-through grayscale border-dashed'
                     )}
                   />
+                  {groupRules.length > 0 && !isDisabled && (
+                    <Tooltip>
+                      <TooltipTrigger render={<span className='inline-flex cursor-help' />}>
+                        <span className='font-mono text-[10px] text-amber-700 dark:text-amber-300 bg-amber-500/15 border border-amber-500/35 rounded-full px-1.5 leading-4 font-medium'>
+                          {groupRules.length === 1
+                            ? `$${groupRules[0].price}/次`
+                            : `按次${groupRules.length}档`}
+                        </span>
+                      </TooltipTrigger>
+                      <TooltipContent className='max-w-xs space-y-1'>
+                        <p className='text-xs font-medium text-amber-400'>
+                          {group} 按次计费配置:
+                        </p>
+                        {groupRules.map((r, idx) => (
+                          <div key={idx} className='text-[11px] font-mono'>
+                            <span className='font-semibold text-amber-300'>
+                              ${r.price}/次
+                            </span>
+                            : {r.models.join(', ')}
+                          </div>
+                        ))}
+                      </TooltipContent>
+                    </Tooltip>
+                  )}
                   {whitelistedCount > 0 && !isDisabled && (
                     <Tooltip>
                       <TooltipTrigger render={<span className='inline-flex cursor-help' />}>
