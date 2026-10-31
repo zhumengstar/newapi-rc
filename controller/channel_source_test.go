@@ -69,6 +69,36 @@ func TestUpdateUpstreamSourceRequestJSON(t *testing.T) {
 	require.Equal(t, 0.005, req.ModelPrices["gpt-4o"])
 }
 
+func TestNormalizeSourceModelCostRules(t *testing.T) {
+	raw := []SourceModelCostRule{
+		{
+			Group:  "  cc反重力按次  ",
+			Models: []string{"claude-opus-4-6-thinking-c", "claude-opus-4-6-c", "claude-opus-4-6-c"},
+			Mode:   "per_call",
+			Price:  0.08,
+		},
+		{
+			Group:       "",
+			Models:      []string{"gemini-4-argon"},
+			Mode:        "per_token",
+			InputPrice:  0.4,
+			OutputPrice: 1.6,
+		},
+	}
+
+	cleaned := normalizeSourceModelCostRules(raw)
+	require.Len(t, cleaned, 2)
+	require.Equal(t, "cc反重力按次", cleaned[0].Group)
+	require.Equal(t, []string{"claude-opus-4-6-c", "claude-opus-4-6-thinking-c"}, cleaned[0].Models)
+	require.Equal(t, "per_call", cleaned[0].Mode)
+	require.Equal(t, 0.08, cleaned[0].Price)
+
+	require.Equal(t, "*", cleaned[1].Group)
+	require.Equal(t, "per_token", cleaned[1].Mode)
+	require.Equal(t, 0.4, cleaned[1].InputPrice)
+	require.Equal(t, 1.6, cleaned[1].OutputPrice)
+}
+
 func TestChannelTodayIncomeResponseJSON(t *testing.T) {
 	resp := ChannelTodayIncomeResponse{
 		Incomes: map[int]ChannelIncomeItem{

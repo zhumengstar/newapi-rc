@@ -43,6 +43,9 @@ import {
 import { getGroups, getTodayConsumptionUsers } from '@/features/users/api'
 import { getRankedModels } from '@/features/models/api'
 import { getChannelApiAddresses } from '@/features/channels/api'
+import { getChannelSources } from '@/features/exclusive-channels/api'
+import { QuickSourceDialog } from '@/features/exclusive-channels/components/quick-source-dialog'
+import type { UpstreamSourceDTO } from '@/features/exclusive-channels/types'
 import { formatLogQuota } from '@/lib/format'
 import { useMediaQuery } from '@/hooks'
 import { getUserGroups } from '@/lib/api'
@@ -52,6 +55,7 @@ import { LOG_TYPE_ALL_VALUE, LOG_TYPE_FILTERS } from '../constants'
 import { buildSearchParams } from '../lib/filter'
 import { getDefaultTimeRange } from '../lib/utils'
 import type { CommonLogFilters } from '../types'
+import { ApiAddressHoverPanel } from './api-address-hover-panel'
 import { CommonLogsStats } from './common-logs-stats'
 import { CompactDateTimeRangePicker } from './compact-date-time-range-picker'
 import {
@@ -304,6 +308,35 @@ export function CommonLogsFilterBar<TData>(
     enabled: isAdmin,
     staleTime: 30 * 1000,
   })
+
+  const { data: channelSourcesData } = useQuery({
+    queryKey: ['channel-sources-list'],
+    queryFn: async () => {
+      try {
+        const res = await getChannelSources()
+        return res?.data ?? []
+      } catch {
+        return []
+      }
+    },
+    enabled: isAdmin,
+    staleTime: 30 * 1000,
+  })
+
+  const sourceByBaseUrl = useMemo(() => {
+    const map = new Map<string, UpstreamSourceDTO>()
+    for (const s of channelSourcesData ?? []) {
+      const norm = s.base_url.trim().toLowerCase().replace(/\/+$/, '')
+      if (norm) map.set(norm, s)
+      map.set(s.base_url, s)
+    }
+    return map
+  }, [channelSourcesData])
+
+  const [editingSource, setEditingSource] = useState<UpstreamSourceDTO | null>(
+    null
+  )
+  const [sourceDialogOpen, setSourceDialogOpen] = useState(false)
 
   const apiAddressOptions = useMemo(() => {
     const list = apiAddressesData ?? []
@@ -672,6 +705,23 @@ export function CommonLogsFilterBar<TData>(
               handleApply({ ...filters, baseUrl: val }, logType)
             }}
             onKeyDown={handleKeyDown}
+            renderOptionHoverPanel={(option, closeDropdown) => {
+              if (!option.value) return null
+              const norm = option.value.trim().toLowerCase().replace(/\/+$/, '')
+              const source =
+                sourceByBaseUrl.get(norm) || sourceByBaseUrl.get(option.value)
+              return (
+                <ApiAddressHoverPanel
+                  baseUrl={option.value}
+                  source={source}
+                  onOpenFullConfig={(src) => {
+                    closeDropdown()
+                    setEditingSource(src)
+                    setSourceDialogOpen(true)
+                  }}
+                />
+              )
+            }}
           />
         </LogsFilterField>
       )}
@@ -750,42 +800,51 @@ export function CommonLogsFilterBar<TData>(
   )
 
   return (
-    <LogsFilterToolbar
-      table={props.table}
-      compactMobile
-      stats={statsBar}
-      actionStart={sensitiveToggle}
-      actionEnd={statusCodeFilter}
-      primaryFilters={
-        <>
-          {dateRangeFilter}
-          {modelFilter}
-          {groupFilter}
-          {typeFilter}
-          {expandedFilters}
-        </>
-      }
-      mobilePinnedFilters={dateRangeFilter}
-      mobileFilters={
-        <>
-          {modelFilter}
-          {groupFilter}
-          {typeFilter}
-          {expandedFilters}
-          <div className='flex items-center justify-between gap-2 pt-1'>
-            <span className='text-muted-foreground text-sm'>{t('Status Code', '状态码')}</span>
-            {statusCodeFilter}
-          </div>
-        </>
-      }
-      mobileFilterCount={
-        [filters.model, filters.group, hasTypeFilter, !!filters.statusCode].filter(Boolean).length +
-        expandedFilterCount
-      }
-      hasActiveFilters={hasAdditionalFilters}
-      onSearch={() => handleApply()}
-      searchLoading={fetchingLogs > 0}
-      onReset={handleReset}
-    />
+    <>
+      <LogsFilterToolbar
+        table={props.table}
+        compactMobile
+        stats={statsBar}
+        actionStart={sensitiveToggle}
+        actionEnd={statusCodeFilter}
+        primaryFilters={
+          <>
+            {dateRangeFilter}
+            {modelFilter}
+            {groupFilter}
+            {typeFilter}
+            {expandedFilters}
+          </>
+        }
+        mobilePinnedFilters={dateRangeFilter}
+        mobileFilters={
+          <>
+            {modelFilter}
+            {groupFilter}
+            {typeFilter}
+            {expandedFilters}
+            <div className='flex items-center justify-between gap-2 pt-1'>
+              <span className='text-muted-foreground text-sm'>{t('Status Code', '状态码')}</span>
+              {statusCodeFilter}
+            </div>
+          </>
+        }
+        mobileFilterCount={
+          [filters.model, filters.group, hasTypeFilter, !!filters.statusCode].filter(Boolean).length +
+          expandedFilterCount
+        }
+        hasActiveFilters={hasAdditionalFilters}
+        onSearch={() => handleApply()}
+        searchLoading={fetchingLogs > 0}
+        onReset={handleReset}
+      />
+      {isAdmin && (
+        <QuickSourceDialog
+          source={editingSource}
+          open={sourceDialogOpen}
+          onOpenChange={setSourceDialogOpen}
+        />
+      )}
+    </>
   )
 }

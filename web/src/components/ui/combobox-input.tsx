@@ -42,6 +42,10 @@ interface ComboboxInputProps {
   allowCustomValue?: boolean
   openOnFocus?: boolean
   onKeyDown?: React.KeyboardEventHandler<HTMLInputElement>
+  renderOptionHoverPanel?: (
+    option: ComboboxInputOption,
+    closeDropdown: () => void
+  ) => React.ReactNode
   'aria-label'?: string
   'aria-labelledby'?: string
   'aria-invalid'?: React.AriaAttributes['aria-invalid']
@@ -58,6 +62,7 @@ export function ComboboxInput({
   allowCustomValue = false,
   openOnFocus = true,
   onKeyDown,
+  renderOptionHoverPanel,
   'aria-label': ariaLabel,
   'aria-labelledby': ariaLabelledBy,
   'aria-invalid': ariaInvalid,
@@ -68,6 +73,7 @@ export function ComboboxInput({
   const [searchValue, setSearchValue] = React.useState('')
   const [searchChanged, setSearchChanged] = React.useState(false)
   const [highlightedIndex, setHighlightedIndex] = React.useState(-1)
+  const [hoverSide, setHoverSide] = React.useState<'left' | 'right'>('left')
   const containerRef = React.useRef<HTMLDivElement>(null)
   const inputRef = React.useRef<HTMLInputElement>(null)
   const listRef = React.useRef<HTMLUListElement>(null)
@@ -92,6 +98,14 @@ export function ComboboxInput({
   React.useEffect(() => {
     setHighlightedIndex(-1)
   }, [filteredOptions])
+
+  React.useEffect(() => {
+    if (!open || !renderOptionHoverPanel || !containerRef.current) return
+    const rect = containerRef.current.getBoundingClientRect()
+    const spaceRight = window.innerWidth - rect.right
+    const spaceLeft = rect.left
+    setHoverSide(spaceRight >= 400 || spaceRight >= spaceLeft ? 'right' : 'left')
+  }, [open, renderOptionHoverPanel])
 
   // Handle click outside to close
   React.useEffect(() => {
@@ -225,7 +239,13 @@ export function ComboboxInput({
           }
           pointerFocusRef.current = false
         }}
-        onBlur={() => {
+        onBlur={(e) => {
+          if (
+            e.relatedTarget &&
+            containerRef.current?.contains(e.relatedTarget as Node)
+          ) {
+            return
+          }
           setOpen(false)
           setSearchValue('')
         }}
@@ -307,6 +327,35 @@ export function ComboboxInput({
               )}
             </div>
           )}
+
+          {renderOptionHoverPanel &&
+            highlightedIndex >= 0 &&
+            filteredOptions[highlightedIndex] &&
+            (() => {
+              const panel = renderOptionHoverPanel(
+                filteredOptions[highlightedIndex],
+                () => {
+                  setOpen(false)
+                  setSearchValue('')
+                }
+              )
+              if (!panel) return null
+              return (
+                <div
+                  className={cn(
+                    'bg-popover text-popover-foreground absolute top-0 z-110 w-[390px] max-w-[90vw] rounded-xl border shadow-xl',
+                    hoverSide === 'right'
+                      ? 'left-full ml-1.5'
+                      : 'right-full mr-1.5'
+                  )}
+                  onMouseDown={(e) => {
+                    e.stopPropagation()
+                  }}
+                >
+                  {panel}
+                </div>
+              )
+            })()}
         </div>
       )}
     </div>

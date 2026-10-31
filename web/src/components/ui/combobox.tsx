@@ -56,6 +56,10 @@ type LegacyComboboxProps = {
   name?: string
   onBlur?: React.FocusEventHandler<HTMLInputElement>
   onKeyDown?: React.KeyboardEventHandler<HTMLInputElement>
+  renderOptionHoverPanel?: (
+    option: ComboboxInputOption,
+    closeDropdown: () => void
+  ) => React.ReactNode
   ref?: React.Ref<HTMLInputElement>
   'aria-label'?: string
   'aria-labelledby'?: string
@@ -89,6 +93,7 @@ function Combobox(
         className={props.className}
         allowCustomValue={props.allowCustomValue}
         openOnFocus={props.openOnFocus}
+        renderOptionHoverPanel={props.renderOptionHoverPanel}
       />
     )
   }

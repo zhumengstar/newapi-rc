@@ -500,6 +500,11 @@ export function UpstreamSourcesView({
                             const income = gIncome ? gIncome.today_income : 0
                             const quota = gIncome ? gIncome.today_quota : 0
                             const hasIncome = income > 0
+                            const grpCostRatio =
+                              source.group_cost_ratios?.[g] ??
+                              (source.default_cost_ratio && source.default_cost_ratio > 0
+                                ? source.default_cost_ratio
+                                : undefined)
 
                             return (
                               <div
@@ -510,15 +515,25 @@ export function UpstreamSourcesView({
                                     : 'bg-muted/30 border-border/60 text-muted-foreground'
                                 }`}
                               >
-                                <span
-                                  className={`font-mono font-medium truncate max-w-[130px] cursor-pointer hover:underline ${
-                                    hasIncome ? 'text-emerald-900 dark:text-emerald-200 font-semibold' : ''
-                                  }`}
-                                  onClick={() => setSelectedGroupFilter(g)}
-                                  title={t('Filter this group', `点击按分组筛选: ${g}`)}
-                                >
-                                  {g}
-                                </span>
+                                <div className='flex items-center gap-1.5 min-w-0'>
+                                  <span
+                                    className={`font-mono font-medium truncate max-w-[130px] cursor-pointer hover:underline ${
+                                      hasIncome ? 'text-emerald-900 dark:text-emerald-200 font-semibold' : ''
+                                    }`}
+                                    onClick={() => setSelectedGroupFilter(g)}
+                                    title={t('Filter this group', `点击按分组筛选: ${g}`)}
+                                  >
+                                    {g}
+                                  </span>
+                                  {grpCostRatio !== undefined && (
+                                    <Badge
+                                      variant='outline'
+                                      className='h-4 px-1 text-[10px] font-mono border-indigo-300/80 text-indigo-700 bg-indigo-50/80 dark:border-indigo-800 dark:text-indigo-300 dark:bg-indigo-950/40 shrink-0'
+                                    >
+                                      成本 {grpCostRatio}x
+                                    </Badge>
+                                  )}
+                                </div>
                                 <div className='flex items-baseline gap-1 shrink-0'>
                                   {hasIncome ? (
                                     <>
@@ -544,43 +559,106 @@ export function UpstreamSourcesView({
 
                     {/* 渠道/分组倍率 */}
                     <TableCell>
-                      {source.channel_ratio > 0 ? (
-                        <Badge
-                          variant='default'
-                          className='font-mono text-xs bg-amber-600/90 text-white shadow-2xs'
-                        >
-                          <Coins className='size-3 mr-1' />
-                          {source.channel_ratio}x
-                        </Badge>
-                      ) : (
-                        <span className='text-xs text-muted-foreground font-mono'>1.0x (默认)</span>
-                      )}
+                      {(() => {
+                        const groupRatioEntries = Object.entries(
+                          source.group_cost_ratios || {}
+                        )
+                        if (groupRatioEntries.length > 0) {
+                          return (
+                            <div className='flex flex-col gap-1'>
+                              <Badge
+                                variant='outline'
+                                className='font-mono text-[11px] border-indigo-300 text-indigo-700 bg-indigo-50 dark:border-indigo-800 dark:text-indigo-300 dark:bg-indigo-950/40 w-fit'
+                              >
+                                <Coins className='size-3 mr-1' />
+                                {groupRatioEntries.length} 个分组已设
+                              </Badge>
+                              {source.default_cost_ratio &&
+                                source.default_cost_ratio > 0 ? (
+                                <span className='text-[10px] text-muted-foreground font-mono'>
+                                  兜底 {source.default_cost_ratio}x
+                                </span>
+                              ) : null}
+                            </div>
+                          )
+                        }
+                        if (source.channel_ratio > 0) {
+                          return (
+                            <Badge
+                              variant='default'
+                              className='font-mono text-xs bg-amber-600/90 text-white shadow-2xs'
+                            >
+                              <Coins className='size-3 mr-1' />
+                              {source.channel_ratio}x
+                            </Badge>
+                          )
+                        }
+                        return (
+                          <span className='text-xs text-muted-foreground font-mono'>
+                            未设成本倍率
+                          </span>
+                        )
+                      })()}
                     </TableCell>
 
-                    {/* 模型单请求价格 */}
+                    {/* 模型成本单价 */}
                     <TableCell>
-                      {pricedModels.length === 0 ? (
-                        <span className='text-xs text-muted-foreground italic'>
-                          {t('Standard Token billing', '标准 Token 计费')}
-                        </span>
-                      ) : (
-                        <div className='flex flex-wrap gap-1'>
-                          {pricedModels.slice(0, 3).map(([mName, p]) => (
-                            <Badge
-                              key={mName}
-                              variant='outline'
-                              className='text-[10px] font-mono border-emerald-500/40 text-emerald-700 dark:text-emerald-400 bg-emerald-500/5'
-                            >
-                              {mName}: ${p.toFixed(3)}
-                            </Badge>
-                          ))}
-                          {pricedModels.length > 3 && (
-                            <Badge variant='outline' className='text-[10px]'>
-                              +{pricedModels.length - 3}
-                            </Badge>
-                          )}
-                        </div>
-                      )}
+                      {(() => {
+                        const rules = source.model_cost_rules || []
+                        if (rules.length > 0) {
+                          return (
+                            <div className='flex flex-col gap-1 max-w-[240px]'>
+                              {rules.slice(0, 3).map((r, idx) => (
+                                <Badge
+                                  key={idx}
+                                  variant='outline'
+                                  className='text-[10px] font-mono border-amber-400/50 text-amber-800 dark:text-amber-300 bg-amber-50/70 dark:bg-amber-950/30 justify-start truncate'
+                                  title={`${r.group === '*' ? '全部分组' : r.group}: ${r.models.join(', ')}`}
+                                >
+                                  {r.group !== '*' ? `[${r.group}] ` : ''}
+                                  {r.models.length === 1
+                                    ? r.models[0]
+                                    : `${r.models[0]} 等${r.models.length}个`}
+                                  :{' '}
+                                  {r.mode === 'per_token'
+                                    ? `入$${r.input_price ?? 0}/出$${r.output_price ?? 0}/M`
+                                    : `$${r.price ?? 0}/次`}
+                                </Badge>
+                              ))}
+                              {rules.length > 3 && (
+                                <Badge variant='outline' className='text-[10px] w-fit'>
+                                  +{rules.length - 3} 条规则
+                                </Badge>
+                              )}
+                            </div>
+                          )
+                        }
+                        if (pricedModels.length === 0) {
+                          return (
+                            <span className='text-xs text-muted-foreground italic'>
+                              {t('By Group Cost Ratio', '按分组成本倍率计费')}
+                            </span>
+                          )
+                        }
+                        return (
+                          <div className='flex flex-wrap gap-1'>
+                            {pricedModels.slice(0, 3).map(([mName, p]) => (
+                              <Badge
+                                key={mName}
+                                variant='outline'
+                                className='text-[10px] font-mono border-emerald-500/40 text-emerald-700 dark:text-emerald-400 bg-emerald-500/5'
+                              >
+                                {mName}: ${p.toFixed(3)}/次
+                              </Badge>
+                            ))}
+                            {pricedModels.length > 3 && (
+                              <Badge variant='outline' className='text-[10px]'>
+                                +{pricedModels.length - 3}
+                              </Badge>
+                            )}
+                          </div>
+                        )
+                      })()}
                     </TableCell>
 
                     {/* 快捷操作 */}
