@@ -435,6 +435,48 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 				}
 			}
 
+			// 兜底 AI 动态沙箱自愈：若遇到未知参数或协议报错，优先执行 ai_auto_heal_patch.js 极速自愈（未覆盖则异步触发项目自身 AI 演进更新该脚本）
+			if !c.GetBool("ai_self_heal_retried") && relaycommon.IsCandidateForAISelfHeal(newApiErr.Error()) {
+				rawBytes, _ := relaycommon.GetPrunedRequestBody(c, info)
+				if len(rawBytes) == 0 {
+					targetReq := convertedRequest
+					if targetReq == nil {
+						targetReq = request
+					}
+					rawBytes, _ = common.Marshal(targetReq)
+				}
+				if healedBytes, ruleID, healedOk := relaycommon.TryAISelfHealRequest(c, info, rawBytes, newApiErr.Error()); healedOk {
+					logger.LogWarn(c, fmt.Sprintf("触发 OpenAI/通用 AI 动态脚本自愈 (rule=%s, err=%s)，正在立即重试请求...", ruleID, newApiErr.Error()))
+					newBody, closer, bErr := relaycommon.NewOutboundJSONBody(healedBytes)
+					if bErr == nil {
+						defer closer.Close()
+						retryResp, rErr := adaptor.DoRequest(c, info, newBody)
+						if rErr == nil && retryResp != nil {
+							retryHttpResp := retryResp.(*http.Response)
+							if retryHttpResp.StatusCode == http.StatusOK {
+								logger.LogInfo(c, fmt.Sprintf("OpenAI/通用 AI 动态脚本自愈重试成功 (rule=%s)，已拿到上游 200 OK 响应", ruleID))
+								usage, resErr := adaptor.DoResponse(c, retryHttpResp, info)
+								if resErr != nil {
+									service.ResetStatusCode(resErr, statusCodeMappingStr)
+									service.SettleInterruptedRequestIfNeeded(c, info, usage, resErr)
+									return resErr
+								}
+								var containAudioTokens = usage.(*dto.Usage).CompletionTokenDetails.AudioTokens > 0 || usage.(*dto.Usage).PromptTokensDetails.AudioTokens > 0
+								var containsAudioRatios = ratio_setting.ContainsAudioRatio(info.OriginModelName) || ratio_setting.ContainsAudioCompletionRatio(info.OriginModelName)
+								if containAudioTokens && containsAudioRatios {
+									service.PostAudioConsumeQuota(c, info, usage.(*dto.Usage), "")
+								} else {
+									service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
+								}
+								return nil
+							}
+							newApiErr = service.RelayErrorHandler(c.Request.Context(), retryHttpResp, false)
+							service.ResetStatusCode(newApiErr, statusCodeMappingStr)
+						}
+					}
+				}
+			}
+
 			return newApiErr
 		}
 	}

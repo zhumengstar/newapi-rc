@@ -9,6 +9,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -18,6 +19,23 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+func init() {
+	relaycommon.RegisterInternalAIChannelResolver(func(group, modelName string) (string, string, bool) {
+		ch, err := model.GetRandomSatisfiedChannel(group, modelName, 0, nil)
+		if err != nil || ch == nil || ch.GetBaseURL() == "" {
+			return "", "", false
+		}
+		key, _, kErr := ch.GetNextEnabledKey()
+		if kErr != nil || key == "" {
+			key = ch.Key
+		}
+		if key == "" {
+			return "", "", false
+		}
+		return ch.GetBaseURL(), key, true
+	})
+}
 
 func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types.NewAPIError) {
 	info.InitChannelMeta(c)
@@ -327,6 +345,43 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 							retryHttpResp := retryResp.(*http.Response)
 							if retryHttpResp.StatusCode == http.StatusOK {
 								logger.LogInfo(c, "Gemini Part 数据深度自愈重试成功，已拿到上游 200 OK 响应")
+								usage, openaiErr := adaptor.DoResponse(c, retryHttpResp, info)
+								if openaiErr != nil {
+									service.ResetStatusCode(openaiErr, statusCodeMappingStr)
+									service.SettleInterruptedRequestIfNeeded(c, info, usage, openaiErr)
+									return openaiErr
+								}
+								service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
+								return nil
+							}
+							newAPIError = service.RelayErrorHandler(c.Request.Context(), retryHttpResp, false)
+							service.ResetStatusCode(newAPIError, statusCodeMappingStr)
+						}
+					}
+				}
+			}
+
+			// 兜底 AI 动态沙箱自愈：若遇到未知参数或协议报错，优先执行 ai_auto_heal_patch.js 极速自愈（未覆盖则异步触发项目自身 AI 演进更新该脚本）
+			if !c.GetBool("ai_self_heal_retried") && relaycommon.IsCandidateForAISelfHeal(newAPIError.Error()) {
+				rawBytes, _ := relaycommon.GetPrunedRequestBody(c, info)
+				if len(rawBytes) == 0 {
+					if storage, sErr := common.GetBodyStorage(c); sErr == nil {
+						rawBytes, _ = storage.Bytes()
+					}
+				}
+				if len(rawBytes) == 0 && request != nil {
+					rawBytes, _ = common.Marshal(request)
+				}
+				if healedBytes, ruleID, healedOk := relaycommon.TryAISelfHealRequest(c, info, rawBytes, newAPIError.Error()); healedOk {
+					logger.LogWarn(c, fmt.Sprintf("触发 Gemini AI 动态脚本自愈 (rule=%s, err=%s)，正在立即重试请求...", ruleID, newAPIError.Error()))
+					newBody, closer, bErr := relaycommon.NewOutboundJSONBody(healedBytes)
+					if bErr == nil {
+						defer closer.Close()
+						retryResp, rErr := adaptor.DoRequest(c, info, newBody)
+						if rErr == nil && retryResp != nil {
+							retryHttpResp := retryResp.(*http.Response)
+							if retryHttpResp.StatusCode == http.StatusOK {
+								logger.LogInfo(c, fmt.Sprintf("Gemini AI 动态脚本自愈重试成功 (rule=%s)，已拿到上游 200 OK 响应", ruleID))
 								usage, openaiErr := adaptor.DoResponse(c, retryHttpResp, info)
 								if openaiErr != nil {
 									service.ResetStatusCode(openaiErr, statusCodeMappingStr)
