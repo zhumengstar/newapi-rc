@@ -850,6 +850,7 @@ export async function getChannelGroups(): Promise<{
   message?: string
   data: string[]
   quotas?: Record<string, number>
+  rates?: Record<string, { rpm: number; mpm: number }>
 }> {
   const res = await api.get('/api/channel/groups')
   return res.data

@@ -145,12 +145,19 @@ export function CommonLogsFilterBar<TData>(
   const queryClient = useQueryClient()
   const searchParams = route.useSearch()
   const { isAdminView: isAdmin } = useLogsViewScope()
-  const { sensitiveVisible, setSensitiveVisible } = useUsageLogsContext()
+  const {
+    sensitiveVisible,
+    setSensitiveVisible,
+    autoRefresh,
+    refreshInterval,
+  } = useUsageLogsContext()
   const fetchingLogs = useIsFetching({ queryKey: ['logs'] })
   const { data: adminGroups } = useQuery({
     queryKey: ['groups'],
     queryFn: async () => requireServerSuccess(await getGroups()),
     enabled: isAdmin,
+    refetchInterval: autoRefresh ? refreshInterval : 5000,
+    staleTime: 2000,
   })
   const { data: userGroups } = useQuery({
     queryKey: ['user-groups'],
@@ -161,9 +168,21 @@ export function CommonLogsFilterBar<TData>(
     const groups = isAdmin
       ? (adminGroups?.data ?? [])
       : Object.keys(userGroups?.data ?? {})
+    const rates = adminGroups?.rates ?? {}
     const items = groups
       .filter((group) => group !== 'auto')
-      .map((group) => ({ label: group, value: group }))
+      .map((group) => {
+        const rate = rates[group]
+        const mpm = rate?.mpm ?? 0
+        const rpm = rate?.rpm ?? 0
+        return {
+          label: group,
+          value: group,
+          description: isAdmin
+            ? `MPM ${formatLogQuota(mpm)} · RPM ${rpm}`
+            : undefined,
+        }
+      })
     return [{ value: '', label: t('All Groups', '全部分组') }, ...items]
   }, [isAdmin, adminGroups, userGroups, t])
 

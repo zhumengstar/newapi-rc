@@ -158,10 +158,20 @@ export async function resetUserTwoFA(id: number): Promise<ApiResponse> {
   return res.data
 }
 
+export interface GroupRealtimeRate {
+  rpm: number
+  mpm: number
+}
+
 /**
  * Get all available groups
  */
-export async function getGroups(): Promise<ApiResponse<string[]>> {
+export async function getGroups(): Promise<
+  ApiResponse<string[]> & {
+    quotas?: Record<string, number>
+    rates?: Record<string, GroupRealtimeRate>
+  }
+> {
   const res = await api.get('/api/group/')
   return res.data
 }

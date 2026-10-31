@@ -24,9 +24,26 @@ var (
 	rankedModelsCacheMu  sync.RWMutex
 	rankedModelsCacheExp time.Time
 	rankedModelsUpdating int32
+
+	realtimeGroupRatesCache    map[string]GroupRealtimeRate
+	realtimeGroupRatesMu       sync.RWMutex
+	realtimeGroupRatesCacheExp time.Time
+	realtimeGroupRatesUpdating int32
 )
 
 const rankingUpdateInterval = 3 * time.Minute
+const realtimeGroupRatesTTL = 3 * time.Second
+
+type GroupRealtimeRate struct {
+	RPM int64 `json:"rpm"`
+	MPM int64 `json:"mpm"`
+}
+
+type groupRealtimeRateRow struct {
+	Group string `gorm:"column:group"`
+	RPM   int64  `gorm:"column:rpm"`
+	MPM   int64  `gorm:"column:mpm"`
+}
 
 type groupQuotaRow struct {
 	Group string `gorm:"column:group"`
@@ -288,6 +305,107 @@ func GetRankedGroupsWithQuotas() ([]string, map[string]int64) {
 // GetRankedGroups 获取按照当天消费金额优先、倍率次之排序的分组列表
 func GetRankedGroups() []string {
 	res, _ := GetRankedGroupsWithQuotas()
+	return res
+}
+
+func calculateGroupsRealtimeRates() map[string]GroupRealtimeRate {
+	var quotaDB *gorm.DB = LOG_DB
+	if quotaDB == nil {
+		quotaDB = DB
+	}
+	if quotaDB == nil {
+		return map[string]GroupRealtimeRate{}
+	}
+
+	col := logGroupCol
+	if col == "" {
+		col = "\"group\""
+	}
+
+	since := time.Now().Add(-60 * time.Second).Unix()
+	var rows []groupRealtimeRateRow
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+
+	err := quotaDB.WithContext(ctx).Table("logs").
+		Select(col + ", COUNT(*) AS rpm, COALESCE(SUM(quota), 0) AS mpm").
+		Where("type = ? AND created_at >= ? AND "+col+" != ''", LogTypeConsume, since).
+		Group(col).
+		Scan(&rows).Error
+	if err != nil {
+		common.SysError("failed to query realtime group rates: " + err.Error())
+		return nil
+	}
+
+	rates := make(map[string]GroupRealtimeRate, len(rows)+8)
+	for _, row := range rows {
+		trimmed := strings.TrimSpace(row.Group)
+		if trimmed == "" {
+			continue
+		}
+		if strings.Contains(trimmed, ",") {
+			for _, part := range strings.Split(trimmed, ",") {
+				part = strings.TrimSpace(part)
+				if part == "" {
+					continue
+				}
+				cur := rates[part]
+				cur.RPM += row.RPM
+				cur.MPM += row.MPM
+				rates[part] = cur
+			}
+		} else {
+			cur := rates[trimmed]
+			cur.RPM += row.RPM
+			cur.MPM += row.MPM
+			rates[trimmed] = cur
+		}
+	}
+	return rates
+}
+
+func RefreshGroupsRealtimeRates() map[string]GroupRealtimeRate {
+	rates := calculateGroupsRealtimeRates()
+	if rates == nil {
+		return map[string]GroupRealtimeRate{}
+	}
+	realtimeGroupRatesMu.Lock()
+	realtimeGroupRatesCache = rates
+	realtimeGroupRatesCacheExp = time.Now().Add(realtimeGroupRatesTTL)
+	realtimeGroupRatesMu.Unlock()
+	return rates
+}
+
+// GetGroupsRealtimeRates 获取各分组最近60秒的实时 RPM 与 MPM（3秒内存缓存）
+func GetGroupsRealtimeRates() map[string]GroupRealtimeRate {
+	now := time.Now()
+	realtimeGroupRatesMu.RLock()
+	if realtimeGroupRatesCache != nil && now.Before(realtimeGroupRatesCacheExp) {
+		res := make(map[string]GroupRealtimeRate, len(realtimeGroupRatesCache))
+		for k, v := range realtimeGroupRatesCache {
+			res[k] = v
+		}
+		realtimeGroupRatesMu.RUnlock()
+		return res
+	}
+	isNil := realtimeGroupRatesCache == nil
+	realtimeGroupRatesMu.RUnlock()
+
+	if isNil {
+		RefreshGroupsRealtimeRates()
+	} else if atomic.CompareAndSwapInt32(&realtimeGroupRatesUpdating, 0, 1) {
+		go func() {
+			defer atomic.StoreInt32(&realtimeGroupRatesUpdating, 0)
+			RefreshGroupsRealtimeRates()
+		}()
+	}
+
+	realtimeGroupRatesMu.RLock()
+	res := make(map[string]GroupRealtimeRate, len(realtimeGroupRatesCache))
+	for k, v := range realtimeGroupRatesCache {
+		res[k] = v
+	}
+	realtimeGroupRatesMu.RUnlock()
 	return res
 }
 

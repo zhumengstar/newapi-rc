@@ -75,6 +75,7 @@ function AutoRefreshControlInner({
     triggerRefresh()
     void queryClient.invalidateQueries({ queryKey: ['logs'] })
     void queryClient.invalidateQueries({ queryKey: ['usage-logs-stats'] })
+    void queryClient.invalidateQueries({ queryKey: ['groups'] })
   }, [queryClient, triggerRefresh])
 
   const currentValue = useMemo(() => {

@@ -279,7 +279,15 @@ export function ComboboxInput({
                       <span className='truncate font-mono text-xs'>{option.label}</span>
                     </div>
                     {option.description && (
-                      <span className='shrink-0 text-xs font-mono font-medium text-emerald-600 dark:text-emerald-400'>
+                      <span
+                        className={cn(
+                          'shrink-0 text-xs font-mono',
+                          option.description === '$0' ||
+                            option.description === 'MPM $0 · RPM 0'
+                            ? 'text-muted-foreground font-normal'
+                            : 'font-medium text-emerald-600 dark:text-emerald-400'
+                        )}
+                      >
                         {option.description}
                       </span>
                     )}

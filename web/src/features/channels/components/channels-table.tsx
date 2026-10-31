@@ -446,10 +446,17 @@ export function ChannelsTable() {
   const { data: groupsData } = useQuery({
     queryKey: ['channel-groups'],
     queryFn: getChannelGroups,
+    refetchInterval: 5000,
+    staleTime: 2000,
   })
 
   const groupQuotas = useMemo(
     () => groupsData?.quotas ?? {},
+    [groupsData]
+  )
+
+  const groupRates = useMemo(
+    () => groupsData?.rates ?? {},
     [groupsData]
   )
 
@@ -889,8 +896,12 @@ export function ChannelsTable() {
       ...sortedGroupNames.map((group) => {
         const ratio = ratioForGroup(group)
         const quota = groupQuotas[group] ?? 0
+        const rate = groupRates[group]
+        const mpm = rate?.mpm ?? 0
+        const rpm = rate?.rpm ?? 0
         const label = sensitiveVisible ? group : '••••'
         const parts = [label]
+        parts.push(`MPM ${formatQuotaWithCurrency(mpm)} · RPM ${rpm}`)
         if (quota > 0) {
           parts.push(
             `${t('Today', '今日')}: ${formatQuotaWithCurrency(quota)}`
@@ -905,7 +916,7 @@ export function ChannelsTable() {
         }
       }),
     ]
-  }, [groupQuotas, groupRatio, sensitiveVisible, sortedGroupNames, t])
+  }, [groupQuotas, groupRates, groupRatio, sensitiveVisible, sortedGroupNames, t])
 
   return (
     <DataTablePage

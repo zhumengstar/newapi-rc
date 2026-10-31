@@ -18,11 +18,13 @@ func GetChannelGroups(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	rates := model.GetGroupsRealtimeRates()
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
 		"data":    groups,
 		"quotas":  quotas,
+		"rates":   rates,
 	})
 }
 
@@ -63,11 +65,13 @@ func getAllConfiguredAndRankedGroups() []string {
 
 func GetGroups(c *gin.Context) {
 	groupNames, quotaMap := getAllConfiguredAndRankedGroupsWithQuotas()
+	rates := model.GetGroupsRealtimeRates()
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
 		"data":    groupNames,
 		"quotas":  quotaMap,
+		"rates":   rates,
 	})
 }
 
