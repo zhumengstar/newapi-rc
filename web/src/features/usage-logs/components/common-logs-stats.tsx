@@ -66,7 +66,7 @@ export function CommonLogsStats() {
   const { t } = useTranslation()
   const { isAdminView: isAdmin } = useLogsViewScope()
   const searchParams = route.useSearch()
-  const { sensitiveVisible, autoRefresh, refreshInterval, refreshTrigger } =
+  const { sensitiveVisible, autoRefresh, refreshTrigger } =
     useUsageLogsContext()
 
   const { data: stats, isLoading } = useQuery({
@@ -75,7 +75,8 @@ export function CommonLogsStats() {
       let effectiveSearchParams = searchParams
       const nowMs = Date.now()
       const endParam = searchParams.endTime ? Number(searchParams.endTime) : 0
-      const isHistorical = endParam > 0 && endParam < nowMs - 60 * 1000
+      const isHistorical =
+        !autoRefresh && endParam > 0 && endParam < nowMs - 4 * 3600 * 1000
       if (!isHistorical) {
         const defaultRange = getDefaultTimeRange()
         effectiveSearchParams = {
@@ -101,8 +102,6 @@ export function CommonLogsStats() {
         ? result.data || DEFAULT_LOG_STATS
         : DEFAULT_LOG_STATS
     },
-    refetchInterval: autoRefresh ? refreshInterval : false,
-    refetchIntervalInBackground: false,
     placeholderData: (previousData) => previousData,
   })
 

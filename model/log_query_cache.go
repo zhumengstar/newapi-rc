@@ -23,7 +23,7 @@ var logCountCache = struct {
 var logCountGroup singleflight.Group
 
 func logCountCacheTTL() time.Duration {
-	seconds := common.GetEnvOrDefault("LOG_COUNT_CACHE_TTL_SECONDS", 60)
+	seconds := common.GetEnvOrDefault("LOG_COUNT_CACHE_TTL_SECONDS", 2)
 	if seconds < 0 {
 		seconds = 0
 	}
@@ -124,17 +124,8 @@ func getCachedLogCount(key string, loader func() (int64, error)) (int64, error) 
 	logCountCache.Lock()
 	entry, ok := logCountCache.entries[key]
 	logCountCache.Unlock()
-	if ok {
-		if now.Before(entry.expiresAt) {
-			return entry.value, nil
-		}
-		// Stale-While-Revalidate: 10 分钟窗口内立即 0ms 返回上次统计值，并在后台单飞异步更新
-		if now.Before(entry.expiresAt.Add(10 * time.Minute)) {
-			go func() {
-				_, _ = refreshCachedLogCount(key, ttl, loader)
-			}()
-			return entry.value, nil
-		}
+	if ok && now.Before(entry.expiresAt) {
+		return entry.value, nil
 	}
 
 	return refreshCachedLogCount(key, ttl, loader)

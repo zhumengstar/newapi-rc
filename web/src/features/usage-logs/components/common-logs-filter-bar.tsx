@@ -231,6 +231,7 @@ export function CommonLogsFilterBar<TData>(
     setSensitiveVisible,
     autoRefresh,
     refreshInterval,
+    triggerRefresh,
   } = useUsageLogsContext()
   const fetchingLogs = useIsFetching({ queryKey: ['logs'] })
   const { data: adminGroups } = useQuery({
@@ -807,20 +808,17 @@ export function CommonLogsFilterBar<TData>(
         type: [nextLogType],
         page: 1,
       }
-      const nextKey = buildSearchSourceKey(nextSearch)
-      const isSameSearch =
-        nextKey === searchState.sourceKey && (searchParams.page ?? 1) === 1
       navigate({
         to: '/usage-logs/$section',
         params: { section: 'common' },
         search: nextSearch,
       })
-      if (isSameSearch) {
-        queryClient.invalidateQueries({ queryKey: ['logs'] })
-        queryClient.invalidateQueries({ queryKey: ['usage-logs-stats'] })
-      }
+      triggerRefresh()
+      void queryClient.invalidateQueries({ queryKey: ['groups'] })
+      void queryClient.invalidateQueries({ queryKey: ['today-consumption-users'] })
+      void queryClient.invalidateQueries({ queryKey: ['channel-api-addresses'] })
     },
-    [filters, logType, navigate, queryClient, searchState.sourceKey, searchParams.page]
+    [filters, logType, navigate, queryClient, triggerRefresh]
   )
 
   const handleReset = useCallback(() => {

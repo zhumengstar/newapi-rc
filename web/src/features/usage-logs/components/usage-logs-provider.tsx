@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 /* eslint-disable react-refresh/only-export-components */
-import { createContext, useContext, useState, type ReactNode } from 'react'
+import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
 
 import { ROLE } from '@/lib/roles'
 import { useAuthStore } from '@/stores/auth-store'
@@ -117,6 +117,17 @@ export function UsageLogsProvider({ children }: { children: ReactNode }) {
   const triggerRefresh = () => {
     setRefreshTrigger(Date.now())
   }
+
+  useEffect(() => {
+    if (!autoRefresh || refreshInterval < 1000) return
+    const timer = window.setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        return
+      }
+      setRefreshTrigger(Date.now())
+    }, refreshInterval)
+    return () => window.clearInterval(timer)
+  }, [autoRefresh, refreshInterval])
 
   return (
     <UsageLogsContext.Provider

@@ -130,7 +130,7 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
     ],
   })
 
-  const { autoRefresh, refreshInterval, refreshTrigger } = useUsageLogsContext()
+  const { autoRefresh, refreshTrigger } = useUsageLogsContext()
 
   const { data, isLoading, isFetching } = useQuery({
     queryKey: [
@@ -146,10 +146,11 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
     ],
     queryFn: async () => {
       let effectiveSearchParams = searchParams
-      if (autoRefresh && pagination.pageIndex === 0) {
+      if (pagination.pageIndex === 0) {
         const nowMs = Date.now()
         const endParam = searchParams.endTime ? Number(searchParams.endTime) : 0
-        const isHistorical = endParam > 0 && endParam < nowMs - 60 * 1000
+        const isHistorical =
+          !autoRefresh && endParam > 0 && endParam < nowMs - 4 * 3600 * 1000
         if (!isHistorical) {
           const defaultRange = getDefaultTimeRange()
           effectiveSearchParams = {
@@ -175,8 +176,6 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
 
       return result.data || DEFAULT_LOGS_DATA
     },
-    refetchInterval: autoRefresh ? refreshInterval : false,
-    refetchIntervalInBackground: false,
     placeholderData: (previousData, previousQuery) => {
       if (
         previousQuery?.queryKey[1] === logCategory &&

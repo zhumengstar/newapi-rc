@@ -69,13 +69,15 @@ function AutoRefreshControlInner({
     triggerRefresh,
   } = context
 
-  const isFetchingLogs = useIsFetching({ queryKey: ['logs'] }) > 0
+  const isFetchingLogs =
+    useIsFetching({ queryKey: ['logs'] }) > 0 ||
+    useIsFetching({ queryKey: ['usage-logs-stats'] }) > 0
 
   const handleManualRefresh = useCallback(() => {
     triggerRefresh()
-    void queryClient.invalidateQueries({ queryKey: ['logs'] })
-    void queryClient.invalidateQueries({ queryKey: ['usage-logs-stats'] })
     void queryClient.invalidateQueries({ queryKey: ['groups'] })
+    void queryClient.invalidateQueries({ queryKey: ['today-consumption-users'] })
+    void queryClient.invalidateQueries({ queryKey: ['channel-api-addresses'] })
   }, [queryClient, triggerRefresh])
 
   const currentValue = useMemo(() => {

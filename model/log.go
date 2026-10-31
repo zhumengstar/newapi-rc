@@ -853,15 +853,15 @@ func refreshLogStatCache(cacheKey string, logType int, startTimestamp int64, end
 		}
 
 		now := time.Now()
-		ttl := 5 * time.Second
+		ttl := 1 * time.Second
 		if endTimestamp > 0 && endTimestamp < now.Unix()-60 {
-			ttl = 5 * time.Minute
+			ttl = 30 * time.Second
 		}
 
 		logStatCacheMu.Lock()
 		if len(logStatCache) > 512 {
 			for k, v := range logStatCache {
-				if now.After(v.expiresAt.Add(5 * time.Minute)) {
+				if now.After(v.expiresAt) {
 					delete(logStatCache, k)
 				}
 			}
@@ -893,17 +893,8 @@ func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelNa
 	logStatCacheMu.RLock()
 	item, found := logStatCache[cacheKey]
 	logStatCacheMu.RUnlock()
-	if found {
-		if now.Before(item.expiresAt) {
-			return item.stat, nil
-		}
-		// Stale-While-Revalidate: 5 分钟窗口内立即 0ms 返回缓存统计，并在后台异步更新
-		if now.Before(item.expiresAt.Add(5 * time.Minute)) {
-			go func() {
-				_, _ = refreshLogStatCache(cacheKey, logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, baseURL)
-			}()
-			return item.stat, nil
-		}
+	if found && now.Before(item.expiresAt) {
+		return item.stat, nil
 	}
 
 	return refreshLogStatCache(cacheKey, logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, baseURL)
