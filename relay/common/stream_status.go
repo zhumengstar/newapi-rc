@@ -47,9 +47,24 @@ func (s *StreamStatus) SetEndReason(reason StreamEndReason, err error) {
 		return
 	}
 	s.endOnce.Do(func() {
+		s.mu.Lock()
 		s.EndReason = reason
 		s.EndError = err
+		s.mu.Unlock()
 	})
+}
+
+func (s *StreamStatus) ForceEndReason(reason StreamEndReason, err error) {
+	if s == nil {
+		return
+	}
+	s.SetEndReason(reason, err)
+	s.mu.Lock()
+	s.EndReason = reason
+	if err != nil {
+		s.EndError = err
+	}
+	s.mu.Unlock()
 }
 
 func (s *StreamStatus) RecordError(msg string) {

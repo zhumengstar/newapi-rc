@@ -211,6 +211,19 @@ func SettleClientCanceled(c *gin.Context, info *relaycommon.RelayInfo, usage any
 	if info == nil {
 		return false
 	}
+	if info.StreamStatus == nil {
+		info.StreamStatus = relaycommon.NewStreamStatus()
+	}
+	var endErr error
+	if c != nil && c.Request != nil && c.Request.Context() != nil && c.Request.Context().Err() != nil {
+		endErr = c.Request.Context().Err()
+	} else if apiErr != nil {
+		endErr = apiErr
+	} else {
+		endErr = errors.New("context canceled")
+	}
+	info.StreamStatus.ForceEndReason(relaycommon.StreamEndReasonClientGone, endErr)
+
 	extraContent := []string{"客户端主动断开连接，按已消耗Token结算"}
 	logMsg := fmt.Sprintf("客户端主动断开连接(499)，执行按实扣费结算: userId=%d, channelId=%d, model=%s",
 		info.UserId, info.ChannelId, info.OriginModelName)

@@ -73,7 +73,11 @@ import { DetailsDialog } from '../dialogs/details-dialog'
 import { LogCostDisplay, OriginalCostDisplay } from '../log-cost-display'
 import { computeOriginalCostResult, getGroupRatio } from '../../lib/original-cost'
 import { ModelBadge } from '../model-badge'
-import { TimingMetricsCell, StreamTpsCell } from '../timing-metrics-cell'
+import {
+  TimingMetricsCell,
+  StreamTpsCell,
+  resolveEffectiveStreamStatus,
+} from '../timing-metrics-cell'
 import { useUsageLogsContext } from '../usage-logs-provider'
 
 interface DetailSegment {
@@ -105,6 +109,13 @@ function buildDetailSegments(
   // defense in depth so the marker never leaks if that changes.
   if (isAdmin && other?.admin_info?.quota_saturation) {
     adminSegments.push({ text: t('Quota clamped'), danger: true })
+  }
+  const effectiveStream = resolveEffectiveStreamStatus(log, other)
+  if (effectiveStream?.end_reason === 'client_gone') {
+    adminSegments.push({
+      text: t('Client Disconnected', '客户端断开'),
+      danger: true,
+    })
   }
   return [...adminSegments, ...segments]
 }
@@ -671,7 +682,7 @@ export function useCommonLogsColumns(
             isStream={log.is_stream}
             isTask={other?.is_task === true}
             tokensPerSecond={tokensPerSecond}
-            streamStatus={other?.stream_status}
+            streamStatus={resolveEffectiveStreamStatus(log, other)}
           />
         )
       },
@@ -830,30 +841,48 @@ export function useCommonLogsColumns(
           usageSchema
         )
         const primary = segments[0]
+        const secondary = segments[1]
         const hasMore = segments.length > 1
         let primaryTextClass = 'text-foreground'
         if (primary?.muted) {
           primaryTextClass = 'text-muted-foreground/60'
         } else if (primary?.danger) {
-          primaryTextClass = 'text-red-600 dark:text-red-400'
+          primaryTextClass = 'text-red-600 dark:text-red-400 font-medium'
         }
         let detailPreview = <span className='text-muted-foreground/40'>—</span>
         if (primary) {
-          detailPreview = (
-            <span
-              className={cn(
-                'truncate leading-snug group-hover:underline',
-                primaryTextClass
-              )}
-            >
-              {primary.text}
-              {hasMore && (
-                <span className='text-muted-foreground/40 ml-0.5'>
-                  +{segments.length - 1}
+          if (primary.danger && secondary) {
+            detailPreview = (
+              <span className='truncate leading-snug group-hover:underline'>
+                <span className='font-medium text-red-600 dark:text-red-400'>
+                  {primary.text}
                 </span>
-              )}
-            </span>
-          )
+                <span className='text-muted-foreground/50 mx-1'>·</span>
+                <span className='text-foreground'>{secondary.text}</span>
+                {segments.length > 2 && (
+                  <span className='text-muted-foreground/40 ml-0.5'>
+                    +{segments.length - 2}
+                  </span>
+                )}
+              </span>
+            )
+          } else {
+            detailPreview = (
+              <span
+                className={cn(
+                  'truncate leading-snug group-hover:underline',
+                  primaryTextClass
+                )}
+              >
+                {primary.text}
+                {hasMore && (
+                  <span className='text-muted-foreground/40 ml-0.5'>
+                    +{segments.length - 1}
+                  </span>
+                )}
+              </span>
+            )
+          }
         } else if (log.content) {
           detailPreview = (
             <span className='text-muted-foreground truncate group-hover:underline'>

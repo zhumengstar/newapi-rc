@@ -290,8 +290,16 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 			}
 		}
 
+		if c != nil && c.Request != nil && c.Request.Context() != nil && c.Request.Context().Err() != nil {
+			info.StreamStatus.ForceEndReason(relaycommon.StreamEndReasonClientGone, c.Request.Context().Err())
+			return
+		}
 		if err := scanner.Err(); err != nil {
 			if err != io.EOF {
+				if err == context.Canceled || strings.Contains(strings.ToLower(err.Error()), "context canceled") {
+					info.StreamStatus.ForceEndReason(relaycommon.StreamEndReasonClientGone, err)
+					return
+				}
 				logger.LogError(c, "scanner error: "+err.Error())
 				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonScannerErr, err)
 			}
@@ -305,10 +313,15 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 		info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonTimeout, nil)
 	case <-stopChan:
 		// EndReason already set by the goroutine that triggered stopChan
+		if c != nil && c.Request != nil && c.Request.Context() != nil && c.Request.Context().Err() != nil &&
+			info.StreamStatus.EndReason != relaycommon.StreamEndReasonDone &&
+			info.StreamStatus.EndReason != relaycommon.StreamEndReasonHandlerStop {
+			info.StreamStatus.ForceEndReason(relaycommon.StreamEndReasonClientGone, c.Request.Context().Err())
+		}
 	case <-c.Request.Context().Done():
 		// 客户端断开：立即 cleanup 关闭上游 resp.Body，解除 scanner 阻塞并让上游停止生成，
 		// 避免为已放弃的请求继续消费上游 token。
-		info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonClientGone, c.Request.Context().Err())
+		info.StreamStatus.ForceEndReason(relaycommon.StreamEndReasonClientGone, c.Request.Context().Err())
 	}
 
 	cleanup()

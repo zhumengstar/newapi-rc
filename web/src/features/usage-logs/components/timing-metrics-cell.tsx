@@ -155,6 +155,51 @@ export function TimingMetricsCell(props: TimingMetricsCellProps) {
   )
 }
 
+export function resolveEffectiveStreamStatus(
+  log: { content?: string; completion_tokens?: number },
+  other: LogOtherData | null | undefined
+): LogOtherData['stream_status'] {
+  const raw = other?.stream_status
+  const content = log.content || ''
+  const isContentClientGone =
+    content.includes('客户端主动断开') ||
+    content.includes('客户端断开') ||
+    content.toLowerCase().includes('client_gone')
+
+  if (raw) {
+    if (
+      raw.end_reason === 'scanner_error' &&
+      raw.end_error &&
+      raw.end_error.toLowerCase().includes('context canceled')
+    ) {
+      return {
+        ...raw,
+        status: 'error',
+        end_reason: 'client_gone',
+      }
+    }
+    if (raw.status === 'ok' && isContentClientGone) {
+      return {
+        ...raw,
+        status: 'error',
+        end_reason: 'client_gone',
+        end_error: raw.end_error || 'context canceled',
+      }
+    }
+    return raw
+  }
+
+  if (isContentClientGone) {
+    return {
+      status: 'error',
+      end_reason: 'client_gone',
+      end_error: 'context canceled',
+    }
+  }
+
+  return undefined
+}
+
 interface StreamTpsCellProps {
   isStream: boolean
   compact?: boolean
@@ -167,8 +212,15 @@ interface StreamTpsCellProps {
 
 export function StreamTpsCell(props: StreamTpsCellProps) {
   const { t } = useTranslation()
-  const showStreamError =
-    props.isStream && props.streamStatus && props.streamStatus.status !== 'ok'
+  const showStreamError = Boolean(
+    props.streamStatus && props.streamStatus.status !== 'ok'
+  )
+  const isClientGone =
+    props.streamStatus?.end_reason === 'client_gone' ||
+    Boolean(
+      props.streamStatus?.end_error &&
+        props.streamStatus.end_error.toLowerCase().includes('context canceled')
+    )
   const tpsLabel =
     props.tokensPerSecond != null
       ? `${Math.round(props.tokensPerSecond)} t/s`
@@ -203,7 +255,16 @@ export function StreamTpsCell(props: StreamTpsCellProps) {
                 <p>
                   {t('Stream Status')}: {t('Error')}
                 </p>
-                <p>{props.streamStatus?.end_reason || 'unknown'}</p>
+                <p>
+                  {isClientGone
+                    ? 'client_gone'
+                    : props.streamStatus?.end_reason || 'unknown'}
+                </p>
+                {isClientGone && (
+                  <p className='text-red-300 font-medium'>
+                    {t('Client Disconnected', '客户端断开')}
+                  </p>
+                )}
                 {(props.streamStatus?.error_count ?? 0) > 0 && (
                   <p>
                     {t('Soft Errors')}: {props.streamStatus?.error_count}
@@ -214,11 +275,22 @@ export function StreamTpsCell(props: StreamTpsCellProps) {
           </Tooltip>
         )}
       </span>
-      {(!props.compact ||
-        (props.isStream && props.tokensPerSecond != null)) && (
-        <span className='text-muted-foreground/60 px-0.5 tabular-nums'>
-          {tpsLabel}
+      {isClientGone ? (
+        <span className='inline-flex items-center gap-1 px-0.5 text-[11px] font-medium text-destructive whitespace-nowrap tabular-nums'>
+          <span>{t('Client Disconnected', '客户端断开')}</span>
+          {props.tokensPerSecond != null && (
+            <span className='text-muted-foreground/60 font-normal'>
+              · {tpsLabel}
+            </span>
+          )}
         </span>
+      ) : (
+        (!props.compact ||
+          (props.isStream && props.tokensPerSecond != null)) && (
+          <span className='text-muted-foreground/60 px-0.5 tabular-nums'>
+            {tpsLabel}
+          </span>
+        )
       )}
     </div>
   )

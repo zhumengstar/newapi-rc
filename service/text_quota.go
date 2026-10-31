@@ -477,6 +477,33 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 	if common.GetContextKeyBool(ctx, "context_pruned") || (ctx != nil && ctx.GetBool("context_pruned")) {
 		extraContent = append(extraContent, "历史上下文超限，已自动滑动裁剪早期对话")
 	}
+
+	isClientGone := false
+	if relayInfo != nil && relayInfo.StreamStatus != nil && relayInfo.StreamStatus.EndReason == relaycommon.StreamEndReasonClientGone {
+		isClientGone = true
+	} else if ctx != nil && ctx.Request != nil && ctx.Request.Context() != nil && ctx.Request.Context().Err() != nil {
+		if billingUsage == nil || billingUsage.CompletionTokens == 0 || (relayInfo != nil && relayInfo.StreamStatus != nil && relayInfo.StreamStatus.EndReason != relaycommon.StreamEndReasonDone) {
+			isClientGone = true
+			if relayInfo != nil {
+				if relayInfo.StreamStatus == nil {
+					relayInfo.StreamStatus = relaycommon.NewStreamStatus()
+				}
+				relayInfo.StreamStatus.ForceEndReason(relaycommon.StreamEndReasonClientGone, ctx.Request.Context().Err())
+			}
+		}
+	}
+	if isClientGone {
+		hasClientMsg := false
+		for _, ec := range extraContent {
+			if strings.Contains(ec, "客户端") {
+				hasClientMsg = true
+				break
+			}
+		}
+		if !hasClientMsg {
+			extraContent = append(extraContent, "客户端主动断开连接，按已消耗Token结算")
+		}
+	}
 	summary := calculateTextQuotaSummary(ctx, relayInfo, billingUsage)
 
 	var tieredResult *billingexpr.TieredResult

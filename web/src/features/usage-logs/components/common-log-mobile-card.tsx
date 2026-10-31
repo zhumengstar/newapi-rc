@@ -40,7 +40,11 @@ import {
   isTimingLogType,
 } from '../lib/utils'
 import { ModelBadge } from './model-badge'
-import { StreamTpsCell, TimingMetricsCell } from './timing-metrics-cell'
+import {
+  StreamTpsCell,
+  TimingMetricsCell,
+  resolveEffectiveStreamStatus,
+} from './timing-metrics-cell'
 import { useUsageLogsContext } from './usage-logs-provider'
 
 type FieldName =
@@ -199,7 +203,7 @@ export function CommonLogMobileCard<TData>(props: {
                       ? log.completion_tokens / log.use_time
                       : null
                   }
-                  streamStatus={other?.stream_status}
+                  streamStatus={resolveEffectiveStreamStatus(log, other)}
                 />
               )}
               {props.cells.has('use_time') && (

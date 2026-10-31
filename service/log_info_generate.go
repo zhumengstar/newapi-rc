@@ -136,10 +136,13 @@ func appendParamOverrideInfo(relayInfo *relaycommon.RelayInfo, other *model.LogO
 }
 
 func appendStreamStatus(relayInfo *relaycommon.RelayInfo, other *model.LogOther) {
-	if relayInfo == nil || other == nil || !relayInfo.IsStream || relayInfo.StreamStatus == nil {
+	if relayInfo == nil || other == nil || relayInfo.StreamStatus == nil {
 		return
 	}
 	ss := relayInfo.StreamStatus
+	if !relayInfo.IsStream && ss.IsNormalEnd() && !ss.HasErrors() {
+		return
+	}
 	status := "ok"
 	if !ss.IsNormalEnd() || ss.HasErrors() {
 		status = "error"
