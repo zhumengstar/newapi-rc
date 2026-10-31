@@ -17,6 +17,7 @@ import (
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 
 	"github.com/samber/lo"
 	"gorm.io/gorm"
@@ -148,15 +149,22 @@ func NewChannelSortOptions(sortBy string, sortOrder string, idSort bool, groupOr
 }
 
 func (options ChannelSortOptions) Apply(query *gorm.DB) *gorm.DB {
-	if options.SortBy == "" && len(options.GroupOrder) > 0 {
+	if (options.SortBy == "" || options.SortBy == "group") && len(options.GroupOrder) > 0 {
+		orderedGroups := options.GroupOrder
+		if options.SortBy == "group" && options.SortOrder == "asc" {
+			orderedGroups = make([]string, len(options.GroupOrder))
+			for i, g := range options.GroupOrder {
+				orderedGroups[len(options.GroupOrder)-1-i] = g
+			}
+		}
 		caseSQL := "CASE"
-		args := make([]any, 0, len(options.GroupOrder)*5+1)
-		for index, group := range options.GroupOrder {
+		args := make([]any, 0, len(orderedGroups)*5+1)
+		for index, group := range orderedGroups {
 			caseSQL += " WHEN " + commonGroupCol + " = ? OR " + commonGroupCol + " LIKE ? OR " + commonGroupCol + " LIKE ? OR " + commonGroupCol + " LIKE ? THEN CAST(? AS INTEGER)"
 			args = append(args, group, group+",%", "%,"+group, "%,"+group+",%", index)
 		}
 		caseSQL += " ELSE CAST(? AS INTEGER) END, priority DESC, weight DESC, id"
-		args = append(args, len(options.GroupOrder))
+		args = append(args, len(orderedGroups))
 		// Keep the complete ordering expression in one clause. GORM prepends
 		// columns from subsequent Order calls, which would make priority sort
 		// before the group rank and split groups apart.
@@ -457,10 +465,10 @@ func (channel *Channel) GetGroups() []string {
 	return groups
 }
 
-func GetChannelGroups() ([]string, error) {
+func GetChannelGroupsWithQuotas() ([]string, map[string]int64, error) {
 	var channels []Channel
 	if err := DB.Model(&Channel{}).Select(commonGroupCol).Find(&channels).Error; err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	groupSet := make(map[string]struct{})
@@ -476,8 +484,23 @@ func GetChannelGroups() ([]string, error) {
 	for group := range groupSet {
 		groups = append(groups, group)
 	}
-	sort.Strings(groups)
-	return groups, nil
+
+	_, quotaMap := GetRankedGroupsWithQuotas()
+	ratioMap := ratio_setting.GetGroupRatioCopy()
+	SortGroupsSliceByQuotaAndRatio(groups, quotaMap, ratioMap)
+
+	filteredQuotas := make(map[string]int64, len(groups))
+	for _, g := range groups {
+		if q := quotaMap[g]; q > 0 {
+			filteredQuotas[g] = q
+		}
+	}
+	return groups, filteredQuotas, nil
+}
+
+func GetChannelGroups() ([]string, error) {
+	groups, _, err := GetChannelGroupsWithQuotas()
+	return groups, err
 }
 
 func GetGroupModelsMap() (map[string][]string, error) {

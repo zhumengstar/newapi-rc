@@ -40,6 +40,7 @@ type FilterDef = {
   onClear?: () => void
   onOptionReorder?: (sourceValue: string, targetValue: string) => void
   selectedFirst?: boolean
+  headerExtra?: React.ReactNode
 }
 
 type SearchDraft = {
@@ -304,6 +305,7 @@ export function DataTableToolbar<TData>(props: DataTableToolbarProps<TData>) {
             renderOptionActions={filter.renderOptionActions}
             onOptionReorder={filter.onOptionReorder}
             selectedFirst={filter.selectedFirst ?? !filter.singleSelect}
+            headerExtra={filter.headerExtra}
             open={openFilterId === filter.columnId}
             onOpenChange={(nextOpen) => {
               if (nextOpen) {

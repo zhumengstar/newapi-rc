@@ -46,7 +46,9 @@ import {
 import { usePricingData } from '@/features/pricing/hooks'
 import { useMediaQuery } from '@/hooks'
 import { useTableUrlState } from '@/hooks/use-table-url-state'
+import { formatQuotaWithCurrency } from '@/lib/currency'
 import { requireServerSuccess } from '@/lib/server-error-message'
+import { cn } from '@/lib/utils'
 
 import {
   detectAllChannelTypes,
@@ -69,8 +71,8 @@ import {
   getChannelTableRowId,
   isTagAggregateRow,
   getChannelTypeLabel,
-  isDefaultGroup,
-  sortGroupsByModelAndRatio,
+  sortGroupsByQuotaAndRatio,
+  sortGroupsByRatio,
 } from '../lib'
 import type { Channel, ChannelSortBy } from '../types'
 import { ChannelCard } from './channel-card'
@@ -90,7 +92,7 @@ const CHANNELS_VIEW_MODE_STORAGE_KEY = 'channels:view-mode'
 const CHANNELS_STATUS_FILTER_STORAGE_KEY = 'channel-status-filter'
 const CHANNELS_TYPE_FILTER_STORAGE_KEY = 'channel-type-filter'
 const CHANNELS_GROUP_FILTER_STORAGE_KEY = 'channel-group-filter'
-const CHANNELS_GROUP_ORDER_STORAGE_KEY = 'channel-group-order'
+const CHANNELS_GROUP_ORDER_STORAGE_KEY = 'channel-group-order:v2'
 const CHANNELS_MODEL_FAMILY_FILTER_STORAGE_KEY = 'channel-model-family-filter'
 const CHANNELS_MODEL_TYPE_FILTER_STORAGE_KEY = 'channel-model-type-filter'
 const CHANNELS_BILLING_TYPE_FILTER_STORAGE_KEY = 'channel-billing-type-filter'
@@ -163,29 +165,7 @@ export function ChannelsTable() {
     setSensitiveVisible,
   } = useChannels()
   const isMobile = useMediaQuery('(max-width: 640px)')
-  const { groupRatio, models } = usePricingData()
-
-  const groupModels = useMemo(() => {
-    const modelNamesByGroup = new Map<string, string[]>()
-    for (const model of models) {
-      for (const group of model.enable_groups) {
-        const groupName = group.trim()
-        if (!groupName || groupName === 'auto') {
-          continue
-        }
-
-        const existingModelNames = modelNamesByGroup.get(groupName)
-        if (existingModelNames) {
-          if (!existingModelNames.includes(model.model_name)) {
-            existingModelNames.push(model.model_name)
-          }
-          continue
-        }
-        modelNamesByGroup.set(groupName, [model.model_name])
-      }
-    }
-    return modelNamesByGroup
-  }, [models])
+  const { groupRatio } = usePricingData()
 
   // Table state
   const [sorting, setSorting] = useState<SortingState>([
@@ -468,6 +448,11 @@ export function ChannelsTable() {
     queryFn: getChannelGroups,
   })
 
+  const groupQuotas = useMemo(
+    () => groupsData?.quotas ?? {},
+    [groupsData]
+  )
+
   const groupOptions = useMemo(
     () =>
       (groupsData?.data || []).map((g) => ({
@@ -477,29 +462,26 @@ export function ChannelsTable() {
     [groupsData]
   )
 
+  const [groupSortMode, setGroupSortMode] = useState<'quota' | 'ratio'>('quota')
+
   const [groupOrderOverride, setGroupOrderOverride] = useState<string[]>(
     () => getStoredChannelArrayFilter(CHANNELS_GROUP_ORDER_STORAGE_KEY) ?? []
   )
   const groupOrder = useMemo(
     () => {
-      const naturalOrder = sortGroupsByModelAndRatio(
-        groupOptions.map((option) => option.value),
-        groupRatio,
-        groupModels
-      )
+      const rawGroups = groupOptions.map((option) => option.value)
+      const naturalOrder =
+        groupSortMode === 'ratio'
+          ? sortGroupsByRatio(rawGroups, groupRatio, groupQuotas)
+          : sortGroupsByQuotaAndRatio(rawGroups, groupRatio, groupQuotas)
       const known = new Set(naturalOrder)
       const persisted = groupOrderOverride.filter((group) => known.has(group))
-      const combined = [
+      return [
         ...persisted,
         ...naturalOrder.filter((group) => !persisted.includes(group)),
       ]
-      const defaultGroup = combined.find((group) => isDefaultGroup(group))
-      if (defaultGroup && combined.indexOf(defaultGroup) !== 0) {
-        return [defaultGroup, ...combined.filter((group) => !isDefaultGroup(group))]
-      }
-      return combined
     },
-    [groupModels, groupOptions, groupOrderOverride, groupRatio]
+    [groupOptions, groupOrderOverride, groupQuotas, groupRatio, groupSortMode]
   )
 
   const groupPriorityMutation = useMutation({
@@ -566,7 +548,7 @@ export function ChannelsTable() {
       tag_mode: enableTagMode,
       id_sort: groupSort || groupOrderSort ? false : idSort,
       ...(groupSort ? { sort_by: 'priority' as const, sort_order: 'desc' as const } : {}),
-      ...(groupOrderSort ? { group_order: groupOrder.join(',') } : {}),
+      ...(groupOrderSort || sortParams.sort_by === 'group' ? { group_order: groupOrder.join(',') } : {}),
       ...(groupSort || groupOrderSort ? {} : sortParams),
       p: pagination.pageIndex + 1,
       page_size: pagination.pageSize,
@@ -595,7 +577,7 @@ export function ChannelsTable() {
             tag_mode: enableTagMode,
             id_sort: groupSort || groupOrderSort ? false : idSort,
             ...(groupSort ? { sort_by: 'priority' as const, sort_order: 'desc' as const } : {}),
-            ...(groupOrderSort ? { group_order: groupOrder.join(',') } : {}),
+            ...(groupOrderSort || sortParams.sort_by === 'group' ? { group_order: groupOrder.join(',') } : {}),
             ...(groupSort || groupOrderSort ? {} : sortParams),
             p: pagination.pageIndex + 1,
             page_size: pagination.pageSize,
@@ -622,7 +604,7 @@ export function ChannelsTable() {
             tag_mode: enableTagMode,
             id_sort: groupSort || groupOrderSort ? false : idSort,
             ...(groupSort ? { sort_by: 'priority' as const, sort_order: 'desc' as const } : {}),
-            ...(groupOrderSort ? { group_order: groupOrder.join(',') } : {}),
+            ...(groupOrderSort || sortParams.sort_by === 'group' ? { group_order: groupOrder.join(',') } : {}),
             ...(groupSort || groupOrderSort ? {} : sortParams),
             p: pagination.pageIndex + 1,
             page_size: pagination.pageSize,
@@ -902,25 +884,28 @@ export function ChannelsTable() {
       return typeof ratio === 'number' && Number.isFinite(ratio) ? ratio : null
     }
 
-    const defaultGroup = sortedGroupNames.find((g) => isDefaultGroup(g))
-    const restGroups = sortedGroupNames.filter((g) => !isDefaultGroup(g))
-    const orderedGroups = defaultGroup ? [defaultGroup, ...restGroups] : restGroups
-
     return [
       { label: t('All Groups'), value: 'all' },
-      ...orderedGroups.map((group) => {
+      ...sortedGroupNames.map((group) => {
         const ratio = ratioForGroup(group)
+        const quota = groupQuotas[group] ?? 0
         const label = sensitiveVisible ? group : '••••'
+        const parts = [label]
+        if (quota > 0) {
+          parts.push(
+            `${t('Today', '今日')}: ${formatQuotaWithCurrency(quota)}`
+          )
+        }
+        if (ratio !== null) {
+          parts.push(t('Ratio: {{value}}', { value: `${ratio}x` }))
+        }
         return {
           value: group,
-          label:
-            ratio === null
-              ? label
-              : `${label} · ${t('Ratio: {{value}}', { value: `${ratio}x` })}`,
+          label: parts.join(' · '),
         }
       }),
     ]
-  }, [groupRatio, sensitiveVisible, sortedGroupNames, t])
+  }, [groupQuotas, groupRatio, sensitiveVisible, sortedGroupNames, t])
 
   return (
     <DataTablePage
@@ -952,9 +937,11 @@ export function ChannelsTable() {
         onReset: () => {
           setSorting([{ id: 'priority', desc: true }])
           resetModelFilterInput()
+          setGroupOrderOverride([])
           clearStoredChannelFilter(CHANNELS_STATUS_FILTER_STORAGE_KEY)
           clearStoredChannelFilter(CHANNELS_TYPE_FILTER_STORAGE_KEY)
           clearStoredChannelFilter(CHANNELS_GROUP_FILTER_STORAGE_KEY)
+          clearStoredChannelFilter(CHANNELS_GROUP_ORDER_STORAGE_KEY)
           clearStoredChannelFilter(CHANNELS_MODEL_FAMILY_FILTER_STORAGE_KEY)
           clearStoredChannelFilter(CHANNELS_MODEL_TYPE_FILTER_STORAGE_KEY)
           clearStoredChannelFilter(CHANNELS_BILLING_TYPE_FILTER_STORAGE_KEY)
@@ -993,6 +980,46 @@ export function ChannelsTable() {
             title: t('Group'),
             options: groupFilterOptions,
             selectedFirst: true,
+            headerExtra: (
+              <div className='inline-flex items-center rounded border bg-background p-0.5'>
+                <button
+                  type='button'
+                  onClick={(e) => {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    setGroupSortMode('quota')
+                    setGroupOrderOverride([])
+                    clearStoredChannelFilter(CHANNELS_GROUP_ORDER_STORAGE_KEY)
+                  }}
+                  className={cn(
+                    'rounded-xs px-1.5 py-0.5 text-[11px] leading-none transition-colors',
+                    groupSortMode === 'quota'
+                      ? 'bg-primary text-primary-foreground font-medium'
+                      : 'text-muted-foreground hover:text-foreground'
+                  )}
+                >
+                  {t('By Today Spend', '当天消费')}
+                </button>
+                <button
+                  type='button'
+                  onClick={(e) => {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    setGroupSortMode('ratio')
+                    setGroupOrderOverride([])
+                    clearStoredChannelFilter(CHANNELS_GROUP_ORDER_STORAGE_KEY)
+                  }}
+                  className={cn(
+                    'rounded-xs px-1.5 py-0.5 text-[11px] leading-none transition-colors',
+                    groupSortMode === 'ratio'
+                      ? 'bg-primary text-primary-foreground font-medium'
+                      : 'text-muted-foreground hover:text-foreground'
+                  )}
+                >
+                  {t('By Ratio', '按倍率')}
+                </button>
+              </div>
+            ),
             renderOptionActions: (option) => {
               if (option.value === 'all') return null
               const enabled = groupAdaptiveState.get(option.value) ?? false

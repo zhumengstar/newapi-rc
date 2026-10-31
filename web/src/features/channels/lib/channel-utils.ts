@@ -294,9 +294,48 @@ export function parseGroupsList(groups: string): string[] {
 
 export function sortGroupsByRatio(
   groups: string[],
-  groupRatio: Record<string, number>
+  groupRatio: Record<string, number>,
+  groupQuotas?: Record<string, number>
 ): string[] {
-  return [...groups].sort((a, b) => compareGroupRatio(a, b, groupRatio))
+  return [...groups].sort((a, b) => {
+    const ratioComparison = compareGroupRatio(a, b, groupRatio)
+    if (ratioComparison !== 0) {
+      return ratioComparison
+    }
+    const quotaA = groupQuotas?.[a] ?? 0
+    const quotaB = groupQuotas?.[b] ?? 0
+    if (quotaA !== quotaB) {
+      return quotaB - quotaA
+    }
+    return 0
+  })
+}
+
+export function sortGroupsByQuotaAndRatio(
+  groups: string[],
+  groupRatio: Record<string, number>,
+  groupQuotas?: Record<string, number>
+): string[] {
+  return [...groups].sort((a, b) => {
+    const quotaA = groupQuotas?.[a] ?? 0
+    const quotaB = groupQuotas?.[b] ?? 0
+    if (quotaA !== quotaB) {
+      return quotaB - quotaA
+    }
+
+    const ratioComparison = compareGroupRatio(a, b, groupRatio)
+    if (ratioComparison !== 0) {
+      return ratioComparison
+    }
+
+    const isDefaultA = isDefaultGroup(a)
+    const isDefaultB = isDefaultGroup(b)
+    if (isDefaultA !== isDefaultB) {
+      return isDefaultA ? -1 : 1
+    }
+
+    return a.localeCompare(b)
+  })
 }
 
 const GROUP_MODEL_CATEGORY_ORDER = [

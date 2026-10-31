@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"sort"
 	"strings"
 	"sync"
@@ -14,6 +15,7 @@ import (
 
 var (
 	rankedGroupsCache    []string
+	rankedGroupsQuotaMap map[string]int64
 	rankedGroupsCacheMu  sync.RWMutex
 	rankedGroupsCacheExp time.Time
 	rankedGroupsUpdating int32
@@ -24,7 +26,7 @@ var (
 	rankedModelsUpdating int32
 )
 
-const rankingUpdateInterval = 2 * time.Hour
+const rankingUpdateInterval = 3 * time.Minute
 
 type groupQuotaRow struct {
 	Group string `gorm:"column:group"`
@@ -36,15 +38,42 @@ type modelCountRow struct {
 	Count int64  `gorm:"column:request_count"`
 }
 
-func calculateRankedGroups() ([]string, error) {
+// SortGroupsSliceByQuotaAndRatio 优先按当天消费额降序，其次按分组倍率降序，最后按名称升序
+func SortGroupsSliceByQuotaAndRatio(groups []string, quotaMap map[string]int64, ratioMap map[string]float64) {
+	sort.Slice(groups, func(i, j int) bool {
+		gI, gJ := groups[i], groups[j]
+		var qI, qJ int64
+		if quotaMap != nil {
+			qI = quotaMap[gI]
+			qJ = quotaMap[gJ]
+		}
+		if qI != qJ {
+			return qI > qJ
+		}
+		if ratioMap != nil {
+			rI, hasI := ratioMap[gI]
+			rJ, hasJ := ratioMap[gJ]
+			if hasI && hasJ && rI != rJ {
+				return rI > rJ
+			}
+			if hasI != hasJ {
+				return hasI
+			}
+		}
+		return gI < gJ
+	})
+}
+
+func calculateRankedGroups() ([]string, map[string]int64, error) {
 	todayStart := shanghaiTodayStartUnix()
+	configuredGroups := ratio_setting.GetGroupRatioCopy()
 
 	var quotaDB *gorm.DB = LOG_DB
 	if quotaDB == nil {
 		quotaDB = DB
 	}
 	if quotaDB == nil {
-		return getDefaultGroups(), nil
+		return getDefaultGroups(), map[string]int64{}, nil
 	}
 
 	var rows []groupQuotaRow
@@ -52,7 +81,9 @@ func calculateRankedGroups() ([]string, error) {
 	if col == "" {
 		col = "\"group\""
 	}
-	err := quotaDB.Table("logs").
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := quotaDB.WithContext(ctx).Table("logs").
 		Select(col + ", COALESCE(SUM(quota), 0) AS total_quota").
 		Where("type = ? AND created_at >= ? AND "+col+" != ''", LogTypeConsume, todayStart).
 		Group(col).
@@ -61,7 +92,7 @@ func calculateRankedGroups() ([]string, error) {
 		Scan(&rows).Error
 	if err != nil {
 		common.SysError("failed to calculate ranked groups from logs: " + err.Error())
-		return getDefaultGroups(), err
+		return getDefaultGroups(), map[string]int64{}, err
 	}
 
 	groupQuotaMap := make(map[string]int64, len(rows)+32)
@@ -83,8 +114,6 @@ func calculateRankedGroups() ([]string, error) {
 		}
 	}
 
-	configuredGroups := ratio_setting.GetGroupRatioCopy()
-
 	allGroupsSet := make(map[string]struct{}, len(configuredGroups)+len(groupQuotaMap))
 	for g := range configuredGroups {
 		if g != "" {
@@ -102,19 +131,9 @@ func calculateRankedGroups() ([]string, error) {
 		allGroups = append(allGroups, g)
 	}
 
-	// 排序规则：
-	// 1. 优先按当前消耗额降序（消耗高的置顶）；
-	// 2. 消耗相同时（包括为 0），按分组名升序，保持稳定排列。
-	sort.Slice(allGroups, func(i, j int) bool {
-		qI := groupQuotaMap[allGroups[i]]
-		qJ := groupQuotaMap[allGroups[j]]
-		if qI != qJ {
-			return qI > qJ
-		}
-		return allGroups[i] < allGroups[j]
-	})
+	SortGroupsSliceByQuotaAndRatio(allGroups, groupQuotaMap, configuredGroups)
 
-	return allGroups, nil
+	return allGroups, groupQuotaMap, nil
 }
 
 func calculateRankedModels() ([]string, error) {
@@ -190,19 +209,21 @@ func getDefaultGroups() []string {
 			groups = append(groups, g)
 		}
 	}
-	sort.Strings(groups)
+	SortGroupsSliceByQuotaAndRatio(groups, nil, configuredGroups)
 	return groups
 }
 
 // RefreshRankedGroups 手动或定时强制刷新分组排序缓存
 func RefreshRankedGroups() []string {
-	ranked, err := calculateRankedGroups()
+	ranked, quotaMap, err := calculateRankedGroups()
 	if err != nil || len(ranked) == 0 {
 		ranked = getDefaultGroups()
+		quotaMap = map[string]int64{}
 	}
 
 	rankedGroupsCacheMu.Lock()
 	rankedGroupsCache = ranked
+	rankedGroupsQuotaMap = quotaMap
 	rankedGroupsCacheExp = time.Now().Add(rankingUpdateInterval)
 	rankedGroupsCacheMu.Unlock()
 
@@ -224,15 +245,19 @@ func RefreshRankedModels() []string {
 	return ranked
 }
 
-// GetRankedGroups 获取按照当前消费金额排序的分组列表（每2小时更新一次）
-func GetRankedGroups() []string {
+// GetRankedGroupsWithQuotas 获取按照当天消费金额优先、倍率次之排序的分组列表及今日消费额度
+func GetRankedGroupsWithQuotas() ([]string, map[string]int64) {
 	now := time.Now()
 	rankedGroupsCacheMu.RLock()
 	if rankedGroupsCache != nil && now.Before(rankedGroupsCacheExp) {
 		res := make([]string, len(rankedGroupsCache))
 		copy(res, rankedGroupsCache)
+		qMap := make(map[string]int64, len(rankedGroupsQuotaMap))
+		for k, v := range rankedGroupsQuotaMap {
+			qMap[k] = v
+		}
 		rankedGroupsCacheMu.RUnlock()
-		return res
+		return res, qMap
 	}
 	rankedGroupsCacheMu.RUnlock()
 
@@ -241,10 +266,8 @@ func GetRankedGroups() []string {
 	rankedGroupsCacheMu.RUnlock()
 
 	if isNil {
-		return RefreshRankedGroups()
-	}
-
-	if atomic.CompareAndSwapInt32(&rankedGroupsUpdating, 0, 1) {
+		RefreshRankedGroups()
+	} else if atomic.CompareAndSwapInt32(&rankedGroupsUpdating, 0, 1) {
 		go func() {
 			defer atomic.StoreInt32(&rankedGroupsUpdating, 0)
 			RefreshRankedGroups()
@@ -254,7 +277,17 @@ func GetRankedGroups() []string {
 	rankedGroupsCacheMu.RLock()
 	res := make([]string, len(rankedGroupsCache))
 	copy(res, rankedGroupsCache)
+	qMap := make(map[string]int64, len(rankedGroupsQuotaMap))
+	for k, v := range rankedGroupsQuotaMap {
+		qMap[k] = v
+	}
 	rankedGroupsCacheMu.RUnlock()
+	return res, qMap
+}
+
+// GetRankedGroups 获取按照当天消费金额优先、倍率次之排序的分组列表
+func GetRankedGroups() []string {
+	res, _ := GetRankedGroupsWithQuotas()
 	return res
 }
 

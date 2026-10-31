@@ -66,6 +66,8 @@ type DataTableFacetedFilterProps<TData, TValue> = {
   onOpenChange?: (open: boolean) => void
   /** Place selected options at the top. Defaults to true. */
   selectedFirst?: boolean
+  /** Extra controls rendered in the filter header bar (e.g. sort toggles). */
+  headerExtra?: React.ReactNode
 }
 
 function DataTableFacetedFilterInner<TData, TValue>({
@@ -79,6 +81,7 @@ function DataTableFacetedFilterInner<TData, TValue>({
   open: controlledOpen,
   onOpenChange: controlledOnOpenChange,
   selectedFirst = true,
+  headerExtra,
 }: DataTableFacetedFilterProps<TData, TValue>) {
   const { t } = useTranslation()
   const facets = column?.getFacetedUniqueValues()
@@ -377,6 +380,7 @@ function DataTableFacetedFilterInner<TData, TValue>({
                 )}
               </span>
               <div className='flex items-center gap-1 shrink-0'>
+                {headerExtra}
                 <Button
                   type='button'
                   variant='ghost'

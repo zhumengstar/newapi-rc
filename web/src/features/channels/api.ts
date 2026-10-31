@@ -849,6 +849,7 @@ export async function getChannelGroups(): Promise<{
   success: boolean
   message?: string
   data: string[]
+  quotas?: Record<string, number>
 }> {
   const res = await api.get('/api/channel/groups')
   return res.data

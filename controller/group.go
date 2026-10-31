@@ -13,24 +13,30 @@ import (
 )
 
 func GetChannelGroups(c *gin.Context) {
-	groups, err := model.GetChannelGroups()
+	groups, quotas, err := model.GetChannelGroupsWithQuotas()
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
-	common.ApiSuccess(c, groups)
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    groups,
+		"quotas":  quotas,
+	})
 }
 
-func getAllConfiguredAndRankedGroups() []string {
-	groupNames := model.GetRankedGroups()
+func getAllConfiguredAndRankedGroupsWithQuotas() ([]string, map[string]int64) {
+	groupNames, quotaMap := model.GetRankedGroupsWithQuotas()
 	groupSet := make(map[string]struct{}, len(groupNames))
 	for _, name := range groupNames {
 		if name != "" {
 			groupSet[name] = struct{}{}
 		}
 	}
+	ratioMap := ratio_setting.GetGroupRatioCopy()
 	// 实时合并分组定价与可用分组中的所有分组，确保管理员在分组定价中配置后，渠道编辑等处立即立即可选
-	for group := range ratio_setting.GetGroupRatioCopy() {
+	for group := range ratioMap {
 		if group != "" {
 			if _, exists := groupSet[group]; !exists {
 				groupNames = append(groupNames, group)
@@ -46,15 +52,22 @@ func getAllConfiguredAndRankedGroups() []string {
 			}
 		}
 	}
+	model.SortGroupsSliceByQuotaAndRatio(groupNames, quotaMap, ratioMap)
+	return groupNames, quotaMap
+}
+
+func getAllConfiguredAndRankedGroups() []string {
+	groupNames, _ := getAllConfiguredAndRankedGroupsWithQuotas()
 	return groupNames
 }
 
 func GetGroups(c *gin.Context) {
-	groupNames := getAllConfiguredAndRankedGroups()
+	groupNames, quotaMap := getAllConfiguredAndRankedGroupsWithQuotas()
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
 		"data":    groupNames,
+		"quotas":  quotaMap,
 	})
 }
 
