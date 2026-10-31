@@ -333,8 +333,8 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 				}
 			}
 
-			// 只要出现缺少 tool_use.id / tool_result.tool_use_id 报错，则深度自愈工具调用 ID 并立即重试！
-			if !c.GetBool("tool_id_retried") && relaycommon.IsToolUseIDError(newApiErr.Error()) {
+			// 只要出现缺少 tool_use.id / tool_result.tool_use_id 或 thinking signature 损坏报错，则深度自愈并立即重试！
+			if !c.GetBool("tool_id_retried") && (relaycommon.IsToolUseIDError(newApiErr.Error()) || relaycommon.IsClaudeWhitespaceTextError(newApiErr.Error())) {
 				c.Set("tool_id_retried", true)
 				rawBytes, _ := relaycommon.GetPrunedRequestBody(c, info)
 				if len(rawBytes) == 0 {
@@ -344,8 +344,22 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 					}
 					rawBytes, _ = common.Marshal(targetReq)
 				}
-				if repaired, repOk := relaycommon.RepairToolIDsInRawJSON(rawBytes); repOk {
-					logger.LogWarn(c, fmt.Sprintf("收到上游缺少工具ID报错 (%s)，已自动深度自愈补齐 tool_use.id 并立即重试...", newApiErr.Error()))
+				repaired, repOk := relaycommon.RepairToolIDsInRawJSON(rawBytes)
+				if !repOk {
+					repaired = rawBytes
+				}
+				if strings.Contains(strings.ToLower(newApiErr.Error()), "signature") && strings.Contains(strings.ToLower(newApiErr.Error()), "thinking") {
+					if stripped, sOk := relaycommon.StripClaudeThinkingBlocks(repaired); sOk {
+						repaired = stripped
+						repOk = true
+					}
+				}
+				if cleaned, cerr := relaycommon.EnsureClaudeRequestCleanliness(repaired); cerr == nil && len(cleaned) > 0 {
+					repaired = cleaned
+					repOk = true
+				}
+				if repOk {
+					logger.LogWarn(c, fmt.Sprintf("收到上游缺少工具ID或格式报错 (%s)，已自动深度自愈并立即重试...", newApiErr.Error()))
 					_ = relaycommon.UpdatePrunedRequestBody(c, info)
 					newBody, closer, bErr := relaycommon.NewOutboundJSONBody(repaired)
 					if bErr == nil {

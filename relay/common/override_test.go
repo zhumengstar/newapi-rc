@@ -2812,6 +2812,39 @@ func TestEnsureGeminiSchemaCleanliness(t *testing.T) {
 	require.Len(t, prefillContents, 3, "empty dot model turn popped, non-empty model prefill followed by user Continue.")
 	lastTurn := prefillContents[len(prefillContents)-1].(map[string]any)
 	assert.Equal(t, "user", lastTurn["role"])
+
+	// 测试 5: 连续 model 回合（[model(text), model(functionCall)]）合并及越界 temperature/topP 校准
+	funcTurnJSON := `{
+		"generationConfig": {"temperature": 2.8, "topP": 1.5, "topK": 0},
+		"contents": [
+			{"role": "user", "parts": [{"text": "call tool"}]},
+			{"role": "model", "parts": [{"text": "I will call the tool"}]},
+			{"role": "model", "parts": [{"functionCall": {"name": "search", "args": {"q": "go"}}}]},
+			{"role": "user", "parts": [{"functionResponse": {"name": "search", "response": {"ok": true}}}]}
+		]
+	}`
+	cleanedFuncBytes, err := EnsureGeminiSchemaCleanliness([]byte(funcTurnJSON))
+	require.NoError(t, err)
+	var funcMap map[string]any
+	require.NoError(t, json.Unmarshal(cleanedFuncBytes, &funcMap))
+	gc := funcMap["generationConfig"].(map[string]any)
+	assert.Equal(t, 2.0, gc["temperature"])
+	assert.Equal(t, 1.0, gc["topP"])
+	assert.Nil(t, gc["topK"])
+	funcContents := funcMap["contents"].([]any)
+	require.Len(t, funcContents, 3, "consecutive model turns should be merged into 1 turn")
+	mergedModelParts := funcContents[1].(map[string]any)["parts"].([]any)
+	require.Len(t, mergedModelParts, 2)
+
+	// 测试 6: StripGeminiThoughtSignatures 与 StripClaudeThinkingBlocks
+	sigBytes, strippedOk := StripGeminiThoughtSignatures([]byte(`{"contents":[{"role":"model","parts":[{"text":"hi","thoughtSignature":"bad_sig"}]}]}`))
+	assert.True(t, strippedOk)
+	assert.NotContains(t, string(sigBytes), "thoughtSignature")
+
+	claudeThinkBytes, cStrippedOk := StripClaudeThinkingBlocks([]byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"hmm","signature":"bad"},{"type":"text","text":"hello"}]}]}`))
+	assert.True(t, cStrippedOk)
+	assert.NotContains(t, string(claudeThinkBytes), `"thinking"`)
+	assert.Contains(t, string(claudeThinkBytes), `"hello"`)
 }
 
 func TestApplyParamOverrideRecursiveDelete(t *testing.T) {

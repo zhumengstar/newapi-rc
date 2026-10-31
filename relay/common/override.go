@@ -2663,8 +2663,51 @@ func cleanGeminiContentsAndParts(root any) bool {
 	}
 
 	if rootMap, ok := root.(map[string]any); ok {
-		if rawContents, hasContents := rootMap["contents"]; hasContents && rawContents != nil {
-			if contents, cOk := rawContents.([]any); cOk && len(contents) > 0 {
+		// 校准 generationConfig / generation_config 越界采样参数（防止 temperature > 2.0 或 topP > 1.0 触发 Request contains an invalid argument）
+		for _, gcKey := range []string{"generationConfig", "generation_config"} {
+			if gcVal, exists := rootMap[gcKey]; exists && gcVal != nil {
+				if gcMap, gOk := gcVal.(map[string]any); gOk {
+					if temp, tOk := parseJSONFloat64(gcMap["temperature"]); tOk {
+						if temp < 0 {
+							gcMap["temperature"] = 0.0
+							modified = true
+						} else if temp > 2.0 {
+							gcMap["temperature"] = 2.0
+							modified = true
+						}
+					}
+					for _, tpKey := range []string{"topP", "top_p"} {
+						if topP, pOk := parseJSONFloat64(gcMap[tpKey]); pOk {
+							if topP <= 0 {
+								delete(gcMap, tpKey)
+								modified = true
+							} else if topP > 1.0 {
+								gcMap[tpKey] = 1.0
+								modified = true
+							}
+						}
+					}
+					for _, tkKey := range []string{"topK", "top_k"} {
+						if topK, kOk := parseJSONFloat64(gcMap[tkKey]); kOk && topK < 1 {
+							delete(gcMap, tkKey)
+							modified = true
+						}
+					}
+				}
+			}
+		}
+
+		if rawContents, hasContents := rootMap["contents"]; hasContents {
+			contents, cOk := rawContents.([]any)
+			if !cOk || len(contents) == 0 {
+				rootMap["contents"] = []any{
+					map[string]any{
+						"role":  "user",
+						"parts": []any{map[string]any{"text": " "}},
+					},
+				}
+				modified = true
+			} else {
 				for i, item := range contents {
 					if cMap, mOk := item.(map[string]any); mOk {
 						role := strings.ToLower(strings.TrimSpace(fmt.Sprintf("%v", cMap["role"])))
@@ -2677,6 +2720,41 @@ func cleanGeminiContentsAndParts(root any) bool {
 						}
 					}
 				}
+
+				// 合并连续的 model 回合（特别是 [model(text), model(functionCall)]），并确保包含 functionCall 的 model 回合前必定紧邻 user 或 functionResponse 回合，
+				// 彻底消除上游 400 "Please ensure that function call turn comes immediately after a user turn or after a function response turn."
+				mergedContents := make([]any, 0, len(contents)+1)
+				for _, item := range contents {
+					cMap, mOk := item.(map[string]any)
+					if !mOk {
+						mergedContents = append(mergedContents, item)
+						continue
+					}
+					role := strings.ToLower(strings.TrimSpace(fmt.Sprintf("%v", cMap["role"])))
+					if role == "model" {
+						if len(mergedContents) > 0 {
+							if prevMap, pOk := mergedContents[len(mergedContents)-1].(map[string]any); pOk {
+								prevRole := strings.ToLower(strings.TrimSpace(fmt.Sprintf("%v", prevMap["role"])))
+								if prevRole == "model" {
+									prevParts, _ := prevMap["parts"].([]any)
+									curParts, _ := cMap["parts"].([]any)
+									prevMap["parts"] = append(prevParts, curParts...)
+									modified = true
+									continue
+								}
+							}
+						} else if hasGeminiFunctionCallPart(cMap["parts"]) {
+							// 首条消息即为 model(functionCall)，在前面补齐一条 user 消息
+							mergedContents = append(mergedContents, map[string]any{
+								"role":  "user",
+								"parts": []any{map[string]any{"text": "Continue."}},
+							})
+							modified = true
+						}
+					}
+					mergedContents = append(mergedContents, cMap)
+				}
+				contents = mergedContents
 
 				// 2. 处理 contents 末尾为 role="model"（如酒馆 SillyTavern / RP 客户端的 Assistant Prefill 预填充）：
 				// Google Gemini / Vertex AI / CodeAssist 严格要求多轮对话必须以 user 或 functionResponse 结尾，
@@ -2722,6 +2800,40 @@ func cleanGeminiContentsAndParts(root any) bool {
 	}
 
 	return modified
+}
+
+func parseJSONFloat64(val any) (float64, bool) {
+	switch v := val.(type) {
+	case float64:
+		return v, true
+	case float32:
+		return float64(v), true
+	case int:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	default:
+		return 0, false
+	}
+}
+
+func hasGeminiFunctionCallPart(rawParts any) bool {
+	partsList, ok := rawParts.([]any)
+	if !ok {
+		return false
+	}
+	for _, p := range partsList {
+		partMap, isMap := p.(map[string]any)
+		if !isMap || partMap == nil {
+			continue
+		}
+		for _, k := range []string{"functionCall", "function_call"} {
+			if v, exists := partMap[k]; exists && v != nil {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func hasGeminiToolOrCodePart(rawParts any) bool {
@@ -2934,7 +3046,7 @@ func recursiveCleanGeminiParts(node any) bool {
 	return modified
 }
 
-// IsGeminiPartDataError 检测是否为 Gemini 上游返回的 Part 缺少 data、顶层非标准字段或末尾角色不合法错误
+// IsGeminiPartDataError 检测是否为 Gemini 上游返回的 Part 缺少 data、顶层非标准字段、末尾角色不合法、functionCall 顺序或 thoughtSignature 损坏错误
 func IsGeminiPartDataError(errStr string) bool {
 	lower := strings.ToLower(errStr)
 	return strings.Contains(lower, "required oneof field 'data' must have one initialized field") ||
@@ -2945,18 +3057,24 @@ func IsGeminiPartDataError(errStr string) bool {
 		strings.Contains(lower, "unknown name 'id' at 'contents") ||
 		strings.Contains(lower, "unknown name \"thought\" at 'request.contents") ||
 		strings.Contains(lower, "ends with a user role") ||
+		strings.Contains(lower, "function call turn comes immediately after") ||
+		strings.Contains(lower, "corrupted thought signature") ||
+		strings.Contains(lower, "invalid argument") ||
 		strings.Contains(lower, "upstream service request failed") ||
 		(strings.Contains(lower, "cannot find field") && strings.Contains(lower, "contents["))
 }
 
-// IsClaudeWhitespaceTextError 检测是否为 Claude 上游返回的空白 text content block 或缺少 tool ID 或 thinking top_p 报错
+// IsClaudeWhitespaceTextError 检测是否为 Claude 上游返回的空白 text content block、缺少 tool ID、thinking top_p 冲突或 thinking signature 损坏报错
 func IsClaudeWhitespaceTextError(errStr string) bool {
 	lower := strings.ToLower(errStr)
 	return strings.Contains(lower, "text content blocks must contain non-whitespace text") ||
 		strings.Contains(lower, "at least one text, image, or tool_use block is required") ||
 		strings.Contains(lower, "tool_use.id: field required") ||
 		strings.Contains(lower, "tool_result.tool_use_id: field required") ||
-		strings.Contains(lower, "top_p must be greater than or equal to 0.95")
+		strings.Contains(lower, "top_p must be greater than or equal to 0.95") ||
+		strings.Contains(lower, "invalid `signature` in `thinking` block") ||
+		strings.Contains(lower, "invalid signature in thinking block") ||
+		(strings.Contains(lower, "invalid") && strings.Contains(lower, "signature") && strings.Contains(lower, "thinking"))
 }
 
 // IsAssistantPrefillUnsupportedError 检测是否为上游（如 Vertex AI / 新规范 Claude / 严格上游网关）返回的不支持末尾 assistant prefill 报错
@@ -3299,5 +3417,108 @@ func StripTrailingAssistantFromRawJSON(data []byte) ([]byte, bool) {
 	}
 	return repairedBytes, true
 }
+
+// StripGeminiThoughtSignatures 剥离 Gemini 请求体中的所有历史 thoughtSignature / thought_signature 字段（用于自愈 Corrupted thought signature 报错）
+func StripGeminiThoughtSignatures(data []byte) ([]byte, bool) {
+	if len(data) == 0 {
+		return data, false
+	}
+	var root any
+	if err := common.UnmarshalJsonStr(string(data), &root); err != nil {
+		return data, false
+	}
+	if !recursiveStripGeminiThoughtSig(root) {
+		return data, false
+	}
+	repaired, err := common.Marshal(root)
+	if err != nil {
+		return data, false
+	}
+	return repaired, true
+}
+
+func recursiveStripGeminiThoughtSig(node any) bool {
+	modified := false
+	switch val := node.(type) {
+	case []any:
+		for _, item := range val {
+			if recursiveStripGeminiThoughtSig(item) {
+				modified = true
+			}
+		}
+	case map[string]any:
+		for _, key := range []string{"thoughtSignature", "thought_signature"} {
+			if _, exists := val[key]; exists {
+				delete(val, key)
+				modified = true
+			}
+		}
+		for _, child := range val {
+			if recursiveStripGeminiThoughtSig(child) {
+				modified = true
+			}
+		}
+	}
+	return modified
+}
+
+// StripClaudeThinkingBlocks 剥离 Claude messages 中的历史 thinking / redacted_thinking 块（用于自愈 Invalid `signature` in `thinking` block 报错）
+func StripClaudeThinkingBlocks(data []byte) ([]byte, bool) {
+	if len(data) == 0 {
+		return data, false
+	}
+	var root any
+	if err := common.UnmarshalJsonStr(string(data), &root); err != nil {
+		return data, false
+	}
+	rootMap, ok := root.(map[string]any)
+	if !ok {
+		return data, false
+	}
+	messages, ok := rootMap["messages"].([]any)
+	if !ok || len(messages) == 0 {
+		return data, false
+	}
+	modified := false
+	for _, m := range messages {
+		msgMap, mOk := m.(map[string]any)
+		if !mOk {
+			continue
+		}
+		blocks, bOk := msgMap["content"].([]any)
+		if !bOk || len(blocks) == 0 {
+			continue
+		}
+		filtered := make([]any, 0, len(blocks))
+		for _, b := range blocks {
+			bMap, isMap := b.(map[string]any)
+			if !isMap {
+				filtered = append(filtered, b)
+				continue
+			}
+			bType := strings.ToLower(strings.TrimSpace(fmt.Sprintf("%v", bMap["type"])))
+			if bType == "thinking" || bType == "redacted_thinking" {
+				modified = true
+				continue
+			}
+			filtered = append(filtered, b)
+		}
+		if len(filtered) != len(blocks) {
+			if len(filtered) == 0 {
+				filtered = []any{map[string]any{"type": "text", "text": "."}}
+			}
+			msgMap["content"] = filtered
+		}
+	}
+	if !modified {
+		return data, false
+	}
+	repaired, err := common.Marshal(rootMap)
+	if err != nil {
+		return data, false
+	}
+	return repaired, true
+}
+
 
 

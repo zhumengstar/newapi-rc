@@ -310,6 +310,11 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 					if len(info.ParamOverride) > 0 {
 						cleanedBytes, _ = relaycommon.ApplyParamOverrideWithRelayInfo(cleanedBytes, info)
 					}
+					if strings.Contains(strings.ToLower(newAPIError.Error()), "thought signature") || strings.Contains(strings.ToLower(newAPIError.Error()), "invalid argument") {
+						if sigStripped, sOk := relaycommon.StripGeminiThoughtSignatures(cleanedBytes); sOk {
+							cleanedBytes = sigStripped
+						}
+					}
 					if reCleaned, rcErr := relaycommon.EnsureGeminiSchemaCleanliness(cleanedBytes); rcErr == nil && len(reCleaned) > 0 {
 						cleanedBytes = reCleaned
 					}

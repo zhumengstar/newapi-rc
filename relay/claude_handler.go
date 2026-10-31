@@ -344,6 +344,11 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 				if cleaned, cerr := relaycommon.EnsureClaudeRequestCleanliness(repaired); cerr == nil && len(cleaned) > 0 {
 					repaired = cleaned
 				}
+				if strings.Contains(strings.ToLower(newAPIError.Error()), "signature") && strings.Contains(strings.ToLower(newAPIError.Error()), "thinking") {
+					if stripped, sOk := relaycommon.StripClaudeThinkingBlocks(repaired); sOk {
+						repaired = stripped
+					}
+				}
 				if len(info.ParamOverride) > 0 {
 					if overridden, oerr := relaycommon.ApplyParamOverrideWithRelayInfo(repaired, info); oerr == nil && len(overridden) > 0 {
 						repaired = overridden
@@ -403,6 +408,11 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 				}
 				if cleaned, cerr := relaycommon.EnsureClaudeRequestCleanliness(repaired); cerr == nil && len(cleaned) > 0 {
 					repaired = cleaned
+				}
+				if strings.Contains(strings.ToLower(newAPIError.Error()), "signature") && strings.Contains(strings.ToLower(newAPIError.Error()), "thinking") {
+					if stripped, sOk := relaycommon.StripClaudeThinkingBlocks(repaired); sOk {
+						repaired = stripped
+					}
 				}
 				if len(info.ParamOverride) > 0 {
 					if overridden, oerr := relaycommon.ApplyParamOverrideWithRelayInfo(repaired, info); oerr == nil && len(overridden) > 0 {
