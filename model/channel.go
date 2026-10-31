@@ -1797,19 +1797,35 @@ type channelApiAddrCacheEntry struct {
 	exp   time.Time
 }
 
-func GetChannelApiAddresses(group string, extra ...int64) ([]*ChannelApiAddress, error) {
+func GetChannelApiAddresses(group string, extra ...interface{}) ([]*ChannelApiAddress, error) {
+	var modelName string
 	var startTimestamp, endTimestamp int64
-	if len(extra) > 0 {
-		startTimestamp = extra[0]
-	}
-	if len(extra) > 1 {
-		endTimestamp = extra[1]
+
+	for _, arg := range extra {
+		switch v := arg.(type) {
+		case string:
+			if modelName == "" {
+				modelName = strings.TrimSpace(v)
+			}
+		case int64:
+			if startTimestamp == 0 {
+				startTimestamp = v
+			} else if endTimestamp == 0 {
+				endTimestamp = v
+			}
+		case int:
+			if startTimestamp == 0 {
+				startTimestamp = int64(v)
+			} else if endTimestamp == 0 {
+				endTimestamp = int64(v)
+			}
+		}
 	}
 	if startTimestamp == 0 && endTimestamp == 0 {
 		startTimestamp = shanghaiTodayStartUnix()
 	}
 
-	cacheKey := fmt.Sprintf("%s:%d:%d", group, startTimestamp, endTimestamp)
+	cacheKey := fmt.Sprintf("%s:%s:%d:%d", group, modelName, startTimestamp, endTimestamp)
 	now := time.Now()
 	channelApiAddrCacheMu.RLock()
 	if entry, found := channelApiAddrCache[cacheKey]; found && now.Before(entry.exp) {
@@ -1828,6 +1844,9 @@ func GetChannelApiAddresses(group string, extra ...int64) ([]*ChannelApiAddress,
 		logTx := LOG_DB.Table("logs").
 			Select("channel_id, COALESCE(SUM(quota), 0) AS period_quota").
 			Where("type = ?", LogTypeConsume)
+		if modelName != "" {
+			logTx = logTx.Where("model_name = ?", modelName)
+		}
 		if startTimestamp > 0 {
 			logTx = logTx.Where("created_at >= ?", startTimestamp)
 		}

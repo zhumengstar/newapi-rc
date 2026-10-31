@@ -259,10 +259,21 @@ export function CommonLogsFilterBar<TData>(
     : undefined
 
   const { data: apiAddressesData } = useQuery({
-    queryKey: ['channel-api-addresses', filters.group, startSec, endSec],
+    queryKey: [
+      'channel-api-addresses',
+      filters.group,
+      filters.model,
+      startSec,
+      endSec,
+    ],
     queryFn: async () => {
       try {
-        const res = await getChannelApiAddresses(filters.group, startSec, endSec)
+        const res = await getChannelApiAddresses(
+          filters.group,
+          filters.model,
+          startSec,
+          endSec
+        )
         return res?.data ?? []
       } catch {
         return []

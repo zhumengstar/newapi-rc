@@ -170,11 +170,13 @@ export interface ChannelApiAddressItem {
 
 export async function getChannelApiAddresses(
   group?: string,
+  model?: string,
   startTimestamp?: number,
   endTimestamp?: number
 ): Promise<{ success: boolean; message?: string; data: ChannelApiAddressItem[] }> {
   const params: Record<string, unknown> = {}
   if (group) params.group = group
+  if (model) params.model = model
   if (startTimestamp) params.start_timestamp = startTimestamp
   if (endTimestamp) params.end_timestamp = endTimestamp
   const res = await api.get('/api/channel/api_addresses', {
