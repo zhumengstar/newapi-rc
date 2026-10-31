@@ -28,7 +28,7 @@ export type ComboboxInputOption = {
   label: string
   icon?: React.ReactNode
   disabled?: boolean
-  description?: string
+  description?: React.ReactNode
 }
 
 interface ComboboxInputProps {
@@ -102,9 +102,10 @@ export function ComboboxInput({
   React.useEffect(() => {
     if (!open || !renderOptionHoverPanel || !containerRef.current) return
     const rect = containerRef.current.getBoundingClientRect()
-    const spaceRight = window.innerWidth - rect.right
+    const dropdownRight = rect.left + Math.max(rect.width, 460)
+    const spaceRight = window.innerWidth - dropdownRight
     const spaceLeft = rect.left
-    setHoverSide(spaceRight >= 400 || spaceRight >= spaceLeft ? 'right' : 'left')
+    setHoverSide(spaceRight >= 390 || spaceRight >= spaceLeft ? 'right' : 'left')
   }, [open, renderOptionHoverPanel])
 
   // Handle click outside to close
@@ -258,7 +259,7 @@ export function ComboboxInput({
       <ChevronsUpDown className='pointer-events-none absolute top-1/2 right-3 size-4 shrink-0 -translate-y-1/2 opacity-50' />
 
       {showDropdown && (
-        <div className='bg-popover text-popover-foreground absolute top-full z-100 mt-1 min-w-full w-max max-w-[min(540px,95vw)] rounded-md border shadow-md'>
+        <div className='bg-popover text-popover-foreground absolute top-full z-100 mt-1 min-w-full w-max max-w-[min(580px,95vw)] rounded-md border shadow-md'>
           {filteredOptions.length > 0 ? (
             <ul
               ref={listRef}

@@ -21,6 +21,7 @@ import { Input } from '@/components/ui/input'
 import { updateChannelSource } from '@/features/exclusive-channels/api'
 import type { UpstreamSourceDTO } from '@/features/exclusive-channels/types'
 import { inferGroupFamily } from '@/features/users/lib'
+import { formatLogQuota } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
 interface ApiAddressHoverPanelProps {
@@ -131,6 +132,16 @@ export function ApiAddressHoverPanel({
             <span>
               {source.channel_count} 个渠道 ({source.enabled_channel_count} 启用)
             </span>
+            <span
+              className={cn(
+                'inline-flex items-center rounded px-1.5 py-0.5 font-mono text-[10px]',
+                (source.today_quota || 0) > 0
+                  ? 'bg-emerald-500/10 font-semibold text-emerald-600 dark:text-emerald-400 border border-emerald-500/20'
+                  : 'bg-muted/60 text-muted-foreground'
+              )}
+            >
+              当天: {(source.today_quota || 0) > 0 ? formatLogQuota(source.today_quota) : '$0'}
+            </span>
             {source.wechat_name && (
               <Badge
                 variant='outline'
@@ -197,7 +208,13 @@ export function ApiAddressHoverPanel({
                 undefined,
                 source.group_models?.[grp]
               )
-              const income = source.group_incomes?.[grp]?.today_income || 0
+              const grpQuota = source.group_incomes?.[grp]?.today_quota || 0
+              const effectiveQuota =
+                grpQuota > 0
+                  ? grpQuota
+                  : sortedGroups.length === 1
+                    ? source.today_quota || 0
+                    : 0
               const custRatio = source.group_customer_ratios?.[grp]
               const valStr = draftRatios[grp] ?? ''
 
@@ -221,11 +238,17 @@ export function ApiAddressHoverPanel({
                       copyable={false}
                       className='text-[11px] font-medium'
                     />
-                    {income > 0 && (
-                      <span className='font-mono text-[10px] font-semibold text-emerald-600 dark:text-emerald-400'>
-                        ${income.toFixed(2)}
-                      </span>
-                    )}
+                    <span
+                      className={cn(
+                        'inline-flex items-center rounded px-1.5 py-0.5 font-mono text-[10px] shrink-0',
+                        effectiveQuota > 0
+                          ? 'bg-emerald-500/10 font-semibold text-emerald-600 dark:text-emerald-400 border border-emerald-500/20'
+                          : 'bg-muted/60 text-muted-foreground font-normal'
+                      )}
+                      title='该分组在此地址下的当天消耗收入'
+                    >
+                      当天 {effectiveQuota > 0 ? formatLogQuota(effectiveQuota) : '$0'}
+                    </span>
                   </div>
 
                   <div className='flex items-center gap-1.5 shrink-0'>
@@ -237,7 +260,7 @@ export function ApiAddressHoverPanel({
                         售{custRatio}x
                       </span>
                     )}
-                    <div className='relative w-20'>
+                    <div className='relative w-[68px]'>
                       <Input
                         type='number'
                         step='0.001'
@@ -260,12 +283,12 @@ export function ApiAddressHoverPanel({
                           }
                         }}
                         className={cn(
-                          'h-6 pr-4 pl-1.5 text-[11px] font-mono text-right bg-background',
+                          'h-5.5 pr-3.5 pl-1 text-[10px] md:text-[10px] placeholder:text-[10px] font-mono text-right bg-background rounded-md',
                           valStr.trim() !== '' &&
                             'border-indigo-400/70 font-semibold text-indigo-700 dark:text-indigo-300'
                         )}
                       />
-                      <span className='absolute right-1.5 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground font-mono'>
+                      <span className='absolute right-1 top-1/2 -translate-y-1/2 text-[9px] text-muted-foreground font-mono'>
                         x
                       </span>
                     </div>

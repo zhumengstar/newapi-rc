@@ -205,7 +205,7 @@ func GetChannelSources(c *gin.Context) {
 
 	customerGroupRatios := ratio_setting.GetGroupRatioCopy()
 	savedProfiles := loadUpstreamSourceCostProfiles()
-	incomeDetail := model.GetCachedChannelTodayIncomeDetailFast(500 * time.Millisecond)
+	incomeDetail := model.GetCachedChannelTodayIncomeDetailFast(3000 * time.Millisecond)
 
 	sourceMap := make(map[string]*UpstreamSourceDTO)
 	groupSets := make(map[string]map[string]struct{})

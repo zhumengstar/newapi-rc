@@ -1807,6 +1807,7 @@ type ChannelApiAddress struct {
 	BaseURL      string `json:"base_url" gorm:"column:base_url"`
 	UsedQuota    int64  `json:"used_quota" gorm:"column:used_quota"`
 	PeriodQuota  int64  `json:"period_quota" gorm:"column:period_quota"`
+	TodayQuota   int64  `json:"today_quota" gorm:"column:today_quota"`
 	ChannelCount int    `json:"channel_count" gorm:"column:channel_count"`
 }
 
@@ -1928,10 +1929,16 @@ func GetChannelApiAddresses(group string, extra ...interface{}) ([]*ChannelApiAd
 	// 此时绝对不能扫描几千万行 logs 表，直接短路使用 UsedQuota，0.5 毫秒瞬间返回！
 	// 仅当时间跨度 <= 24 小时（例如查“今天”或小时段）时，且存在 target channelIDs，才从 logs 表聚合近期活跃消耗，并附带 1.5 秒安全超时降级保护。
 	isShortTimeRange := false
-	if startTimestamp > 0 && endTimestamp > 0 {
-		isShortTimeRange = (endTimestamp - startTimestamp) <= 86400
-	} else if startTimestamp >= shanghaiTodayStartUnix() {
+	todayStart := shanghaiTodayStartUnix()
+	if startTimestamp >= todayStart {
 		isShortTimeRange = true
+	} else if startTimestamp > 0 && endTimestamp > 0 {
+		isShortTimeRange = (endTimestamp - startTimestamp) <= 93600
+	}
+
+	var incomeDetail *ChannelTodayIncomeDetail
+	if LOG_DB != nil {
+		incomeDetail = GetCachedChannelTodayIncomeDetailFast(1500 * time.Millisecond)
 	}
 
 	channelQuotaMap := make(map[int]int64)
@@ -1964,6 +1971,7 @@ func GetChannelApiAddresses(group string, extra ...interface{}) ([]*ChannelApiAd
 		}
 	}
 
+	cleanGroup := strings.TrimSpace(group)
 	for _, ch := range channels {
 		if ch.BaseURL == nil {
 			continue
@@ -1976,6 +1984,21 @@ func GetChannelApiAddresses(group string, extra ...interface{}) ([]*ChannelApiAd
 		if pq, ok := channelQuotaMap[ch.Id]; ok {
 			item.PeriodQuota += pq
 		}
+		if incomeDetail != nil {
+			if cleanGroup != "" && incomeDetail.ChannelGroupIncomes != nil {
+				item.TodayQuota += incomeDetail.ChannelGroupIncomes[ch.Id][cleanGroup]
+			} else if incomeDetail.ChannelIncomes != nil {
+				item.TodayQuota += incomeDetail.ChannelIncomes[ch.Id]
+			}
+		}
+	}
+	for _, item := range addrMap {
+		if item.TodayQuota == 0 && startTimestamp >= todayStart && item.PeriodQuota > 0 {
+			item.TodayQuota = item.PeriodQuota
+		}
+		if item.PeriodQuota == 0 && startTimestamp >= todayStart && modelName == "" && item.TodayQuota > 0 {
+			item.PeriodQuota = item.TodayQuota
+		}
 	}
 
 	items := make([]*ChannelApiAddress, 0, len(addrMap))
@@ -1984,8 +2007,16 @@ func GetChannelApiAddresses(group string, extra ...interface{}) ([]*ChannelApiAd
 	}
 
 	sort.Slice(items, func(i, j int) bool {
-		if items[i].PeriodQuota != items[j].PeriodQuota {
-			return items[i].PeriodQuota > items[j].PeriodQuota
+		pI := items[i].PeriodQuota
+		if pI == 0 {
+			pI = items[i].TodayQuota
+		}
+		pJ := items[j].PeriodQuota
+		if pJ == 0 {
+			pJ = items[j].TodayQuota
+		}
+		if pI != pJ {
+			return pI > pJ
 		}
 		if items[i].UsedQuota != items[j].UsedQuota {
 			return items[i].UsedQuota > items[j].UsedQuota

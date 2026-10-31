@@ -119,6 +119,11 @@ func main() {
 	// 数据看板
 	go model.UpdateQuotaData()
 
+	// 启动时异步预热各渠道与分组当天收入缓存，避免首次请求等待
+	go func() {
+		_, _, _ = model.GetCachedChannelTodayIncomeDetail(true)
+	}()
+
 	// Codex credential auto-refresh check every 10 minutes, refresh when expires within 1 day
 	service.StartCodexCredentialAutoRefreshTask()
 

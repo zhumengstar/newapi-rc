@@ -165,6 +165,7 @@ export interface ChannelApiAddressItem {
   base_url: string
   used_quota: number
   period_quota: number
+  today_quota?: number
   channel_count: number
 }
 

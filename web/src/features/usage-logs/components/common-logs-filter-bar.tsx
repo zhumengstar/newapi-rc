@@ -173,18 +173,38 @@ export function CommonLogsFilterBar<TData>(
       ? (adminGroups?.data ?? [])
       : Object.keys(userGroups?.data ?? {})
     const rates = adminGroups?.rates ?? {}
+    const quotas =
+      (adminGroups as { quotas?: Record<string, number> } | undefined)
+        ?.quotas ?? {}
     const items = groups
       .filter((group) => group !== 'auto')
       .map((group) => {
         const rate = rates[group]
         const mpm = rate?.mpm ?? 0
         const rpm = rate?.rpm ?? 0
+        const todayQuota = quotas[group] ?? 0
+        const todayText = todayQuota > 0 ? formatLogQuota(todayQuota) : '$0'
         return {
           label: group,
           value: group,
-          description: isAdmin
-            ? `MPM ${formatLogQuota(mpm)} · RPM ${rpm}`
-            : undefined,
+          description: isAdmin ? (
+            <span className='inline-flex items-center gap-1.5 text-[11px] font-mono'>
+              <span
+                className={cn(
+                  todayQuota > 0
+                    ? 'font-semibold text-emerald-600 dark:text-emerald-400'
+                    : 'text-muted-foreground font-normal'
+                )}
+              >
+                {t('Today: ', '当天: ')}
+                {todayText}
+              </span>
+              <span className='text-muted-foreground/40'>·</span>
+              <span className='text-muted-foreground font-normal'>
+                MPM {formatLogQuota(mpm)} · RPM {rpm}
+              </span>
+            </span>
+          ) : undefined,
         }
       })
     return [{ value: '', label: t('All Groups', '全部分组') }, ...items]
@@ -351,15 +371,48 @@ export function CommonLogsFilterBar<TData>(
   const apiAddressOptions = useMemo(() => {
     const list = apiAddressesData ?? []
     const items = list.map((item) => {
-      const quota = item.period_quota > 0 ? item.period_quota : item.used_quota
-      const hasPeriod = item.period_quota > 0
-      const quotaText = formatLogQuota(quota)
-      const desc = hasPeriod ? quotaText : `${t('Total: ', '总计: ')}${quotaText}`
+      const norm = item.base_url.trim().toLowerCase().replace(/\/+$/, '')
+      const src =
+        sourceByBaseUrl.get(norm) || sourceByBaseUrl.get(item.base_url)
+      const todayQuota =
+        item.today_quota && item.today_quota > 0
+          ? item.today_quota
+          : item.period_quota > 0
+            ? item.period_quota
+            : (src?.today_quota ?? 0)
+      const totalQuota = item.used_quota || 0
+      const todayText = todayQuota > 0 ? formatLogQuota(todayQuota) : '$0'
+      const totalText = totalQuota > 0 ? formatLogQuota(totalQuota) : '$0'
       return {
         value: item.base_url,
         label: item.base_url,
-        description: quota > 0 ? desc : '$0',
+        todayQuota,
+        totalQuota,
+        description: (
+          <span className='inline-flex items-center gap-1.5 text-[11px] font-mono'>
+            <span
+              className={cn(
+                todayQuota > 0
+                  ? 'font-semibold text-emerald-600 dark:text-emerald-400'
+                  : 'text-muted-foreground font-normal'
+              )}
+            >
+              {t('Today: ', '当天: ')}
+              {todayText}
+            </span>
+            <span className='text-muted-foreground/40'>·</span>
+            <span className='text-muted-foreground font-normal'>
+              {t('Total: ', '总计: ')}
+              {totalText}
+            </span>
+          </span>
+        ),
       }
+    })
+    items.sort((a, b) => {
+      if (b.todayQuota !== a.todayQuota) return b.todayQuota - a.todayQuota
+      if (b.totalQuota !== a.totalQuota) return b.totalQuota - a.totalQuota
+      return a.value.localeCompare(b.value)
     })
     return [
       {
@@ -369,7 +422,7 @@ export function CommonLogsFilterBar<TData>(
       },
       ...items,
     ]
-  }, [apiAddressesData, t])
+  }, [apiAddressesData, sourceByBaseUrl, t])
 
   const handleChange = useCallback(
     (field: keyof CommonLogFilters, value: Date | string | undefined) => {
@@ -659,6 +712,43 @@ export function CommonLogsFilterBar<TData>(
       </Select>
     </LogsFilterField>
   )
+  const apiAddressFilter = isAdmin ? (
+    <LogsFilterField flex className='min-w-[160px] max-w-[260px]'>
+      <Combobox
+        options={apiAddressOptions}
+        allowCustomValue
+        aria-label={t('API Address', 'API 地址')}
+        emptyText={t('No API address found.', '未找到 API 地址')}
+        placeholder={t('API Address', 'API 地址')}
+        className='h-8 min-w-0 text-sm leading-5 font-mono'
+        value={filters.baseUrl || ''}
+        onValueChange={(value) => {
+          const val = value || undefined
+          handleChange('baseUrl', val)
+          handleApply({ ...filters, baseUrl: val }, logType)
+        }}
+        onKeyDown={handleKeyDown}
+        renderOptionHoverPanel={(option, closeDropdown) => {
+          if (!option.value) return null
+          const norm = option.value.trim().toLowerCase().replace(/\/+$/, '')
+          const source =
+            sourceByBaseUrl.get(norm) || sourceByBaseUrl.get(option.value)
+          return (
+            <ApiAddressHoverPanel
+              baseUrl={option.value}
+              source={source}
+              onOpenFullConfig={(src) => {
+                closeDropdown()
+                setEditingSource(src)
+                setSourceDialogOpen(true)
+              }}
+            />
+          )
+        }}
+      />
+    </LogsFilterField>
+  ) : null
+
   const expandedFilters = (
     <>
       <LogsFilterField flex className={cn('min-w-[85px]', sensitiveInputClass)}>
@@ -696,42 +786,6 @@ export function CommonLogsFilterBar<TData>(
             value={filters.channel || ''}
             onChange={(e) => handleChange('channel', e.target.value)}
             onKeyDown={handleKeyDown}
-          />
-        </LogsFilterField>
-      )}
-      {isAdmin && (
-        <LogsFilterField flex className='min-w-[170px] max-w-[280px]'>
-          <Combobox
-            options={apiAddressOptions}
-            allowCustomValue
-            aria-label={t('API Address', 'API 地址')}
-            emptyText={t('No API address found.', '未找到 API 地址')}
-            placeholder={t('API Address', 'API 地址')}
-            className='h-8 min-w-0 text-sm leading-5 font-mono'
-            value={filters.baseUrl || ''}
-            onValueChange={(value) => {
-              const val = value || undefined
-              handleChange('baseUrl', val)
-              handleApply({ ...filters, baseUrl: val }, logType)
-            }}
-            onKeyDown={handleKeyDown}
-            renderOptionHoverPanel={(option, closeDropdown) => {
-              if (!option.value) return null
-              const norm = option.value.trim().toLowerCase().replace(/\/+$/, '')
-              const source =
-                sourceByBaseUrl.get(norm) || sourceByBaseUrl.get(option.value)
-              return (
-                <ApiAddressHoverPanel
-                  baseUrl={option.value}
-                  source={source}
-                  onOpenFullConfig={(src) => {
-                    closeDropdown()
-                    setEditingSource(src)
-                    setSourceDialogOpen(true)
-                  }}
-                />
-              )
-            }}
           />
         </LogsFilterField>
       )}
@@ -821,6 +875,7 @@ export function CommonLogsFilterBar<TData>(
           <>
             {dateRangeFilter}
             {modelFilter}
+            {apiAddressFilter}
             {groupFilter}
             {typeFilter}
             {expandedFilters}
@@ -830,6 +885,7 @@ export function CommonLogsFilterBar<TData>(
         mobileFilters={
           <>
             {modelFilter}
+            {apiAddressFilter}
             {groupFilter}
             {typeFilter}
             {expandedFilters}

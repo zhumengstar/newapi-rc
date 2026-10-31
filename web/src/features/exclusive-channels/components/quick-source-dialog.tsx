@@ -56,6 +56,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { inferGroupFamily } from '@/features/users/lib'
+import { formatLogQuota } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
 import { updateChannelSource } from '../api'
@@ -522,7 +523,13 @@ export function QuickSourceDialog({
                     source.group_models?.[grp]
                   )
                   const chCount = source.group_channel_counts?.[grp] || 0
-                  const todayInc = source.group_incomes?.[grp]?.today_income || 0
+                  const grpQuota = source.group_incomes?.[grp]?.today_quota || 0
+                  const effectiveQuota =
+                    grpQuota > 0
+                      ? grpQuota
+                      : sourceGroups.length === 1
+                        ? source.today_quota || 0
+                        : 0
                   const custRatio = source.group_customer_ratios?.[grp]
                   const costStr = groupCostRatios[grp] ?? ''
                   const costNum =
@@ -567,14 +574,17 @@ export function QuickSourceDialog({
                           </span>
                         )}
 
-                        {todayInc > 0 && (
-                          <Badge
-                            variant='outline'
-                            className='h-4 px-1.5 text-[10px] font-mono border-emerald-200 text-emerald-700 bg-emerald-50/70 dark:border-emerald-900 dark:text-emerald-300 dark:bg-emerald-950/30'
-                          >
-                            今日 ${todayInc.toFixed(2)}
-                          </Badge>
-                        )}
+                        <Badge
+                          variant='outline'
+                          className={cn(
+                            'h-4 px-1.5 text-[10px] font-mono',
+                            effectiveQuota > 0
+                              ? 'border-emerald-200 text-emerald-700 bg-emerald-50/70 dark:border-emerald-900 dark:text-emerald-300 dark:bg-emerald-950/30 font-semibold'
+                              : 'border-border/60 text-muted-foreground bg-muted/40 font-normal'
+                          )}
+                        >
+                          当天 {effectiveQuota > 0 ? formatLogQuota(effectiveQuota) : '$0'}
+                        </Badge>
 
                         {custRatio !== undefined && (
                           <span className='text-[11px] text-muted-foreground font-mono'>
@@ -603,7 +613,7 @@ export function QuickSourceDialog({
                           </Badge>
                         )}
 
-                        <div className='relative w-28'>
+                        <div className='relative w-24'>
                           <Input
                             type='number'
                             step='0.001'
@@ -618,12 +628,12 @@ export function QuickSourceDialog({
                               handleGroupRatioChange(grp, e.target.value)
                             }
                             className={cn(
-                              'h-7 pr-6 text-xs font-mono text-right bg-background',
+                              'h-6.5 pr-5 pl-1.5 text-[11px] md:text-[11px] placeholder:text-[10px] font-mono text-right bg-background',
                               hasExplicitCost &&
                                 'border-primary/60 ring-1 ring-primary/15 font-semibold'
                             )}
                           />
-                          <span className='absolute right-2 top-1/2 -translate-y-1/2 text-[11px] text-muted-foreground font-mono'>
+                          <span className='absolute right-1.5 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground font-mono'>
                             x
                           </span>
                         </div>
