@@ -211,6 +211,11 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		if cleaned, cerr := relaycommon.EnsureClaudeRequestCleanliness(jsonData); cerr == nil && len(cleaned) > 0 {
 			jsonData = cleaned
 		}
+		if common.IsAPITypeGeminiCompatible(info.ApiType) {
+			if cleaned, cerr := relaycommon.EnsureGeminiSchemaCleanliness(jsonData); cerr == nil && len(cleaned) > 0 {
+				jsonData = cleaned
+			}
+		}
 
 		logger.LogDebug(c, "requestBody: %s", jsonData)
 		c.Set(common.KeyRequestBody, jsonData)

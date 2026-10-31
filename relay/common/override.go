@@ -2934,7 +2934,7 @@ func recursiveCleanGeminiParts(node any) bool {
 	return modified
 }
 
-// IsGeminiPartDataError 检测是否为 Gemini 上游返回的 Part 缺少 data 或顶层非标准字段错误
+// IsGeminiPartDataError 检测是否为 Gemini 上游返回的 Part 缺少 data、顶层非标准字段或末尾角色不合法错误
 func IsGeminiPartDataError(errStr string) bool {
 	lower := strings.ToLower(errStr)
 	return strings.Contains(lower, "required oneof field 'data' must have one initialized field") ||
@@ -2944,6 +2944,8 @@ func IsGeminiPartDataError(errStr string) bool {
 		strings.Contains(lower, "unknown name 'id' at 'request.contents") ||
 		strings.Contains(lower, "unknown name 'id' at 'contents") ||
 		strings.Contains(lower, "unknown name \"thought\" at 'request.contents") ||
+		strings.Contains(lower, "ends with a user role") ||
+		strings.Contains(lower, "upstream service request failed") ||
 		(strings.Contains(lower, "cannot find field") && strings.Contains(lower, "contents["))
 }
 
@@ -2957,11 +2959,13 @@ func IsClaudeWhitespaceTextError(errStr string) bool {
 		strings.Contains(lower, "top_p must be greater than or equal to 0.95")
 }
 
-// IsAssistantPrefillUnsupportedError 检测是否为上游（如 Vertex AI / 新规范 Claude）返回的不支持末尾 assistant prefill 报错
+// IsAssistantPrefillUnsupportedError 检测是否为上游（如 Vertex AI / 新规范 Claude / 严格上游网关）返回的不支持末尾 assistant prefill 报错
 func IsAssistantPrefillUnsupportedError(errStr string) bool {
 	lower := strings.ToLower(errStr)
 	return strings.Contains(lower, "does not support assistant message prefill") ||
-		strings.Contains(lower, "must end with a user message")
+		strings.Contains(lower, "must end with a user message") ||
+		strings.Contains(lower, "ends with a user role") ||
+		strings.Contains(lower, "upstream service request failed")
 }
 
 // IsMessageSizeExceededError 检测是否为单包体积超过上游限制报错（如 Vertex 30MB 限制）

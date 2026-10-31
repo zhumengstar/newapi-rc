@@ -168,6 +168,12 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 		if cleaned, cerr := relaycommon.EnsureClaudeRequestCleanliness(jsonData); cerr == nil && len(cleaned) > 0 {
 			jsonData = cleaned
 		}
+		// 若目标渠道为 Gemini 兼容协议（如 OpenAI -> Gemini 跨协议转换），同步执行 Gemini contents 与 schema 深度清洗（含末尾 model 预填充补齐）
+		if common.IsAPITypeGeminiCompatible(info.ApiType) {
+			if cleaned, cerr := relaycommon.EnsureGeminiSchemaCleanliness(jsonData); cerr == nil && len(cleaned) > 0 {
+				jsonData = cleaned
+			}
+		}
 
 		logger.LogDebug(c, "text request body: %s", jsonData)
 		c.Set(common.KeyRequestBody, jsonData)

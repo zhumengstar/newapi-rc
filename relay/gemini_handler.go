@@ -191,6 +191,9 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 							if len(info.ParamOverride) > 0 {
 								newJsonData, _ = relaycommon.ApplyParamOverrideWithRelayInfo(newJsonData, info)
 							}
+							if cleaned, cerr := relaycommon.EnsureGeminiSchemaCleanliness(newJsonData); cerr == nil && len(cleaned) > 0 {
+								newJsonData = cleaned
+							}
 							_ = relaycommon.UpdatePrunedRequestBody(c, info)
 							newBody, closer, bErr := relaycommon.NewOutboundJSONBody(newJsonData)
 							if bErr == nil {
