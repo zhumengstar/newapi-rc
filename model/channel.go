@@ -1778,3 +1778,21 @@ func GetGroupBasePriority(group string) (*int64, error) {
 	}
 	return nil, nil
 }
+
+type ChannelApiAddress struct {
+	BaseURL      string `json:"base_url" gorm:"column:base_url"`
+	UsedQuota    int64  `json:"used_quota" gorm:"column:used_quota"`
+	ChannelCount int    `json:"channel_count" gorm:"column:channel_count"`
+}
+
+func GetChannelApiAddresses(group string) ([]*ChannelApiAddress, error) {
+	var items []*ChannelApiAddress
+	query := DB.Model(&Channel{}).
+		Select("base_url, count(*) as channel_count, COALESCE(sum(used_quota), 0) as used_quota").
+		Where("base_url IS NOT NULL AND base_url != ''")
+	if strings.TrimSpace(group) != "" {
+		query = ApplyChannelGroupFilter(query, strings.TrimSpace(group))
+	}
+	err := query.Group("base_url").Order("used_quota DESC, base_url ASC").Find(&items).Error
+	return items, err
+}

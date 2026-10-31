@@ -121,6 +121,11 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
               type: 'string' as const,
             },
             {
+              columnId: 'base_url',
+              searchKey: 'baseUrl',
+              type: 'string' as const,
+            },
+            {
               columnId: 'username',
               searchKey: 'username',
               type: 'string' as const,

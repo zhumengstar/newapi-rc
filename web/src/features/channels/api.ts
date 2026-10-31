@@ -161,6 +161,22 @@ export async function getChannelOps(): Promise<ChannelOpsResponse> {
   return res.data
 }
 
+export interface ChannelApiAddressItem {
+  base_url: string
+  used_quota: number
+  channel_count: number
+}
+
+export async function getChannelApiAddresses(
+  group?: string
+): Promise<{ success: boolean; message?: string; data: ChannelApiAddressItem[] }> {
+  const res = await api.get('/api/channel/api_addresses', {
+    params: group ? { group } : {},
+    ...channelActionConfig(),
+  })
+  return res.data
+}
+
 export async function getChannelDefaultBaseURLs(): Promise<
   Partial<Record<number, string>>
 > {

@@ -55,6 +55,7 @@ export interface CommonLogFilters extends CommonFilters {
   requestId?: string
   upstreamRequestId?: string
   statusCode?: string
+  baseUrl?: string
 }
 
 /**
@@ -407,6 +408,7 @@ export interface GetLogsParams {
   request_id?: string
   upstream_request_id?: string
   status_code?: string
+  base_url?: string
 }
 
 export interface GetLogsResponse {

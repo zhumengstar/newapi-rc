@@ -61,6 +61,9 @@ export function buildSearchParams(
         ...(commonFilters.statusCode?.trim() && {
           statusCode: commonFilters.statusCode.trim(),
         }),
+        ...(commonFilters.baseUrl?.trim() && {
+          baseUrl: commonFilters.baseUrl.trim(),
+        }),
       }
     }
     case 'drawing': {

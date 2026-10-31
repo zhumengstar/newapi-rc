@@ -173,3 +173,41 @@ func TestGetAllChannelsSortsByGroup(t *testing.T) {
 	}
 	assert.Equal(t, []string{"group-b-p20", "group-b-p10", "group-a"}, names)
 }
+
+func TestGetChannelApiAddresses(t *testing.T) {
+	truncateTables(t)
+	require.NoError(t, DB.Exec("DELETE FROM channels").Error)
+
+	u1 := "https://api.example.com"
+	u2 := "https://api.svip.com"
+	u3 := "https://api.other.com"
+
+	channels := []Channel{
+		{Name: "ch1", Key: "k1", Group: "group_a", BaseURL: &u1, UsedQuota: 1000},
+		{Name: "ch2", Key: "k2", Group: "group_a", BaseURL: &u1, UsedQuota: 2500},
+		{Name: "ch3", Key: "k3", Group: "group_b", BaseURL: &u2, UsedQuota: 500},
+		{Name: "ch4", Key: "k4", Group: "group_a", BaseURL: &u3, UsedQuota: 100},
+	}
+	require.NoError(t, DB.Create(&channels).Error)
+
+	// All groups - should be sorted by total used_quota desc
+	allAddresses, err := GetChannelApiAddresses("")
+	require.NoError(t, err)
+	require.Len(t, allAddresses, 3)
+	assert.Equal(t, "https://api.example.com", allAddresses[0].BaseURL)
+	assert.Equal(t, int64(3500), allAddresses[0].UsedQuota)
+	assert.Equal(t, 2, allAddresses[0].ChannelCount)
+	assert.Equal(t, "https://api.svip.com", allAddresses[1].BaseURL)
+	assert.Equal(t, int64(500), allAddresses[1].UsedQuota)
+	assert.Equal(t, "https://api.other.com", allAddresses[2].BaseURL)
+	assert.Equal(t, int64(100), allAddresses[2].UsedQuota)
+
+	// Filter by group "group_a"
+	vipAddresses, err := GetChannelApiAddresses("group_a")
+	require.NoError(t, err)
+	require.Len(t, vipAddresses, 2)
+	assert.Equal(t, "https://api.example.com", vipAddresses[0].BaseURL)
+	assert.Equal(t, int64(3500), vipAddresses[0].UsedQuota)
+	assert.Equal(t, "https://api.other.com", vipAddresses[1].BaseURL)
+	assert.Equal(t, int64(100), vipAddresses[1].UsedQuota)
+}

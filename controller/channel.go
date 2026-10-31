@@ -3194,3 +3194,17 @@ func OllamaVersion(c *gin.Context) {
 		},
 	})
 }
+
+func GetChannelApiAddresses(c *gin.Context) {
+	group := strings.TrimSpace(c.Query("group"))
+	items, err := model.GetChannelApiAddresses(group)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    items,
+	})
+}

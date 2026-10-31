@@ -35,7 +35,8 @@ func GetAllLogs(c *gin.Context) {
 	if statusCode == "" {
 		statusCode = strings.TrimSpace(c.Query("code"))
 	}
-	logs, total, err := model.GetAllLogs(logType, startTimestamp, endTimestamp, modelName, username, tokenName, pageInfo.GetStartIdx(), pageInfo.GetPageSize(), channel, group, requestId, upstreamRequestId, statusCode)
+	baseURL := strings.TrimSpace(c.Query("base_url"))
+	logs, total, err := model.GetAllLogs(logType, startTimestamp, endTimestamp, modelName, username, tokenName, pageInfo.GetStartIdx(), pageInfo.GetPageSize(), channel, group, requestId, upstreamRequestId, statusCode, baseURL)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -158,7 +159,8 @@ func GetLogsStat(c *gin.Context) {
 	modelName := c.Query("model_name")
 	channel, _ := strconv.Atoi(c.Query("channel"))
 	group := c.Query("group")
-	stat, err := model.SumUsedQuota(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group)
+	baseURL := strings.TrimSpace(c.Query("base_url"))
+	stat, err := model.SumUsedQuota(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, baseURL)
 	if err != nil {
 		common.ApiError(c, err)
 		return

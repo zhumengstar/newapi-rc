@@ -555,7 +555,20 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 	}
 }
 
-func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, startIdx int, num int, channel int, group string, requestId string, upstreamRequestId string, statusCode ...string) (logs []*Log, total int64, err error) {
+func getChannelIdsByBaseURL(baseURL string) ([]int, error) {
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		return nil, nil
+	}
+	var ids []int
+	trimmedURL := strings.TrimRight(baseURL, "/")
+	err := DB.Model(&Channel{}).
+		Where("base_url = ? OR base_url = ? OR base_url LIKE ?", baseURL, trimmedURL, trimmedURL+"/%").
+		Pluck("id", &ids).Error
+	return ids, err
+}
+
+func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, startIdx int, num int, channel int, group string, requestId string, upstreamRequestId string, extra ...string) (logs []*Log, total int64, err error) {
 	var tx *gorm.DB
 	if logType == LogTypeUnknown {
 		tx = LOG_DB
@@ -591,13 +604,28 @@ func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName
 		tx = tx.Where("logs."+logGroupCol+" = ?", group)
 	}
 	var code string
-	if len(statusCode) > 0 {
-		code = strings.TrimSpace(statusCode[0])
+	if len(extra) > 0 {
+		code = strings.TrimSpace(extra[0])
 	}
 	if code != "" {
 		statusPattern := "%status_code=" + code + "%"
 		otherPattern := "%\"status_code\":" + code + "%"
 		tx = tx.Where("(logs.content LIKE ? OR logs.other LIKE ?)", statusPattern, otherPattern)
+	}
+	var baseURL string
+	if len(extra) > 1 {
+		baseURL = strings.TrimSpace(extra[1])
+	}
+	if baseURL != "" {
+		channelIDs, channelErr := getChannelIdsByBaseURL(baseURL)
+		if channelErr != nil {
+			return nil, 0, channelErr
+		}
+		if len(channelIDs) > 0 {
+			tx = tx.Where("logs.channel_id IN (?)", channelIDs)
+		} else {
+			tx = tx.Where("1 = 0")
+		}
 	}
 	order := "logs.created_at desc, logs.id desc"
 	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
@@ -606,7 +634,7 @@ func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName
 	countKey := buildLogCountCacheKey(
 		"all",
 		strconv.Itoa(logType), normalizeTimestampForCountCache(startTimestamp), normalizeTimestampForCountCache(endTimestamp),
-		modelName, username, tokenName, strconv.Itoa(channel), group, requestId, upstreamRequestId, code,
+		modelName, username, tokenName, strconv.Itoa(channel), group, requestId, upstreamRequestId, code, baseURL,
 	)
 	countTx := tx.Session(&gorm.Session{})
 	listTx := tx.Session(&gorm.Session{})
@@ -766,8 +794,12 @@ var (
 	logStatGroup   singleflight.Group
 )
 
-func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string) (stat Stat, err error) {
-	cacheKey := fmt.Sprintf("%d:%d:%d:%s:%s:%s:%d:%s", logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group)
+func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string, extra ...string) (stat Stat, err error) {
+	var baseURL string
+	if len(extra) > 0 {
+		baseURL = strings.TrimSpace(extra[0])
+	}
+	cacheKey := fmt.Sprintf("%d:%d:%d:%s:%s:%s:%d:%s:%s", logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, baseURL)
 	now := time.Now()
 
 	logStatCacheMu.RLock()
@@ -787,7 +819,7 @@ func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelNa
 		}
 		logStatCacheMu.RUnlock()
 
-		res, queryErr := sumUsedQuotaFromDB(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group)
+		res, queryErr := sumUsedQuotaFromDB(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, baseURL)
 		if queryErr != nil {
 			return Stat{}, queryErr
 		}
@@ -820,7 +852,11 @@ func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelNa
 	return val.(Stat), nil
 }
 
-func sumUsedQuotaFromDB(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string) (stat Stat, err error) {
+func sumUsedQuotaFromDB(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string, extra ...string) (stat Stat, err error) {
+	var baseURL string
+	if len(extra) > 0 {
+		baseURL = strings.TrimSpace(extra[0])
+	}
 	tx := LOG_DB.Table("logs").Select("COALESCE(sum(quota), 0) quota")
 
 	// 为rpm、tpm和mpm创建单独的查询
@@ -855,6 +891,19 @@ func sumUsedQuotaFromDB(logType int, startTimestamp int64, endTimestamp int64, m
 	if group != "" {
 		tx = tx.Where(logGroupCol+" = ?", group)
 		rpmTpmQuery = rpmTpmQuery.Where(logGroupCol+" = ?", group)
+	}
+	if baseURL != "" {
+		channelIDs, channelErr := getChannelIdsByBaseURL(baseURL)
+		if channelErr != nil {
+			return stat, channelErr
+		}
+		if len(channelIDs) > 0 {
+			tx = tx.Where("channel_id IN (?)", channelIDs)
+			rpmTpmQuery = rpmTpmQuery.Where("channel_id IN (?)", channelIDs)
+		} else {
+			tx = tx.Where("1 = 0")
+			rpmTpmQuery = rpmTpmQuery.Where("1 = 0")
+		}
 	}
 
 	tx = tx.Where("type = ?", LogTypeConsume)

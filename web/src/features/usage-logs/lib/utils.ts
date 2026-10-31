@@ -201,6 +201,9 @@ export function buildApiParams(config: {
     ...(searchParams.statusCode
       ? { status_code: String(searchParams.statusCode) }
       : {}),
+    ...(isAdmin && searchParams.baseUrl
+      ? { base_url: String(searchParams.baseUrl) }
+      : {}),
     ...buildTimeRangeParams(searchParams, false),
   }
 
@@ -224,6 +227,9 @@ export function buildApiParams(config: {
           break
         case 'channel':
           if (isAdmin) params.channel = Number(value) || 0
+          break
+        case 'base_url':
+          if (isAdmin) params.base_url = String(value)
           break
         case 'username':
           if (isAdmin) params.username = String(value)

@@ -42,6 +42,7 @@ import {
 } from '@/components/ui/tooltip'
 import { getGroups, getTodayConsumptionUsers } from '@/features/users/api'
 import { getRankedModels } from '@/features/models/api'
+import { getChannelApiAddresses } from '@/features/channels/api'
 import { formatLogQuota } from '@/lib/format'
 import { useMediaQuery } from '@/hooks'
 import { getUserGroups } from '@/lib/api'
@@ -110,6 +111,7 @@ function buildSearchSourceKey(values: {
   requestId?: unknown
   upstreamRequestId?: unknown
   statusCode?: unknown
+  baseUrl?: unknown
   type?: unknown
 }) {
   return [
@@ -123,6 +125,7 @@ function buildSearchSourceKey(values: {
     values.requestId,
     values.upstreamRequestId,
     values.statusCode,
+    values.baseUrl,
     Array.isArray(values.type) ? values.type.join(',') : values.type,
   ]
     .map((value) => String(value ?? ''))
@@ -192,6 +195,25 @@ export function CommonLogsFilterBar<TData>(
     }))
   }, [userCandidatesData])
 
+  const { data: apiAddressesData } = useQuery({
+    queryKey: ['channel-api-addresses', filters.group],
+    queryFn: async () =>
+      requireServerSuccess(await getChannelApiAddresses(filters.group)),
+    enabled: isAdmin,
+    staleTime: 30 * 1000,
+  })
+
+  const apiAddressOptions = useMemo(() => {
+    const list = apiAddressesData?.data ?? []
+    return list.map((item) => ({
+      value: item.base_url,
+      label:
+        item.used_quota > 0
+          ? `${item.base_url} (${formatLogQuota(item.used_quota)})`
+          : item.base_url,
+    }))
+  }, [apiAddressesData])
+
   const searchState = useMemo<CommonLogDraft>(() => {
     const { start, end } = getDefaultTimeRange()
     const sourceValues = {
@@ -205,6 +227,7 @@ export function CommonLogsFilterBar<TData>(
       requestId: searchParams.requestId,
       upstreamRequestId: searchParams.upstreamRequestId,
       statusCode: searchParams.statusCode,
+      baseUrl: searchParams.baseUrl,
       type: searchParams.type,
     }
     const filters: CommonLogFilters = {
@@ -220,6 +243,7 @@ export function CommonLogsFilterBar<TData>(
       requestId: searchParams.requestId || undefined,
       upstreamRequestId: searchParams.upstreamRequestId || undefined,
       statusCode: searchParams.statusCode || undefined,
+      baseUrl: searchParams.baseUrl || undefined,
     }
     return {
       sourceKey: buildSearchSourceKey(sourceValues),
@@ -294,6 +318,7 @@ export function CommonLogsFilterBar<TData>(
       requestId: undefined,
       upstreamRequestId: undefined,
       statusCode: undefined,
+      baseUrl: undefined,
     }
     const resetSearch = {
       page: 1,
@@ -308,6 +333,7 @@ export function CommonLogsFilterBar<TData>(
       requestId: undefined,
       upstreamRequestId: undefined,
       statusCode: undefined,
+      baseUrl: undefined,
     }
     setDraft({
       sourceKey: buildSearchSourceKey({}),
@@ -335,6 +361,7 @@ export function CommonLogsFilterBar<TData>(
     !!filters.token ||
     !!filters.username ||
     !!filters.channel ||
+    !!filters.baseUrl ||
     !!filters.requestId ||
     !!filters.upstreamRequestId
 
@@ -362,6 +389,7 @@ export function CommonLogsFilterBar<TData>(
     filters.token,
     isAdmin ? filters.username : undefined,
     isAdmin ? filters.channel : undefined,
+    isAdmin ? filters.baseUrl : undefined,
     filters.requestId,
     filters.upstreamRequestId,
   ].filter(Boolean).length
@@ -565,6 +593,25 @@ export function CommonLogsFilterBar<TData>(
             placeholder={t('Channel ID')}
             value={filters.channel || ''}
             onChange={(e) => handleChange('channel', e.target.value)}
+            onKeyDown={handleKeyDown}
+          />
+        </LogsFilterField>
+      )}
+      {isAdmin && (
+        <LogsFilterField flex className='min-w-[130px]'>
+          <Combobox
+            options={apiAddressOptions}
+            allowCustomValue
+            aria-label={t('API Address', 'API 地址')}
+            emptyText={t('No API address found.', '未找到 API 地址')}
+            placeholder={t('API Address', 'API 地址')}
+            className='h-8 min-w-0 text-sm leading-5 font-mono'
+            value={filters.baseUrl || ''}
+            onValueChange={(value) => {
+              const val = value || undefined
+              handleChange('baseUrl', val)
+              handleApply({ ...filters, baseUrl: val }, logType)
+            }}
             onKeyDown={handleKeyDown}
           />
         </LogsFilterField>
