@@ -2,6 +2,7 @@ package dto
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -25,7 +26,13 @@ func (r *GeminiChatRequest) UnmarshalJSON(data []byte) error {
 	type Alias GeminiChatRequest
 	var aux struct {
 		Alias
-		SystemInstructionSnake *GeminiChatContent `json:"system_instruction,omitempty"`
+		SystemInstructionSnake  *GeminiChatContent          `json:"system_instruction,omitempty"`
+		SystemInstructionsSnake *GeminiChatContent          `json:"system_instructions,omitempty"`
+		SystemInstructionsCamel *GeminiChatContent          `json:"systemInstructions,omitempty"`
+		GenerationConfigSnake   *GeminiChatGenerationConfig `json:"generation_config,omitempty"`
+		SafetySettingsSnake     []GeminiChatSafetySettings  `json:"safety_settings,omitempty"`
+		ToolConfigSnake         *ToolConfig                 `json:"tool_config,omitempty"`
+		CachedContentSnake      string                      `json:"cached_content,omitempty"`
 	}
 
 	if err := kitutil.Unmarshal(data, &aux); err != nil {
@@ -36,6 +43,22 @@ func (r *GeminiChatRequest) UnmarshalJSON(data []byte) error {
 
 	if aux.SystemInstructionSnake != nil {
 		r.SystemInstructions = aux.SystemInstructionSnake
+	} else if aux.SystemInstructionsSnake != nil {
+		r.SystemInstructions = aux.SystemInstructionsSnake
+	} else if aux.SystemInstructionsCamel != nil && r.SystemInstructions == nil {
+		r.SystemInstructions = aux.SystemInstructionsCamel
+	}
+	if aux.GenerationConfigSnake != nil {
+		r.GenerationConfig.MergeFrom(*aux.GenerationConfigSnake)
+	}
+	if len(aux.SafetySettingsSnake) > 0 && len(r.SafetySettings) == 0 {
+		r.SafetySettings = aux.SafetySettingsSnake
+	}
+	if aux.ToolConfigSnake != nil && r.ToolConfig == nil {
+		r.ToolConfig = aux.ToolConfigSnake
+	}
+	if aux.CachedContentSnake != "" && r.CachedContent == "" {
+		r.CachedContent = aux.CachedContentSnake
 	}
 
 	return nil
@@ -347,29 +370,211 @@ type GeminiChatTool struct {
 }
 
 type GeminiChatGenerationConfig struct {
-	Temperature                *float64              `json:"temperature,omitempty"`
-	TopP                       *float64              `json:"topP,omitempty"`
-	TopK                       *float64              `json:"topK,omitempty"`
-	MaxOutputTokens            *uint                 `json:"maxOutputTokens,omitempty"`
-	CandidateCount             *int                  `json:"candidateCount,omitempty"`
-	StopSequences              []string              `json:"stopSequences,omitempty"`
-	ResponseMimeType           string                `json:"responseMimeType,omitempty"`
-	ResponseSchema             any                   `json:"responseSchema,omitempty"`
-	ResponseJsonSchema         json.RawMessage       `json:"responseJsonSchema,omitempty"`
-	PresencePenalty            *float32              `json:"presencePenalty,omitempty"`
-	FrequencyPenalty           *float32              `json:"frequencyPenalty,omitempty"`
-	ResponseLogprobs           *bool                 `json:"responseLogprobs,omitempty"`
-	Logprobs                   *int32                `json:"logprobs,omitempty"`
-	EnableEnhancedCivicAnswers *bool                 `json:"enableEnhancedCivicAnswers,omitempty"`
-	MediaResolution            MediaResolution       `json:"mediaResolution,omitempty"`
-	Seed                       *int64                `json:"seed,omitempty"`
-	ResponseModalities         []string              `json:"responseModalities,omitempty"`
-	ThinkingConfig             *GeminiThinkingConfig `json:"thinkingConfig,omitempty"`
-	SpeechConfig               json.RawMessage       `json:"speechConfig,omitempty"` // RawMessage to allow flexible speech config
-	ImageConfig                json.RawMessage       `json:"imageConfig,omitempty"`  // RawMessage to allow flexible image config
+	Temperature                *float64                   `json:"temperature,omitempty"`
+	TopP                       *float64                   `json:"topP,omitempty"`
+	TopK                       *float64                   `json:"topK,omitempty"`
+	MaxOutputTokens            *uint                      `json:"maxOutputTokens,omitempty"`
+	CandidateCount             *int                       `json:"candidateCount,omitempty"`
+	StopSequences              []string                   `json:"stopSequences,omitempty"`
+	ResponseMimeType           string                     `json:"responseMimeType,omitempty"`
+	ResponseSchema             any                        `json:"responseSchema,omitempty"`
+	ResponseJsonSchema         json.RawMessage            `json:"responseJsonSchema,omitempty"`
+	PresencePenalty            *float32                   `json:"presencePenalty,omitempty"`
+	FrequencyPenalty           *float32                   `json:"frequencyPenalty,omitempty"`
+	ResponseLogprobs           *bool                      `json:"responseLogprobs,omitempty"`
+	Logprobs                   *int32                     `json:"logprobs,omitempty"`
+	EnableEnhancedCivicAnswers *bool                      `json:"enableEnhancedCivicAnswers,omitempty"`
+	MediaResolution            MediaResolution            `json:"mediaResolution,omitempty"`
+	Seed                       *int64                     `json:"seed,omitempty"`
+	ResponseModalities         []string                   `json:"responseModalities,omitempty"`
+	ThinkingConfig             *GeminiThinkingConfig      `json:"thinkingConfig,omitempty"`
+	SpeechConfig               json.RawMessage            `json:"speechConfig,omitempty"` // RawMessage to allow flexible speech config
+	ImageConfig                json.RawMessage            `json:"imageConfig,omitempty"`  // RawMessage to allow flexible image config
+	ExtraFields                map[string]json.RawMessage `json:"-"`
 }
 
-// UnmarshalJSON allows GeminiChatGenerationConfig to accept both snake_case and camelCase fields.
+var geminiGenerationConfigKnownKeys = map[string]struct{}{
+	"temperature": {},
+	"topP":        {}, "top_p": {},
+	"topK": {}, "top_k": {},
+	"maxOutputTokens": {}, "max_output_tokens": {},
+	"candidateCount": {}, "candidate_count": {},
+	"stopSequences": {}, "stop_sequences": {},
+	"responseMimeType": {}, "response_mime_type": {},
+	"responseSchema": {}, "response_schema": {},
+	"responseJsonSchema": {}, "response_json_schema": {},
+	"presencePenalty": {}, "presence_penalty": {},
+	"frequencyPenalty": {}, "frequency_penalty": {},
+	"responseLogprobs": {}, "response_logprobs": {},
+	"logprobs":                   {},
+	"enableEnhancedCivicAnswers": {}, "enable_enhanced_civic_answers": {},
+	"mediaResolution": {}, "media_resolution": {},
+	"seed":               {},
+	"responseModalities": {}, "response_modalities": {},
+	"thinkingConfig": {}, "thinking_config": {},
+	"speechConfig": {}, "speech_config": {},
+	"imageConfig": {}, "image_config": {},
+	"aspectRatio": {}, "aspect_ratio": {},
+	"imageSize": {}, "image_size": {},
+}
+
+// NormalizeGeminiImageSize standardizes resolution tokens ("0.5k", "512", "1k", "2k", "4k") to canonical uppercase values.
+func NormalizeGeminiImageSize(val any) string {
+	s := strings.TrimSpace(fmt.Sprintf("%v", val))
+	if s == "" || s == "<nil>" {
+		return ""
+	}
+	lower := strings.ToLower(s)
+	switch lower {
+	case "0.5k", "512", "512x512", "512px":
+		return "512"
+	case "1k", "1024", "1024x1024", "1024px":
+		return "1K"
+	case "2k", "2048", "2048x2048", "2048px":
+		return "2K"
+	case "4k", "4096", "4096x4096", "4096px":
+		return "4K"
+	default:
+		return strings.ToUpper(s)
+	}
+}
+
+// NormalizeGeminiImageConfigBytes normalizes snake_case keys (aspect_ratio, image_size) and resolution values inside imageConfig JSON.
+func NormalizeGeminiImageConfigBytes(raw json.RawMessage, fallbackAspectRatio, fallbackImageSize string) json.RawMessage {
+	imgMap := make(map[string]any)
+	if len(raw) > 0 {
+		if err := kitutil.Unmarshal(raw, &imgMap); err != nil {
+			return raw
+		}
+	}
+	if ar, ok := imgMap["aspect_ratio"]; ok {
+		if _, hasCamel := imgMap["aspectRatio"]; !hasCamel {
+			imgMap["aspectRatio"] = ar
+		}
+		delete(imgMap, "aspect_ratio")
+	}
+	if fallbackAspectRatio != "" {
+		if _, hasCamel := imgMap["aspectRatio"]; !hasCamel {
+			imgMap["aspectRatio"] = fallbackAspectRatio
+		}
+	}
+	if is, ok := imgMap["image_size"]; ok {
+		if _, hasCamel := imgMap["imageSize"]; !hasCamel {
+			imgMap["imageSize"] = is
+		}
+		delete(imgMap, "image_size")
+	}
+	if fallbackImageSize != "" {
+		if _, hasCamel := imgMap["imageSize"]; !hasCamel {
+			imgMap["imageSize"] = fallbackImageSize
+		}
+	}
+	if is, ok := imgMap["imageSize"]; ok && is != nil {
+		if norm := NormalizeGeminiImageSize(is); norm != "" {
+			imgMap["imageSize"] = norm
+		}
+	}
+	if len(imgMap) == 0 {
+		return raw
+	}
+	if out, err := kitutil.Marshal(imgMap); err == nil {
+		return out
+	}
+	return raw
+}
+
+// MergeFrom merges non-empty fields from another GeminiChatGenerationConfig into c.
+func (c *GeminiChatGenerationConfig) MergeFrom(other GeminiChatGenerationConfig) {
+	if other.Temperature != nil {
+		c.Temperature = other.Temperature
+	}
+	if other.TopP != nil {
+		c.TopP = other.TopP
+	}
+	if other.TopK != nil {
+		c.TopK = other.TopK
+	}
+	if other.MaxOutputTokens != nil {
+		c.MaxOutputTokens = other.MaxOutputTokens
+	}
+	if other.CandidateCount != nil {
+		c.CandidateCount = other.CandidateCount
+	}
+	if len(other.StopSequences) > 0 {
+		c.StopSequences = other.StopSequences
+	}
+	if other.ResponseMimeType != "" {
+		c.ResponseMimeType = other.ResponseMimeType
+	}
+	if other.ResponseSchema != nil {
+		c.ResponseSchema = other.ResponseSchema
+	}
+	if len(other.ResponseJsonSchema) > 0 {
+		c.ResponseJsonSchema = other.ResponseJsonSchema
+	}
+	if other.PresencePenalty != nil {
+		c.PresencePenalty = other.PresencePenalty
+	}
+	if other.FrequencyPenalty != nil {
+		c.FrequencyPenalty = other.FrequencyPenalty
+	}
+	if other.ResponseLogprobs != nil {
+		c.ResponseLogprobs = other.ResponseLogprobs
+	}
+	if other.Logprobs != nil {
+		c.Logprobs = other.Logprobs
+	}
+	if other.EnableEnhancedCivicAnswers != nil {
+		c.EnableEnhancedCivicAnswers = other.EnableEnhancedCivicAnswers
+	}
+	if other.MediaResolution != "" {
+		c.MediaResolution = other.MediaResolution
+	}
+	if other.Seed != nil {
+		c.Seed = other.Seed
+	}
+	if len(other.ResponseModalities) > 0 {
+		c.ResponseModalities = other.ResponseModalities
+	}
+	if other.ThinkingConfig != nil {
+		c.ThinkingConfig = other.ThinkingConfig
+	}
+	if len(other.SpeechConfig) > 0 {
+		c.SpeechConfig = other.SpeechConfig
+	}
+	if len(other.ImageConfig) > 0 {
+		if len(c.ImageConfig) == 0 {
+			c.ImageConfig = other.ImageConfig
+		} else {
+			// Merge imageConfig maps
+			var baseMap, otherMap map[string]any
+			if kitutil.Unmarshal(c.ImageConfig, &baseMap) == nil && kitutil.Unmarshal(other.ImageConfig, &otherMap) == nil {
+				if baseMap == nil {
+					baseMap = make(map[string]any)
+				}
+				for k, v := range otherMap {
+					baseMap[k] = v
+				}
+				if merged, err := kitutil.Marshal(baseMap); err == nil {
+					c.ImageConfig = NormalizeGeminiImageConfigBytes(merged, "", "")
+				}
+			} else {
+				c.ImageConfig = other.ImageConfig
+			}
+		}
+	}
+	if len(other.ExtraFields) > 0 {
+		if c.ExtraFields == nil {
+			c.ExtraFields = make(map[string]json.RawMessage, len(other.ExtraFields))
+		}
+		for k, v := range other.ExtraFields {
+			c.ExtraFields[k] = v
+		}
+	}
+}
+
+// UnmarshalJSON allows GeminiChatGenerationConfig to accept both snake_case and camelCase fields,
+// normalize imageConfig/image_config, and preserve unknown fields.
 func (c *GeminiChatGenerationConfig) UnmarshalJSON(data []byte) error {
 	type Alias GeminiChatGenerationConfig
 	var aux struct {
@@ -391,6 +596,10 @@ func (c *GeminiChatGenerationConfig) UnmarshalJSON(data []byte) error {
 		ThinkingConfigSnake             *GeminiThinkingConfig `json:"thinking_config,omitempty"`
 		SpeechConfigSnake               json.RawMessage       `json:"speech_config,omitempty"`
 		ImageConfigSnake                json.RawMessage       `json:"image_config,omitempty"`
+		AspectRatioCamel                string                `json:"aspectRatio,omitempty"`
+		AspectRatioSnake                string                `json:"aspect_ratio,omitempty"`
+		ImageSizeCamel                  string                `json:"imageSize,omitempty"`
+		ImageSizeSnake                  string                `json:"image_size,omitempty"`
 	}
 
 	if err := kitutil.Unmarshal(data, &aux); err != nil {
@@ -449,10 +658,72 @@ func (c *GeminiChatGenerationConfig) UnmarshalJSON(data []byte) error {
 		c.SpeechConfig = aux.SpeechConfigSnake
 	}
 	if len(aux.ImageConfigSnake) > 0 {
-		c.ImageConfig = aux.ImageConfigSnake
+		if len(c.ImageConfig) == 0 {
+			c.ImageConfig = aux.ImageConfigSnake
+		} else {
+			// Merge image_config and imageConfig
+			var camelMap, snakeMap map[string]any
+			if kitutil.Unmarshal(c.ImageConfig, &camelMap) == nil && kitutil.Unmarshal(aux.ImageConfigSnake, &snakeMap) == nil {
+				if camelMap == nil {
+					camelMap = make(map[string]any)
+				}
+				for k, v := range snakeMap {
+					camelMap[k] = v
+				}
+				if merged, err := kitutil.Marshal(camelMap); err == nil {
+					c.ImageConfig = merged
+				}
+			}
+		}
+	}
+
+	fallbackAR := aux.AspectRatioCamel
+	if aux.AspectRatioSnake != "" {
+		fallbackAR = aux.AspectRatioSnake
+	}
+	fallbackIS := aux.ImageSizeCamel
+	if aux.ImageSizeSnake != "" {
+		fallbackIS = aux.ImageSizeSnake
+	}
+	if len(c.ImageConfig) > 0 || fallbackAR != "" || fallbackIS != "" {
+		c.ImageConfig = NormalizeGeminiImageConfigBytes(c.ImageConfig, fallbackAR, fallbackIS)
+	}
+
+	var rawMap map[string]json.RawMessage
+	if err := kitutil.Unmarshal(data, &rawMap); err == nil && len(rawMap) > 0 {
+		for k, v := range rawMap {
+			if _, known := geminiGenerationConfigKnownKeys[k]; !known {
+				if c.ExtraFields == nil {
+					c.ExtraFields = make(map[string]json.RawMessage)
+				}
+				c.ExtraFields[k] = v
+			}
+		}
 	}
 
 	return nil
+}
+
+// MarshalJSON serializes GeminiChatGenerationConfig along with any preserved ExtraFields.
+func (c GeminiChatGenerationConfig) MarshalJSON() ([]byte, error) {
+	type Alias GeminiChatGenerationConfig
+	baseBytes, err := kitutil.Marshal(Alias(c))
+	if err != nil || len(c.ExtraFields) == 0 {
+		return baseBytes, err
+	}
+	var baseMap map[string]json.RawMessage
+	if err := kitutil.Unmarshal(baseBytes, &baseMap); err != nil {
+		return baseBytes, nil
+	}
+	if baseMap == nil {
+		baseMap = make(map[string]json.RawMessage, len(c.ExtraFields))
+	}
+	for k, v := range c.ExtraFields {
+		if _, exists := baseMap[k]; !exists {
+			baseMap[k] = v
+		}
+	}
+	return kitutil.Marshal(baseMap)
 }
 
 type MediaResolution string

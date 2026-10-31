@@ -61,76 +61,151 @@ func OpenAIChatRequestToGeminiGenerateContent(c context.Context, textRequest dto
 			return nil, fmt.Errorf("invalid extra body: %w", err)
 		}
 
-		if googleBody, ok := extraBody["google"].(map[string]any); ok {
-			if _, hasErrorParam := googleBody["thinkingConfig"]; hasErrorParam {
-				return nil, errors.New("extra_body.google.thinkingConfig is not supported, use extra_body.google.thinking_config instead")
+		// 1. Merge top-level generation_config / generationConfig if provided in extra_body
+		for _, gcKey := range []string{"generation_config", "generationConfig"} {
+			if rawGC, ok := extraBody[gcKey]; ok && rawGC != nil {
+				if gcBytes, err := kitutil.Marshal(rawGC); err == nil {
+					var parsedGC dto.GeminiChatGenerationConfig
+					if err := kitutil.Unmarshal(gcBytes, &parsedGC); err == nil {
+						geminiRequest.GenerationConfig.MergeFrom(parsedGC)
+					}
+				}
+			}
+		}
+
+		// Helper to parse thinking_config / thinkingConfig map (supports both snake_case and camelCase keys)
+		parseThinkingMap := func(thinkingConfig map[string]any) error {
+			var hasThinkingConfig bool
+			var tempThinkingConfig dto.GeminiThinkingConfig
+			if geminiRequest.GenerationConfig.ThinkingConfig != nil {
+				tempThinkingConfig = *geminiRequest.GenerationConfig.ThinkingConfig
+				hasThinkingConfig = true
 			}
 
-			if thinkingConfig, ok := googleBody["thinking_config"].(map[string]any); ok {
-				if _, hasErrorParam := thinkingConfig["thinkingBudget"]; hasErrorParam {
-					return nil, errors.New("extra_body.google.thinking_config.thinkingBudget is not supported, use extra_body.google.thinking_config.thinking_budget instead")
+			thinkingBudget, hasBudget := thinkingConfig["thinking_budget"]
+			if !hasBudget {
+				thinkingBudget, hasBudget = thinkingConfig["thinkingBudget"]
+			}
+			if hasBudget {
+				v, ok := thinkingBudget.(float64)
+				maxInt := int(^uint(0) >> 1)
+				if !ok || math.IsNaN(v) || math.IsInf(v, 0) || math.Trunc(v) != v || v > float64(maxInt) || v < float64(-maxInt-1) {
+					return errors.New("extra_body.google.thinking_config.thinking_budget must be an integer")
 				}
-				var hasThinkingConfig bool
-				var tempThinkingConfig dto.GeminiThinkingConfig
+				budgetInt := int(v)
+				tempThinkingConfig.ThinkingBudget = kitutil.GetPointer(budgetInt)
+				hasThinkingConfig = true
+			}
 
-				if thinkingBudget, exists := thinkingConfig["thinking_budget"]; exists {
-					v, ok := thinkingBudget.(float64)
-					maxInt := int(^uint(0) >> 1)
-					if !ok || math.IsNaN(v) || math.IsInf(v, 0) || math.Trunc(v) != v || v > float64(maxInt) || v < float64(-maxInt-1) {
-						return nil, errors.New("extra_body.google.thinking_config.thinking_budget must be an integer")
-					}
-					budgetInt := int(v)
-					tempThinkingConfig.ThinkingBudget = kitutil.GetPointer(budgetInt)
+			includeThoughts, hasInclude := thinkingConfig["include_thoughts"]
+			if !hasInclude {
+				includeThoughts, hasInclude = thinkingConfig["includeThoughts"]
+			}
+			if hasInclude {
+				if v, ok := includeThoughts.(bool); ok {
+					tempThinkingConfig.IncludeThoughts = kitutil.GetPointer(v)
 					hasThinkingConfig = true
-				}
-
-				if includeThoughts, exists := thinkingConfig["include_thoughts"]; exists {
-					if v, ok := includeThoughts.(bool); ok {
-						tempThinkingConfig.IncludeThoughts = kitutil.GetPointer(v)
-						hasThinkingConfig = true
-					} else {
-						return nil, errors.New("extra_body.google.thinking_config.include_thoughts must be a boolean")
-					}
-				}
-				if thinkingLevel, exists := thinkingConfig["thinking_level"]; exists {
-					if v, ok := thinkingLevel.(string); ok {
-						tempThinkingConfig.ThinkingLevel = v
-						hasThinkingConfig = true
-					} else {
-						return nil, errors.New("extra_body.google.thinking_config.thinking_level must be a string")
-					}
-				}
-
-				if hasThinkingConfig {
-					geminiRequest.GenerationConfig.ThinkingConfig = &tempThinkingConfig
+				} else {
+					return errors.New("extra_body.google.thinking_config.include_thoughts must be a boolean")
 				}
 			}
 
-			if _, hasErrorParam := googleBody["imageConfig"]; hasErrorParam {
-				return nil, errors.New("extra_body.google.imageConfig is not supported, use extra_body.google.image_config instead")
+			thinkingLevel, hasLevel := thinkingConfig["thinking_level"]
+			if !hasLevel {
+				thinkingLevel, hasLevel = thinkingConfig["thinkingLevel"]
+			}
+			if hasLevel {
+				if v, ok := thinkingLevel.(string); ok {
+					tempThinkingConfig.ThinkingLevel = v
+					hasThinkingConfig = true
+				} else {
+					return errors.New("extra_body.google.thinking_config.thinking_level must be a string")
+				}
 			}
 
-			if imageConfig, ok := googleBody["image_config"].(map[string]any); ok {
-				geminiImageConfig := make(map[string]any)
-				if aspectRatio, ok := imageConfig["aspect_ratio"]; ok {
-					geminiImageConfig["aspectRatio"] = aspectRatio
-				} else if aspectRatio, ok := imageConfig["aspectRatio"]; ok {
-					geminiImageConfig["aspectRatio"] = aspectRatio
-				}
-				if imageSize, ok := imageConfig["image_size"]; ok {
-					geminiImageConfig["imageSize"] = strings.ToUpper(fmt.Sprintf("%v", imageSize))
-				} else if imageSize, ok := imageConfig["imageSize"]; ok {
-					geminiImageConfig["imageSize"] = strings.ToUpper(fmt.Sprintf("%v", imageSize))
-				}
+			if hasThinkingConfig {
+				geminiRequest.GenerationConfig.ThinkingConfig = &tempThinkingConfig
+			}
+			return nil
+		}
 
-				if len(geminiImageConfig) > 0 {
-					imageConfigBytes, err := kitutil.Marshal(geminiImageConfig)
-					if err != nil {
-						return nil, fmt.Errorf("failed to marshal image_config: %w", err)
+		// Helper to parse image_config / imageConfig map (supports both snake_case and camelCase keys + extra fields)
+		applyImageConfigMap := func(imageConfig map[string]any) error {
+			rawBytes, err := kitutil.Marshal(imageConfig)
+			if err != nil {
+				return fmt.Errorf("failed to marshal image_config: %w", err)
+			}
+			normalized := dto.NormalizeGeminiImageConfigBytes(rawBytes, "", "")
+			if len(normalized) > 0 {
+				geminiRequest.GenerationConfig.MergeFrom(dto.GeminiChatGenerationConfig{
+					ImageConfig: normalized,
+				})
+			}
+			return nil
+		}
+
+		// 2. Top-level thinking_config / thinkingConfig and image_config / imageConfig in extra_body
+		for _, tcKey := range []string{"thinking_config", "thinkingConfig"} {
+			if tcMap, ok := extraBody[tcKey].(map[string]any); ok {
+				if err := parseThinkingMap(tcMap); err != nil {
+					return nil, err
+				}
+			}
+		}
+		for _, icKey := range []string{"image_config", "imageConfig"} {
+			if icMap, ok := extraBody[icKey].(map[string]any); ok {
+				if err := applyImageConfigMap(icMap); err != nil {
+					return nil, err
+				}
+			}
+		}
+
+		// 3. extra_body.google nested configs (both snake_case and camelCase)
+		if googleBody, ok := extraBody["google"].(map[string]any); ok {
+			for _, gcKey := range []string{"generation_config", "generationConfig"} {
+				if rawGC, ok := googleBody[gcKey]; ok && rawGC != nil {
+					if gcBytes, err := kitutil.Marshal(rawGC); err == nil {
+						var parsedGC dto.GeminiChatGenerationConfig
+						if err := kitutil.Unmarshal(gcBytes, &parsedGC); err == nil {
+							geminiRequest.GenerationConfig.MergeFrom(parsedGC)
+						}
 					}
-					geminiRequest.GenerationConfig.ImageConfig = imageConfigBytes
 				}
 			}
+			for _, tcKey := range []string{"thinking_config", "thinkingConfig"} {
+				if thinkingConfig, ok := googleBody[tcKey].(map[string]any); ok {
+					if err := parseThinkingMap(thinkingConfig); err != nil {
+						return nil, err
+					}
+				}
+			}
+			for _, icKey := range []string{"image_config", "imageConfig"} {
+				if imageConfig, ok := googleBody[icKey].(map[string]any); ok {
+					if err := applyImageConfigMap(imageConfig); err != nil {
+						return nil, err
+					}
+				}
+			}
+		}
+
+		// 4. Top-level aspect_ratio / aspectRatio and image_size / imageSize in extra_body
+		var topAR, topIS string
+		if ar, ok := extraBody["aspect_ratio"].(string); ok && ar != "" {
+			topAR = ar
+		} else if ar, ok := extraBody["aspectRatio"].(string); ok && ar != "" {
+			topAR = ar
+		}
+		if is, ok := extraBody["image_size"].(string); ok && is != "" {
+			topIS = dto.NormalizeGeminiImageSize(is)
+		} else if is, ok := extraBody["imageSize"].(string); ok && is != "" {
+			topIS = dto.NormalizeGeminiImageSize(is)
+		}
+		if topAR != "" || topIS != "" {
+			geminiRequest.GenerationConfig.ImageConfig = dto.NormalizeGeminiImageConfigBytes(
+				geminiRequest.GenerationConfig.ImageConfig,
+				topAR,
+				topIS,
+			)
 		}
 	}
 
@@ -142,17 +217,8 @@ func OpenAIChatRequestToGeminiGenerateContent(c context.Context, textRequest dto
 			imageSize = "4K"
 		} else if strings.Contains(modelLower, "2k") {
 			imageSize = "2K"
-		}
-		if len(textRequest.ExtraBody) > 0 {
-			var eb map[string]any
-			if kitutil.Unmarshal(textRequest.ExtraBody, &eb) == nil {
-				if ar, ok := eb["aspect_ratio"].(string); ok && ar != "" {
-					aspectRatio = ar
-				}
-				if is, ok := eb["image_size"].(string); ok && is != "" {
-					imageSize = strings.ToUpper(strings.TrimSpace(is))
-				}
-			}
+		} else if strings.Contains(modelLower, "512") || strings.Contains(modelLower, "0.5k") {
+			imageSize = "512"
 		}
 		geminiImageConfig := map[string]any{
 			"aspectRatio": aspectRatio,

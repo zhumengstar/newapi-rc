@@ -87,3 +87,38 @@ func TestGeminiChatGenerationConfigPreservesExplicitZeroValuesSnakeCase(t *testi
 	assert.Equal(t, float64(0), generationConfig["seed"])
 	assert.Equal(t, false, generationConfig["responseLogprobs"])
 }
+
+func TestGeminiChatRequestSupportsTopLevelGenerationConfigSnakeAndNormalizesImageConfig(t *testing.T) {
+	raw := []byte(`{
+		"contents":[{"role":"user","parts":[{"text":"draw banana"}]}],
+		"generation_config":{
+			"response_modalities":["TEXT","IMAGE"],
+			"image_config":{
+				"aspect_ratio":"16:9",
+				"image_size":"2k",
+				"personGeneration":"allow_adult"
+			},
+			"customVendorFlag":true
+		}
+	}`)
+
+	var req GeminiChatRequest
+	require.NoError(t, kitutil.Unmarshal(raw, &req))
+
+	encoded, err := kitutil.Marshal(req)
+	require.NoError(t, err)
+
+	var out map[string]any
+	require.NoError(t, kitutil.Unmarshal(encoded, &out))
+
+	gc, ok := out["generationConfig"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, []any{"TEXT", "IMAGE"}, gc["responseModalities"])
+	assert.Equal(t, true, gc["customVendorFlag"])
+
+	imgCfg, ok := gc["imageConfig"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "16:9", imgCfg["aspectRatio"])
+	assert.Equal(t, "2K", imgCfg["imageSize"])
+	assert.Equal(t, "allow_adult", imgCfg["personGeneration"])
+}

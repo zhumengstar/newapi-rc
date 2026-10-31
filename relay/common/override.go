@@ -14,6 +14,7 @@ import (
 	"unicode"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	kitreasoning "github.com/QuantumNous/new-api/relaykit/relayconvert/reasoning"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/samber/lo"
@@ -2691,6 +2692,44 @@ func cleanGeminiContentsAndParts(root any) bool {
 						if topK, kOk := parseJSONFloat64(gcMap[tkKey]); kOk && topK < 1 {
 							delete(gcMap, tkKey)
 							modified = true
+						}
+					}
+					// 规范化 imageConfig / image_config 及其内部的 aspectRatio / imageSize
+					if snakeIC, hasSnakeIC := gcMap["image_config"].(map[string]any); hasSnakeIC {
+						camelIC, _ := gcMap["imageConfig"].(map[string]any)
+						if camelIC == nil {
+							camelIC = make(map[string]any, len(snakeIC))
+						}
+						for k, v := range snakeIC {
+							if _, exists := camelIC[k]; !exists {
+								camelIC[k] = v
+							}
+						}
+						gcMap["imageConfig"] = camelIC
+						delete(gcMap, "image_config")
+						modified = true
+					}
+					if imgCfg, hasIC := gcMap["imageConfig"].(map[string]any); hasIC && imgCfg != nil {
+						if ar, hasAR := imgCfg["aspect_ratio"]; hasAR {
+							if _, hasCamel := imgCfg["aspectRatio"]; !hasCamel {
+								imgCfg["aspectRatio"] = ar
+							}
+							delete(imgCfg, "aspect_ratio")
+							modified = true
+						}
+						if is, hasIS := imgCfg["image_size"]; hasIS {
+							if _, hasCamel := imgCfg["imageSize"]; !hasCamel {
+								imgCfg["imageSize"] = is
+							}
+							delete(imgCfg, "image_size")
+							modified = true
+						}
+						if is, hasIS := imgCfg["imageSize"]; hasIS && is != nil {
+							normIS := dto.NormalizeGeminiImageSize(is)
+							if normIS != "" && normIS != fmt.Sprintf("%v", is) {
+								imgCfg["imageSize"] = normIS
+								modified = true
+							}
 						}
 					}
 				}

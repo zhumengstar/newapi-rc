@@ -154,6 +154,93 @@ func GeminiGenerateContentRequestToOpenAIChat(geminiRequest *dto.GeminiChatReque
 	if geminiRequest.GenerationConfig.CandidateCount != nil {
 		openaiRequest.N = kitutil.GetPointer(*geminiRequest.GenerationConfig.CandidateCount)
 	}
+	if geminiRequest.GenerationConfig.PresencePenalty != nil {
+		openaiRequest.PresencePenalty = kitutil.GetPointer(float64(*geminiRequest.GenerationConfig.PresencePenalty))
+	}
+	if geminiRequest.GenerationConfig.FrequencyPenalty != nil {
+		openaiRequest.FrequencyPenalty = kitutil.GetPointer(float64(*geminiRequest.GenerationConfig.FrequencyPenalty))
+	}
+	if geminiRequest.GenerationConfig.Seed != nil {
+		openaiRequest.Seed = kitutil.GetPointer(float64(*geminiRequest.GenerationConfig.Seed))
+	}
+	if geminiRequest.GenerationConfig.ResponseLogprobs != nil {
+		openaiRequest.LogProbs = kitutil.GetPointer(*geminiRequest.GenerationConfig.ResponseLogprobs)
+	}
+	if geminiRequest.GenerationConfig.Logprobs != nil {
+		openaiRequest.TopLogProbs = kitutil.GetPointer(int(*geminiRequest.GenerationConfig.Logprobs))
+	}
+	if geminiRequest.GenerationConfig.ResponseMimeType == "application/json" && openaiRequest.ResponseFormat == nil {
+		if len(geminiRequest.GenerationConfig.ResponseJsonSchema) > 0 {
+			openaiRequest.ResponseFormat = &dto.ResponseFormat{
+				Type:       "json_schema",
+				JsonSchema: geminiRequest.GenerationConfig.ResponseJsonSchema,
+			}
+		} else if geminiRequest.GenerationConfig.ResponseSchema != nil {
+			if schemaBytes, err := kitutil.Marshal(map[string]any{
+				"name":   "response_schema",
+				"schema": geminiRequest.GenerationConfig.ResponseSchema,
+			}); err == nil {
+				openaiRequest.ResponseFormat = &dto.ResponseFormat{
+					Type:       "json_schema",
+					JsonSchema: schemaBytes,
+				}
+			}
+		} else {
+			openaiRequest.ResponseFormat = &dto.ResponseFormat{
+				Type: "json_object",
+			}
+		}
+	}
+
+	// Preserve Gemini generationConfig extensions (imageConfig, responseModalities, mediaResolution, speechConfig, extraFields)
+	// in ExtraBody so OpenAI-compatible upstreams or multi-hop Gemini->OpenAI->Gemini gateways retain full generationConfig compatibility.
+	if len(geminiRequest.GenerationConfig.ImageConfig) > 0 ||
+		len(geminiRequest.GenerationConfig.SpeechConfig) > 0 ||
+		geminiRequest.GenerationConfig.MediaResolution != "" ||
+		len(geminiRequest.GenerationConfig.ResponseModalities) > 0 ||
+		len(geminiRequest.GenerationConfig.ExtraFields) > 0 {
+		extraMap := make(map[string]any)
+		if len(openaiRequest.ExtraBody) > 0 {
+			_ = kitutil.Unmarshal(openaiRequest.ExtraBody, &extraMap)
+			if extraMap == nil {
+				extraMap = make(map[string]any)
+			}
+		}
+		if gcBytes, err := kitutil.Marshal(geminiRequest.GenerationConfig); err == nil {
+			var gcMap map[string]any
+			if kitutil.Unmarshal(gcBytes, &gcMap) == nil && len(gcMap) > 0 {
+				extraMap["generationConfig"] = gcMap
+			}
+		}
+		if len(geminiRequest.GenerationConfig.ImageConfig) > 0 {
+			var imgMap map[string]any
+			if kitutil.Unmarshal(geminiRequest.GenerationConfig.ImageConfig, &imgMap) == nil && len(imgMap) > 0 {
+				extraMap["imageConfig"] = imgMap
+				snakeImg := make(map[string]any, len(imgMap))
+				for k, v := range imgMap {
+					snakeImg[k] = v
+				}
+				if ar, ok := imgMap["aspectRatio"]; ok {
+					snakeImg["aspect_ratio"] = ar
+					extraMap["aspect_ratio"] = ar
+				}
+				if is, ok := imgMap["imageSize"]; ok {
+					snakeImg["image_size"] = is
+					extraMap["image_size"] = is
+				}
+				extraMap["image_config"] = snakeImg
+				googleMap, _ := extraMap["google"].(map[string]any)
+				if googleMap == nil {
+					googleMap = make(map[string]any)
+				}
+				googleMap["image_config"] = snakeImg
+				extraMap["google"] = googleMap
+			}
+		}
+		if ebBytes, err := kitutil.Marshal(extraMap); err == nil {
+			openaiRequest.ExtraBody = ebBytes
+		}
+	}
 
 	if len(geminiRequest.GetTools()) > 0 {
 		var tools []dto.ToolCallRequest
