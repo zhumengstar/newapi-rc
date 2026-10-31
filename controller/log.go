@@ -91,7 +91,7 @@ func stripRequestBodyFromLogs(c *gin.Context, logs []*model.Log) {
 		return
 	}
 	for _, log := range logs {
-		if log == nil || log.Other == "" {
+		if log == nil || log.Other == "" || !strings.Contains(log.Other, `"request_body"`) {
 			continue
 		}
 		var other map[string]interface{}

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"maps"
 	"slices"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 )
@@ -222,6 +223,13 @@ func normalizeLegacyRejectReason(values map[string]json.RawMessage) bool {
 func formatLogOtherJSON(value string, visibility logOtherVisibility) string {
 	if value == "" {
 		return ""
+	}
+	// 快速路径：绝大多数日志不含旧版顶层 reject_reason，Root 视角无需反序列化，Admin 视角若不含 root_info 也无需反序列化
+	if visibility == logOtherVisibilityRoot && !strings.Contains(value, `"reject_reason"`) {
+		return value
+	}
+	if visibility == logOtherVisibilityAdmin && !strings.Contains(value, `"reject_reason"`) && !strings.Contains(value, `"root_info"`) {
+		return value
 	}
 
 	var values map[string]json.RawMessage

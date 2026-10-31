@@ -34,6 +34,11 @@ func normalizeTimestampForCountCache(ts int64) string {
 	if ts <= 0 {
 		return "0"
 	}
+	// 若结束时间处于当前时间附近或未来（如前端默认 endTime = now + 1h），统一归一化为 "latest"，
+	// 彻底消除自动刷新或点击搜索时因秒级时间推进导致的缓存击穿。
+	if ts >= time.Now().Unix()-15 {
+		return "latest"
+	}
 	// 归一化到 10 秒窗口，避免高频轮询/实时查询中的时间微小漂移导致 COUNT(*) 击穿缓存
 	return strconv.FormatInt((ts/10)*10, 10)
 }
@@ -63,34 +68,14 @@ func logScopeCacheValue(scoped bool, userIDs []int) string {
 	return builder.String()
 }
 
-func getCachedLogCount(key string, loader func() (int64, error)) (int64, error) {
-	ttl := logCountCacheTTL()
-	if ttl <= 0 {
-		return loader()
-	}
-
-	now := time.Now()
-	logCountCache.Lock()
-	entry, ok := logCountCache.entries[key]
-	logCountCache.Unlock()
-	if ok && now.Before(entry.expiresAt) {
-		return entry.value, nil
-	}
-
+func refreshCachedLogCount(key string, ttl time.Duration, loader func() (int64, error)) (int64, error) {
 	value, err, _ := logCountGroup.Do(key, func() (interface{}, error) {
-		now := time.Now()
-		logCountCache.Lock()
-		entry, ok := logCountCache.entries[key]
-		logCountCache.Unlock()
-		if ok && now.Before(entry.expiresAt) {
-			return entry.value, nil
-		}
-
 		count, loadErr := loader()
 		if loadErr != nil {
 			return int64(0), loadErr
 		}
 
+		now := time.Now()
 		logCountCache.Lock()
 		if len(logCountCache.entries) >= 1024 {
 			for cacheKey, cacheEntry := range logCountCache.entries {
@@ -113,4 +98,44 @@ func getCachedLogCount(key string, loader func() (int64, error)) (int64, error) 
 		return 0, err
 	}
 	return value.(int64), nil
+}
+
+func setCachedLogCount(key string, count int64) {
+	ttl := logCountCacheTTL()
+	if ttl <= 0 {
+		return
+	}
+	now := time.Now()
+	logCountCache.Lock()
+	logCountCache.entries[key] = cachedLogCount{
+		value:     count,
+		expiresAt: now.Add(ttl),
+	}
+	logCountCache.Unlock()
+}
+
+func getCachedLogCount(key string, loader func() (int64, error)) (int64, error) {
+	ttl := logCountCacheTTL()
+	if ttl <= 0 {
+		return loader()
+	}
+
+	now := time.Now()
+	logCountCache.Lock()
+	entry, ok := logCountCache.entries[key]
+	logCountCache.Unlock()
+	if ok {
+		if now.Before(entry.expiresAt) {
+			return entry.value, nil
+		}
+		// Stale-While-Revalidate: 10 分钟窗口内立即 0ms 返回上次统计值，并在后台单飞异步更新
+		if now.Before(entry.expiresAt.Add(10 * time.Minute)) {
+			go func() {
+				_, _ = refreshCachedLogCount(key, ttl, loader)
+			}()
+			return entry.value, nil
+		}
+	}
+
+	return refreshCachedLogCount(key, ttl, loader)
 }

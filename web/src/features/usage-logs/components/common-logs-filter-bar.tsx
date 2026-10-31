@@ -445,19 +445,25 @@ export function CommonLogsFilterBar<TData>(
       nextLogType: LogTypeValue = logType
     ) => {
       const filterParams = buildSearchParams(nextFilters, 'common')
+      const nextSearch = {
+        ...filterParams,
+        type: [nextLogType],
+        page: 1,
+      }
+      const nextKey = buildSearchSourceKey(nextSearch)
+      const isSameSearch =
+        nextKey === searchState.sourceKey && (searchParams.page ?? 1) === 1
       navigate({
         to: '/usage-logs/$section',
         params: { section: 'common' },
-        search: {
-          ...filterParams,
-          type: [nextLogType],
-          page: 1,
-        },
+        search: nextSearch,
       })
-      queryClient.invalidateQueries({ queryKey: ['logs'] })
-      queryClient.invalidateQueries({ queryKey: ['usage-logs-stats'] })
+      if (isSameSearch) {
+        queryClient.invalidateQueries({ queryKey: ['logs'] })
+        queryClient.invalidateQueries({ queryKey: ['usage-logs-stats'] })
+      }
     },
-    [filters, logType, navigate, queryClient]
+    [filters, logType, navigate, queryClient, searchState.sourceKey, searchParams.page]
   )
 
   const handleReset = useCallback(() => {

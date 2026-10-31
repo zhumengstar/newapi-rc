@@ -560,12 +560,38 @@ func getChannelIdsByBaseURL(baseURL string) ([]int, error) {
 	if baseURL == "" {
 		return nil, nil
 	}
-	var ids []int
 	trimmedURL := strings.TrimRight(baseURL, "/")
 	cleanURL := strings.TrimPrefix(trimmedURL, "https://")
 	cleanURL = strings.TrimPrefix(cleanURL, "http://")
 	cleanURL = strings.TrimRight(cleanURL, "/")
+	lowerClean := strings.ToLower(cleanURL)
+	lowerTrimmed := strings.ToLower(trimmedURL)
 
+	if common.MemoryCacheEnabled && lowerClean != "" {
+		channelSyncLock.RLock()
+		if len(channelsIDM) > 0 {
+			ids := make([]int, 0, 8)
+			for id, ch := range channelsIDM {
+				if ch == nil {
+					continue
+				}
+				raw := strings.TrimSpace(ch.GetBaseURL())
+				lowerRaw := strings.ToLower(strings.TrimRight(raw, "/"))
+				lowerName := strings.ToLower(ch.Name)
+				if lowerRaw == lowerTrimmed ||
+					strings.HasPrefix(lowerRaw, lowerTrimmed+"/") ||
+					strings.Contains(lowerRaw, lowerClean) ||
+					strings.Contains(lowerName, lowerClean) {
+					ids = append(ids, id)
+				}
+			}
+			channelSyncLock.RUnlock()
+			return ids, nil
+		}
+		channelSyncLock.RUnlock()
+	}
+
+	var ids []int
 	pattern := "%" + cleanURL + "%"
 	err := DB.Model(&Channel{}).
 		Where("base_url = ? OR base_url = ? OR base_url LIKE ? OR base_url LIKE ? OR name LIKE ?",
@@ -644,21 +670,40 @@ func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName
 	)
 	countTx := tx.Session(&gorm.Session{})
 	listTx := tx.Session(&gorm.Session{})
-	queryGroup := new(errgroup.Group)
-	queryGroup.Go(func() error {
-		var countErr error
-		total, countErr = getCachedLogCount(countKey, func() (int64, error) {
-			var count int64
-			countErr := countTx.Model(&Log{}).Count(&count).Error
-			return count, countErr
+	if num > 0 && startIdx == 0 {
+		if err = listTx.Order(order).Limit(num).Offset(startIdx).Find(&logs).Error; err != nil {
+			return nil, 0, err
+		}
+		if len(logs) < num {
+			total = int64(len(logs))
+			setCachedLogCount(countKey, total)
+		} else {
+			total, err = getCachedLogCount(countKey, func() (int64, error) {
+				var count int64
+				countErr := countTx.Model(&Log{}).Count(&count).Error
+				return count, countErr
+			})
+			if err != nil {
+				return nil, 0, err
+			}
+		}
+	} else {
+		queryGroup := new(errgroup.Group)
+		queryGroup.Go(func() error {
+			var countErr error
+			total, countErr = getCachedLogCount(countKey, func() (int64, error) {
+				var count int64
+				countErr := countTx.Model(&Log{}).Count(&count).Error
+				return count, countErr
+			})
+			return countErr
 		})
-		return countErr
-	})
-	queryGroup.Go(func() error {
-		return listTx.Order(order).Limit(num).Offset(startIdx).Find(&logs).Error
-	})
-	if err = queryGroup.Wait(); err != nil {
-		return nil, 0, err
+		queryGroup.Go(func() error {
+			return listTx.Order(order).Limit(num).Offset(startIdx).Find(&logs).Error
+		})
+		if err = queryGroup.Wait(); err != nil {
+			return nil, 0, err
+		}
 	}
 	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
 		assignDisplayLogIds(logs, startIdx)
@@ -800,45 +845,23 @@ var (
 	logStatGroup   singleflight.Group
 )
 
-func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string, extra ...string) (stat Stat, err error) {
-	var baseURL string
-	if len(extra) > 0 {
-		baseURL = strings.TrimSpace(extra[0])
-	}
-	cacheKey := fmt.Sprintf("%d:%d:%d:%s:%s:%s:%d:%s:%s", logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, baseURL)
-	now := time.Now()
-
-	logStatCacheMu.RLock()
-	item, found := logStatCache[cacheKey]
-	if found && now.Before(item.expiresAt) {
-		logStatCacheMu.RUnlock()
-		return item.stat, nil
-	}
-	logStatCacheMu.RUnlock()
-
+func refreshLogStatCache(cacheKey string, logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string, baseURL string) (Stat, error) {
 	val, err, _ := logStatGroup.Do(cacheKey, func() (interface{}, error) {
-		now := time.Now()
-		logStatCacheMu.RLock()
-		if it, ok := logStatCache[cacheKey]; ok && now.Before(it.expiresAt) {
-			logStatCacheMu.RUnlock()
-			return it.stat, nil
-		}
-		logStatCacheMu.RUnlock()
-
 		res, queryErr := sumUsedQuotaFromDB(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, baseURL)
 		if queryErr != nil {
 			return Stat{}, queryErr
 		}
 
-		ttl := 2 * time.Second
+		now := time.Now()
+		ttl := 5 * time.Second
 		if endTimestamp > 0 && endTimestamp < now.Unix()-60 {
 			ttl = 5 * time.Minute
 		}
 
 		logStatCacheMu.Lock()
-		if len(logStatCache) > 256 {
+		if len(logStatCache) > 512 {
 			for k, v := range logStatCache {
-				if now.After(v.expiresAt) {
+				if now.After(v.expiresAt.Add(5 * time.Minute)) {
 					delete(logStatCache, k)
 				}
 			}
@@ -851,11 +874,39 @@ func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelNa
 
 		return res, nil
 	})
-
 	if err != nil {
 		return Stat{}, err
 	}
 	return val.(Stat), nil
+}
+
+func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string, extra ...string) (stat Stat, err error) {
+	var baseURL string
+	if len(extra) > 0 {
+		baseURL = strings.TrimSpace(extra[0])
+	}
+	normStart := normalizeTimestampForCountCache(startTimestamp)
+	normEnd := normalizeTimestampForCountCache(endTimestamp)
+	cacheKey := fmt.Sprintf("%d:%s:%s:%s:%s:%s:%d:%s:%s", logType, normStart, normEnd, modelName, username, tokenName, channel, group, baseURL)
+	now := time.Now()
+
+	logStatCacheMu.RLock()
+	item, found := logStatCache[cacheKey]
+	logStatCacheMu.RUnlock()
+	if found {
+		if now.Before(item.expiresAt) {
+			return item.stat, nil
+		}
+		// Stale-While-Revalidate: 5 分钟窗口内立即 0ms 返回缓存统计，并在后台异步更新
+		if now.Before(item.expiresAt.Add(5 * time.Minute)) {
+			go func() {
+				_, _ = refreshLogStatCache(cacheKey, logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, baseURL)
+			}()
+			return item.stat, nil
+		}
+	}
+
+	return refreshLogStatCache(cacheKey, logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, baseURL)
 }
 
 func sumUsedQuotaFromDB(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string, extra ...string) (stat Stat, err error) {
