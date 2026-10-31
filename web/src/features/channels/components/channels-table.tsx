@@ -891,28 +891,155 @@ export function ChannelsTable() {
       return typeof ratio === 'number' && Number.isFinite(ratio) ? ratio : null
     }
 
+    const getGroupVisualStyle = (groupName: string) => {
+      const lower = groupName.toLowerCase()
+      if (
+        lower.includes('cc') ||
+        lower.includes('claude') ||
+        lower.includes('anthropic') ||
+        groupName.includes('反重力')
+      ) {
+        return {
+          rowBg: 'bg-violet-500/[0.04] border-violet-500/15',
+          badgeBg:
+            'bg-violet-500/15 text-violet-700 dark:text-violet-300 border-violet-500/30',
+          dot: 'bg-violet-500',
+        }
+      }
+      if (lower.includes('gemini')) {
+        return {
+          rowBg: 'bg-sky-500/[0.04] border-sky-500/15',
+          badgeBg:
+            'bg-sky-500/15 text-sky-700 dark:text-sky-300 border-sky-500/30',
+          dot: 'bg-sky-500',
+        }
+      }
+      if (
+        groupName.includes('香蕉') ||
+        lower.includes('banana') ||
+        lower.includes('nano')
+      ) {
+        return {
+          rowBg: 'bg-amber-500/[0.04] border-amber-500/15',
+          badgeBg:
+            'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/30',
+          dot: 'bg-amber-500',
+        }
+      }
+      if (
+        lower.includes('gpt') ||
+        lower.includes('openai') ||
+        lower.includes('codex') ||
+        lower.includes('o1') ||
+        lower.includes('o3')
+      ) {
+        return {
+          rowBg: 'bg-emerald-500/[0.04] border-emerald-500/15',
+          badgeBg:
+            'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/30',
+          dot: 'bg-emerald-500',
+        }
+      }
+      return {
+        rowBg: 'bg-muted/35 border-border/60',
+        badgeBg:
+          'bg-slate-500/12 text-slate-700 dark:text-slate-300 border-slate-500/25',
+        dot: 'bg-slate-400',
+      }
+    }
+
     return [
-      { label: t('All Groups'), value: 'all' },
+      {
+        label: t('All Groups'),
+        value: 'all',
+        labelNode: (
+          <div className='flex items-center justify-between gap-2 rounded-md border border-primary/20 bg-primary/[0.05] px-2 py-1'>
+            <span className='text-xs font-semibold text-foreground'>
+              {t('All Groups')}
+            </span>
+            <span className='rounded bg-primary/10 px-1.5 py-0.5 font-mono text-[10px] font-medium text-primary'>
+              {sortedGroupNames.length} {t('Groups', '个分组')}
+            </span>
+          </div>
+        ),
+      },
       ...sortedGroupNames.map((group) => {
         const ratio = ratioForGroup(group)
         const quota = groupQuotas[group] ?? 0
         const rate = groupRates[group]
         const mpm = rate?.mpm ?? 0
         const rpm = rate?.rpm ?? 0
+        const isLive = mpm > 0 || rpm > 0
         const label = sensitiveVisible ? group : '••••'
-        const parts = [label]
-        parts.push(`MPM ${formatQuotaWithCurrency(mpm)} · RPM ${rpm}`)
-        if (quota > 0) {
-          parts.push(
-            `${t('Today', '今日')}: ${formatQuotaWithCurrency(quota)}`
-          )
-        }
-        if (ratio !== null) {
-          parts.push(t('Ratio: {{value}}', { value: `${ratio}x` }))
-        }
+        const style = getGroupVisualStyle(group)
+
+        const searchKeywords = [
+          group,
+          `MPM ${formatQuotaWithCurrency(mpm)}`,
+          `RPM ${rpm}`,
+          quota > 0 ? formatQuotaWithCurrency(quota) : '',
+          ratio !== null ? `${ratio}x` : '',
+        ].filter(Boolean)
+
         return {
           value: group,
-          label: parts.join(' · '),
+          label,
+          keywords: searchKeywords,
+          labelNode: (
+            <div
+              className={cn(
+                'flex flex-wrap items-center justify-between gap-1.5 rounded-md border px-2 py-1 transition-colors',
+                style.rowBg
+              )}
+            >
+              {/* 左侧：分组名称色块徽章 */}
+              <span
+                className={cn(
+                  'inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-xs font-semibold whitespace-nowrap shadow-2xs',
+                  style.badgeBg
+                )}
+              >
+                <span
+                  className={cn('size-1.5 shrink-0 rounded-full', style.dot)}
+                />
+                {label}
+              </span>
+
+              {/* 右侧：实时速率 / 今日消费 / 倍率 胶囊底色标签 */}
+              <div className='flex flex-wrap items-center gap-1 shrink-0'>
+                <span
+                  className={cn(
+                    'inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 font-mono text-[11px] tabular-nums whitespace-nowrap',
+                    isLive
+                      ? 'border-indigo-500/25 bg-indigo-500/12 font-medium text-indigo-700 dark:text-indigo-300'
+                      : 'border-border/60 bg-background/70 text-muted-foreground'
+                  )}
+                >
+                  <span>MPM {formatQuotaWithCurrency(mpm)}</span>
+                  <span className='opacity-40'>·</span>
+                  <span>RPM {rpm}</span>
+                </span>
+
+                {quota > 0 && (
+                  <span className='inline-flex items-center gap-1 rounded-md border border-emerald-500/25 bg-emerald-500/12 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-emerald-700 dark:text-emerald-300 tabular-nums whitespace-nowrap'>
+                    <span className='font-sans text-[10px] font-medium opacity-80'>
+                      {t('Today', '今日')}
+                    </span>
+                    {formatQuotaWithCurrency(quota)}
+                  </span>
+                )}
+
+                {ratio !== null && (
+                  <span className='inline-flex items-center gap-1 rounded-md border border-amber-500/25 bg-amber-500/12 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-amber-700 dark:text-amber-300 tabular-nums whitespace-nowrap'>
+                    <span className='font-sans text-[10px] font-medium opacity-80'>
+                      {t('RatioLabel', '倍率')}
+                    </span>
+                    {ratio}x
+                  </span>
+                )}
+              </div>
+            </div>
+          ),
         }
       }),
     ]
@@ -1038,7 +1165,12 @@ export function ChannelsTable() {
                 <Button
                   variant='ghost'
                   size='icon'
-                  className='size-7 shrink-0 text-muted-foreground hover:text-foreground'
+                  className={cn(
+                    'size-7 shrink-0 rounded-md border transition-colors',
+                    enabled
+                      ? 'border-emerald-500/25 bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/20 dark:text-emerald-400'
+                      : 'border-border/60 bg-muted/50 text-muted-foreground hover:bg-muted hover:text-foreground'
+                  )}
                   disabled={groupAdaptiveMutation.isPending}
                   title={t(enabled ? 'Disable' : 'Enable')}
                   aria-label={t(enabled ? 'Disable' : 'Enable')}

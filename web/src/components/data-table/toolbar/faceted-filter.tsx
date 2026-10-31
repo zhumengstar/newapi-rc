@@ -42,6 +42,8 @@ import { cn } from '@/lib/utils'
 
 export type FacetedFilterOption = {
   label: string
+  labelNode?: React.ReactNode
+  keywords?: string[]
   value: string
   icon?: React.ComponentType<{ className?: string }>
   iconNode?: React.ReactNode
@@ -184,7 +186,8 @@ function DataTableFacetedFilterInner<TData, TValue>({
     return nonAllOptions.filter((opt) => {
       const labelMatch = opt.label?.toLowerCase().includes(q)
       const valMatch = opt.value?.toLowerCase().includes(q)
-      return labelMatch || valMatch
+      const kwMatch = opt.keywords?.some((kw) => kw.toLowerCase().includes(q))
+      return labelMatch || valMatch || Boolean(kwMatch)
     })
   }, [nonAllOptions, searchQuery])
 
@@ -258,6 +261,7 @@ function DataTableFacetedFilterInner<TData, TValue>({
     return (
       <CommandItem
         key={option.value}
+        keywords={option.keywords}
         draggable={Boolean(onOptionReorder) && option.value !== 'all'}
         onDragStart={() => {
           draggedOption.current = option.value
@@ -285,7 +289,7 @@ function DataTableFacetedFilterInner<TData, TValue>({
       >
         <div
           className={cn(
-            'border-primary flex size-4 items-center justify-center rounded-sm border',
+            'border-primary flex size-4 shrink-0 items-center justify-center rounded-sm border',
             isSelected
               ? 'bg-primary text-primary-foreground'
               : 'opacity-50 [&_svg]:invisible'
@@ -294,15 +298,26 @@ function DataTableFacetedFilterInner<TData, TValue>({
           <CheckIcon className={cn('text-background h-4 w-4')} />
         </div>
         {icon}
-        <span
-          className={cn(
-            'min-w-0 flex-1 break-all whitespace-normal leading-tight text-left',
-            renderOptionActions && 'pe-2'
-          )}
-          title={t(option.label)}
-        >
-          {t(option.label)}
-        </span>
+        {option.labelNode ? (
+          <div
+            className={cn(
+              'min-w-0 flex-1 leading-tight text-left',
+              renderOptionActions && 'pe-1'
+            )}
+          >
+            {option.labelNode}
+          </div>
+        ) : (
+          <span
+            className={cn(
+              'min-w-0 flex-1 break-all whitespace-normal leading-tight text-left',
+              renderOptionActions && 'pe-2'
+            )}
+            title={t(option.label)}
+          >
+            {t(option.label)}
+          </span>
+        )}
         {count}
         {renderOptionActions ? (
           <span className='ms-auto flex shrink-0 items-center gap-1'>
@@ -358,7 +373,7 @@ function DataTableFacetedFilterInner<TData, TValue>({
       </PopoverTrigger>
       {open && (
         <PopoverContent
-          className='w-max min-w-[320px] max-w-[min(560px,calc(100vw-2rem))] p-0'
+          className='w-max min-w-[340px] max-w-[min(680px,calc(100vw-2rem))] p-0'
           align='start'
         >
         <Command>
@@ -413,7 +428,7 @@ function DataTableFacetedFilterInner<TData, TValue>({
               </div>
             </div>
           )}
-          <CommandList>
+          <CommandList className='max-h-96'>
             <CommandEmpty>{t('No results found.')}</CommandEmpty>
             {groupedOptions.map((g, idx) => (
               <React.Fragment key={g.group ?? `group-${idx}`}>
