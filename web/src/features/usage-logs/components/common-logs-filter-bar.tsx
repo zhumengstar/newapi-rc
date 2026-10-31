@@ -251,11 +251,18 @@ export function CommonLogsFilterBar<TData>(
   const filters = activeDraft.filters
   const logType = activeDraft.logType
 
+  const startSec = filters.startTime
+    ? Math.floor(filters.startTime.getTime() / 1000)
+    : undefined
+  const endSec = filters.endTime
+    ? Math.floor(filters.endTime.getTime() / 1000)
+    : undefined
+
   const { data: apiAddressesData } = useQuery({
-    queryKey: ['channel-api-addresses', filters.group],
+    queryKey: ['channel-api-addresses', filters.group, startSec, endSec],
     queryFn: async () => {
       try {
-        const res = await getChannelApiAddresses(filters.group)
+        const res = await getChannelApiAddresses(filters.group, startSec, endSec)
         return res?.data ?? []
       } catch {
         return []
@@ -267,14 +274,18 @@ export function CommonLogsFilterBar<TData>(
 
   const apiAddressOptions = useMemo(() => {
     const list = apiAddressesData ?? []
-    return list.map((item) => ({
-      value: item.base_url,
-      label:
-        item.used_quota > 0
-          ? `${item.base_url} (${formatLogQuota(item.used_quota)})`
-          : item.base_url,
-    }))
-  }, [apiAddressesData])
+    return list.map((item) => {
+      const quota = item.period_quota > 0 ? item.period_quota : item.used_quota
+      const hasPeriod = item.period_quota > 0
+      const quotaText = formatLogQuota(quota)
+      const desc = hasPeriod ? quotaText : `${t('Total: ', '总计: ')}${quotaText}`
+      return {
+        value: item.base_url,
+        label: item.base_url,
+        description: quota > 0 ? desc : '$0',
+      }
+    })
+  }, [apiAddressesData, t])
 
   const handleChange = useCallback(
     (field: keyof CommonLogFilters, value: Date | string | undefined) => {
@@ -605,7 +616,7 @@ export function CommonLogsFilterBar<TData>(
         </LogsFilterField>
       )}
       {isAdmin && (
-        <LogsFilterField flex className='min-w-[130px]'>
+        <LogsFilterField flex className='min-w-[170px] max-w-[280px]'>
           <Combobox
             options={apiAddressOptions}
             allowCustomValue

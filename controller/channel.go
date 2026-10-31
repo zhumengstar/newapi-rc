@@ -3197,7 +3197,9 @@ func OllamaVersion(c *gin.Context) {
 
 func GetChannelApiAddresses(c *gin.Context) {
 	group := strings.TrimSpace(c.Query("group"))
-	items, err := model.GetChannelApiAddresses(group)
+	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
+	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
+	items, err := model.GetChannelApiAddresses(group, startTimestamp, endTimestamp)
 	if err != nil {
 		common.ApiError(c, err)
 		return

@@ -562,8 +562,14 @@ func getChannelIdsByBaseURL(baseURL string) ([]int, error) {
 	}
 	var ids []int
 	trimmedURL := strings.TrimRight(baseURL, "/")
+	cleanURL := strings.TrimPrefix(trimmedURL, "https://")
+	cleanURL = strings.TrimPrefix(cleanURL, "http://")
+	cleanURL = strings.TrimRight(cleanURL, "/")
+
+	pattern := "%" + cleanURL + "%"
 	err := DB.Model(&Channel{}).
-		Where("base_url = ? OR base_url = ? OR base_url LIKE ?", baseURL, trimmedURL, trimmedURL+"/%").
+		Where("base_url = ? OR base_url = ? OR base_url LIKE ? OR base_url LIKE ? OR name LIKE ?",
+			baseURL, trimmedURL, trimmedURL+"/%", pattern, pattern).
 		Pluck("id", &ids).Error
 	return ids, err
 }

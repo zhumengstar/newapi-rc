@@ -164,14 +164,21 @@ export async function getChannelOps(): Promise<ChannelOpsResponse> {
 export interface ChannelApiAddressItem {
   base_url: string
   used_quota: number
+  period_quota: number
   channel_count: number
 }
 
 export async function getChannelApiAddresses(
-  group?: string
+  group?: string,
+  startTimestamp?: number,
+  endTimestamp?: number
 ): Promise<{ success: boolean; message?: string; data: ChannelApiAddressItem[] }> {
+  const params: Record<string, unknown> = {}
+  if (group) params.group = group
+  if (startTimestamp) params.start_timestamp = startTimestamp
+  if (endTimestamp) params.end_timestamp = endTimestamp
   const res = await api.get('/api/channel/api_addresses', {
-    params: group ? { group } : {},
+    params,
     ...channelActionConfig(),
   })
   return res.data

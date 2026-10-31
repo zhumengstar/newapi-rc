@@ -238,13 +238,13 @@ export function ComboboxInput({
       <ChevronsUpDown className='pointer-events-none absolute top-1/2 right-3 size-4 shrink-0 -translate-y-1/2 opacity-50' />
 
       {showDropdown && (
-        <div className='bg-popover text-popover-foreground absolute top-full z-100 mt-1 w-full rounded-md border shadow-md'>
+        <div className='bg-popover text-popover-foreground absolute top-full z-100 mt-1 min-w-full w-max max-w-[min(540px,95vw)] rounded-md border shadow-md'>
           {filteredOptions.length > 0 ? (
             <ul
               ref={listRef}
               id={listId}
               role='listbox'
-              className='max-h-[200px] overflow-y-auto p-1'
+              className='max-h-[220px] overflow-y-auto p-1'
             >
               {filteredOptions.map((option, index) => (
                 <li
@@ -254,7 +254,7 @@ export function ComboboxInput({
                   aria-selected={value === option.value}
                   data-highlighted={index === highlightedIndex}
                   className={cn(
-                    'relative flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm select-none',
+                    'relative flex cursor-pointer items-center justify-between gap-3 rounded-sm px-2.5 py-1.5 text-sm select-none',
                     index === highlightedIndex &&
                       'bg-accent text-accent-foreground',
                     value === option.value && 'font-medium'
@@ -265,14 +265,21 @@ export function ComboboxInput({
                     handleSelect(option.value)
                   }}
                 >
-                  <Check
-                    className={cn(
-                      'size-4 shrink-0',
-                      value === option.value ? 'opacity-100' : 'opacity-0'
-                    )}
-                  />
-                  {option.icon && <span aria-hidden>{option.icon}</span>}
-                  <span className='truncate'>{option.label}</span>
+                  <div className='flex items-center gap-2 min-w-0 flex-1'>
+                    <Check
+                      className={cn(
+                        'size-4 shrink-0',
+                        value === option.value ? 'opacity-100' : 'opacity-0'
+                      )}
+                    />
+                    {option.icon && <span aria-hidden>{option.icon}</span>}
+                    <span className='truncate font-mono text-xs'>{option.label}</span>
+                  </div>
+                  {option.description && (
+                    <span className='shrink-0 text-xs font-mono font-medium text-emerald-600 dark:text-emerald-400'>
+                      {option.description}
+                    </span>
+                  )}
                 </li>
               ))}
             </ul>

@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -1782,17 +1783,119 @@ func GetGroupBasePriority(group string) (*int64, error) {
 type ChannelApiAddress struct {
 	BaseURL      string `json:"base_url" gorm:"column:base_url"`
 	UsedQuota    int64  `json:"used_quota" gorm:"column:used_quota"`
+	PeriodQuota  int64  `json:"period_quota" gorm:"column:period_quota"`
 	ChannelCount int    `json:"channel_count" gorm:"column:channel_count"`
 }
 
-func GetChannelApiAddresses(group string) ([]*ChannelApiAddress, error) {
-	var items []*ChannelApiAddress
-	query := DB.Model(&Channel{}).
-		Select("base_url, count(*) as channel_count, COALESCE(sum(used_quota), 0) as used_quota").
+var (
+	channelApiAddrCacheMu sync.RWMutex
+	channelApiAddrCache   = make(map[string]channelApiAddrCacheEntry)
+)
+
+type channelApiAddrCacheEntry struct {
+	items []*ChannelApiAddress
+	exp   time.Time
+}
+
+func GetChannelApiAddresses(group string, extra ...int64) ([]*ChannelApiAddress, error) {
+	var startTimestamp, endTimestamp int64
+	if len(extra) > 0 {
+		startTimestamp = extra[0]
+	}
+	if len(extra) > 1 {
+		endTimestamp = extra[1]
+	}
+	if startTimestamp == 0 && endTimestamp == 0 {
+		startTimestamp = shanghaiTodayStartUnix()
+	}
+
+	cacheKey := fmt.Sprintf("%s:%d:%d", group, startTimestamp, endTimestamp)
+	now := time.Now()
+	channelApiAddrCacheMu.RLock()
+	if entry, found := channelApiAddrCache[cacheKey]; found && now.Before(entry.exp) {
+		channelApiAddrCacheMu.RUnlock()
+		return entry.items, nil
+	}
+	channelApiAddrCacheMu.RUnlock()
+
+	channelQuotaMap := make(map[int]int64)
+	if LOG_DB != nil {
+		type channelQuotaRow struct {
+			ChannelID   int   `gorm:"column:channel_id"`
+			PeriodQuota int64 `gorm:"column:period_quota"`
+		}
+		var rows []channelQuotaRow
+		logTx := LOG_DB.Table("logs").
+			Select("channel_id, COALESCE(SUM(quota), 0) AS period_quota").
+			Where("type = ?", LogTypeConsume)
+		if startTimestamp > 0 {
+			logTx = logTx.Where("created_at >= ?", startTimestamp)
+		}
+		if endTimestamp > 0 {
+			logTx = logTx.Where("created_at <= ?", endTimestamp)
+		}
+		if err := logTx.Group("channel_id").Having("SUM(quota) > 0").Find(&rows).Error; err == nil {
+			for _, r := range rows {
+				channelQuotaMap[r.ChannelID] = r.PeriodQuota
+			}
+		}
+	}
+
+	type channelItem struct {
+		Id        int     `gorm:"column:id"`
+		BaseURL   *string `gorm:"column:base_url"`
+		UsedQuota int64   `gorm:"column:used_quota"`
+	}
+	var channels []channelItem
+	chQuery := DB.Model(&Channel{}).
+		Select("id, base_url, used_quota").
 		Where("base_url IS NOT NULL AND base_url != ''")
 	if strings.TrimSpace(group) != "" {
-		query = ApplyChannelGroupFilter(query, strings.TrimSpace(group))
+		chQuery = ApplyChannelGroupFilter(chQuery, strings.TrimSpace(group))
 	}
-	err := query.Group("base_url").Order("used_quota DESC, base_url ASC").Find(&items).Error
-	return items, err
+	if err := chQuery.Find(&channels).Error; err != nil {
+		return nil, err
+	}
+
+	addrMap := make(map[string]*ChannelApiAddress)
+	for _, ch := range channels {
+		if ch.BaseURL == nil || strings.TrimSpace(*ch.BaseURL) == "" {
+			continue
+		}
+		url := strings.TrimSpace(*ch.BaseURL)
+		item, exists := addrMap[url]
+		if !exists {
+			item = &ChannelApiAddress{BaseURL: url}
+			addrMap[url] = item
+		}
+		item.ChannelCount++
+		item.UsedQuota += ch.UsedQuota
+		if pq, ok := channelQuotaMap[ch.Id]; ok {
+			item.PeriodQuota += pq
+		}
+	}
+
+	items := make([]*ChannelApiAddress, 0, len(addrMap))
+	for _, item := range addrMap {
+		items = append(items, item)
+	}
+
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].PeriodQuota != items[j].PeriodQuota {
+			return items[i].PeriodQuota > items[j].PeriodQuota
+		}
+		if items[i].UsedQuota != items[j].UsedQuota {
+			return items[i].UsedQuota > items[j].UsedQuota
+		}
+		return items[i].BaseURL < items[j].BaseURL
+	})
+
+	channelApiAddrCacheMu.Lock()
+	channelApiAddrCache[cacheKey] = channelApiAddrCacheEntry{
+		items: items,
+		exp:   now.Add(30 * time.Second),
+	}
+	channelApiAddrCacheMu.Unlock()
+
+	return items, nil
 }
