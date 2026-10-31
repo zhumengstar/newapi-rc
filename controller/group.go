@@ -66,12 +66,14 @@ func getAllConfiguredAndRankedGroups() []string {
 func GetGroups(c *gin.Context) {
 	groupNames, quotaMap := getAllConfiguredAndRankedGroupsWithQuotas()
 	rates := model.GetGroupsRealtimeRates()
+	ratios := ratio_setting.GetGroupRatioCopy()
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
 		"data":    groupNames,
 		"quotas":  quotaMap,
 		"rates":   rates,
+		"ratios":  ratios,
 	})
 }
 

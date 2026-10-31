@@ -26,6 +26,7 @@ import { cn } from '@/lib/utils'
 export type ComboboxInputOption = {
   value: string
   label: string
+  labelNode?: React.ReactNode
   icon?: React.ReactNode
   disabled?: boolean
   description?: React.ReactNode
@@ -259,13 +260,13 @@ export function ComboboxInput({
       <ChevronsUpDown className='pointer-events-none absolute top-1/2 right-3 size-4 shrink-0 -translate-y-1/2 opacity-50' />
 
       {showDropdown && (
-        <div className='bg-popover text-popover-foreground absolute top-full z-100 mt-1 min-w-full w-max max-w-[min(580px,95vw)] rounded-md border shadow-md'>
+        <div className='bg-popover text-popover-foreground absolute top-full z-100 mt-1 min-w-full w-max max-w-[min(680px,95vw)] rounded-md border shadow-md'>
           {filteredOptions.length > 0 ? (
             <ul
               ref={listRef}
               id={listId}
               role='listbox'
-              className='max-h-[220px] overflow-y-auto p-1'
+              className='max-h-[340px] overflow-y-auto p-1.5 space-y-1'
             >
               {filteredOptions.map((option, index) => {
                 const isSelected =
@@ -278,9 +279,9 @@ export function ComboboxInput({
                     aria-selected={isSelected}
                     data-highlighted={index === highlightedIndex}
                     className={cn(
-                      'relative flex cursor-pointer items-center justify-between gap-3 rounded-sm px-2.5 py-1.5 text-sm select-none',
+                      'relative flex cursor-pointer items-center justify-between gap-2.5 rounded-sm px-2 py-1 text-sm select-none',
                       index === highlightedIndex &&
-                        'bg-accent text-accent-foreground',
+                        'bg-accent/70 text-accent-foreground',
                       isSelected && 'font-medium'
                     )}
                     onMouseEnter={() => setHighlightedIndex(index)}
@@ -289,28 +290,48 @@ export function ComboboxInput({
                       handleSelect(option.value)
                     }}
                   >
-                    <div className='flex items-center gap-2 min-w-0 flex-1'>
-                      <Check
-                        className={cn(
-                          'size-4 shrink-0',
-                          isSelected ? 'opacity-100' : 'opacity-0'
+                    {option.labelNode ? (
+                      <>
+                        <div
+                          className={cn(
+                            'border-primary flex size-4 shrink-0 items-center justify-center rounded-sm border',
+                            isSelected
+                              ? 'bg-primary text-primary-foreground'
+                              : 'opacity-50 [&_svg]:invisible'
+                          )}
+                        >
+                          <Check className='text-background size-3.5' />
+                        </div>
+                        <div className='min-w-0 flex-1 leading-tight text-left'>
+                          {option.labelNode}
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div className='flex items-center gap-2 min-w-0 flex-1'>
+                          <Check
+                            className={cn(
+                              'size-4 shrink-0',
+                              isSelected ? 'opacity-100' : 'opacity-0'
+                            )}
+                          />
+                          {option.icon && <span aria-hidden>{option.icon}</span>}
+                          <span className='truncate font-mono text-xs'>{option.label}</span>
+                        </div>
+                        {option.description && (
+                          <span
+                            className={cn(
+                              'shrink-0 text-xs font-mono',
+                              option.description === '$0' ||
+                                option.description === 'MPM $0 · RPM 0'
+                                ? 'text-muted-foreground font-normal'
+                                : 'font-medium text-emerald-600 dark:text-emerald-400'
+                            )}
+                          >
+                            {option.description}
+                          </span>
                         )}
-                      />
-                      {option.icon && <span aria-hidden>{option.icon}</span>}
-                      <span className='truncate font-mono text-xs'>{option.label}</span>
-                    </div>
-                    {option.description && (
-                      <span
-                        className={cn(
-                          'shrink-0 text-xs font-mono',
-                          option.description === '$0' ||
-                            option.description === 'MPM $0 · RPM 0'
-                            ? 'text-muted-foreground font-normal'
-                            : 'font-medium text-emerald-600 dark:text-emerald-400'
-                        )}
-                      >
-                        {option.description}
-                      </span>
+                      </>
                     )}
                   </li>
                 )

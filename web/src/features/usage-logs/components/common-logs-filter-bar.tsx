@@ -140,6 +140,83 @@ interface CommonLogsFilterBarProps<TData> {
   table: Table<TData>
 }
 
+const CARD_VISUAL_PALETTES = [
+  {
+    rowBg: 'bg-sky-500/[0.04] border-sky-500/15',
+    badgeBg:
+      'bg-sky-500/15 text-sky-700 dark:text-sky-300 border-sky-500/30',
+    dot: 'bg-sky-500',
+  },
+  {
+    rowBg: 'bg-violet-500/[0.04] border-violet-500/15',
+    badgeBg:
+      'bg-violet-500/15 text-violet-700 dark:text-violet-300 border-violet-500/30',
+    dot: 'bg-violet-500',
+  },
+  {
+    rowBg: 'bg-amber-500/[0.04] border-amber-500/15',
+    badgeBg:
+      'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/30',
+    dot: 'bg-amber-500',
+  },
+  {
+    rowBg: 'bg-emerald-500/[0.04] border-emerald-500/15',
+    badgeBg:
+      'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/30',
+    dot: 'bg-emerald-500',
+  },
+  {
+    rowBg: 'bg-indigo-500/[0.04] border-indigo-500/15',
+    badgeBg:
+      'bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 border-indigo-500/30',
+    dot: 'bg-indigo-500',
+  },
+] as const
+
+function getFilterCardVisualStyle(text: string, hintText?: string) {
+  const combined = `${text} ${hintText ?? ''}`.toLowerCase()
+  if (
+    combined.includes('cc') ||
+    combined.includes('claude') ||
+    combined.includes('anthropic') ||
+    combined.includes('反重力') ||
+    combined.includes('apiloop') ||
+    combined.includes('mysandbox')
+  ) {
+    return CARD_VISUAL_PALETTES[1]
+  }
+  if (
+    combined.includes('gemini') ||
+    combined.includes('terrakinc') ||
+    combined.includes('18331') ||
+    combined.includes('18333')
+  ) {
+    return CARD_VISUAL_PALETTES[0]
+  }
+  if (
+    combined.includes('香蕉') ||
+    combined.includes('banana') ||
+    combined.includes('nano') ||
+    combined.includes('aijinmi')
+  ) {
+    return CARD_VISUAL_PALETTES[2]
+  }
+  if (
+    combined.includes('gpt') ||
+    combined.includes('openai') ||
+    combined.includes('codex') ||
+    combined.includes('o1') ||
+    combined.includes('o3')
+  ) {
+    return CARD_VISUAL_PALETTES[3]
+  }
+  let hash = 0
+  for (let i = 0; i < text.length; i++) {
+    hash = (hash * 31 + text.charCodeAt(i)) >>> 0
+  }
+  return CARD_VISUAL_PALETTES[hash % CARD_VISUAL_PALETTES.length]
+}
+
 export function CommonLogsFilterBar<TData>(
   props: CommonLogsFilterBarProps<TData>
 ) {
@@ -176,38 +253,100 @@ export function CommonLogsFilterBar<TData>(
     const quotas =
       (adminGroups as { quotas?: Record<string, number> } | undefined)
         ?.quotas ?? {}
+    const ratios =
+      (adminGroups as { ratios?: Record<string, number> } | undefined)
+        ?.ratios ?? {}
     const items = groups
       .filter((group) => group !== 'auto')
       .map((group) => {
         const rate = rates[group]
         const mpm = rate?.mpm ?? 0
         const rpm = rate?.rpm ?? 0
+        const isLive = mpm > 0 || rpm > 0
         const todayQuota = quotas[group] ?? 0
         const todayText = todayQuota > 0 ? formatLogQuota(todayQuota) : '$0'
+        const rawRatio = isAdmin
+          ? ratios[group]
+          : userGroups?.data?.[group]?.ratio
+        const ratio =
+          typeof rawRatio === 'number' && Number.isFinite(rawRatio)
+            ? rawRatio
+            : null
+        const style = getFilterCardVisualStyle(group)
         return {
           label: group,
           value: group,
-          description: isAdmin ? (
-            <span className='inline-flex items-center gap-1.5 text-[11px] font-mono'>
+          labelNode: (
+            <div
+              className={cn(
+                'flex flex-wrap items-center justify-between gap-1.5 rounded-md border px-2 py-1 transition-colors',
+                style.rowBg
+              )}
+            >
               <span
                 className={cn(
-                  todayQuota > 0
-                    ? 'font-semibold text-emerald-600 dark:text-emerald-400'
-                    : 'text-muted-foreground font-normal'
+                  'inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-xs font-semibold whitespace-nowrap shadow-2xs',
+                  style.badgeBg
                 )}
               >
-                {t('Today: ', '当天: ')}
-                {todayText}
+                <span
+                  className={cn('size-1.5 shrink-0 rounded-full', style.dot)}
+                />
+                {group}
               </span>
-              <span className='text-muted-foreground/40'>·</span>
-              <span className='text-muted-foreground font-normal'>
-                MPM {formatLogQuota(mpm)} · RPM {rpm}
-              </span>
-            </span>
-          ) : undefined,
+              {isAdmin && (
+                <div className='flex flex-wrap items-center gap-1 shrink-0'>
+                  <span
+                    className={cn(
+                      'inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 font-mono text-[11px] tabular-nums whitespace-nowrap',
+                      isLive
+                        ? 'border-indigo-500/25 bg-indigo-500/12 font-medium text-indigo-700 dark:text-indigo-300'
+                        : 'border-border/60 bg-background/70 text-muted-foreground'
+                    )}
+                  >
+                    <span>MPM {formatLogQuota(mpm)}</span>
+                    <span className='opacity-40'>·</span>
+                    <span>RPM {rpm}</span>
+                  </span>
+                  {todayQuota > 0 && (
+                    <span className='inline-flex items-center gap-1 rounded-md border border-emerald-500/25 bg-emerald-500/12 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-emerald-700 dark:text-emerald-300 tabular-nums whitespace-nowrap'>
+                      <span className='font-sans text-[10px] font-medium opacity-80'>
+                        {t('Today', '今天')}
+                      </span>
+                      {todayText}
+                    </span>
+                  )}
+                  {ratio !== null && (
+                    <span className='inline-flex items-center gap-1 rounded-md border border-amber-500/25 bg-amber-500/12 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-amber-700 dark:text-amber-300 tabular-nums whitespace-nowrap'>
+                      <span className='font-sans text-[10px] font-medium opacity-80'>
+                        {t('RatioLabel', '倍率')}
+                      </span>
+                      {ratio}x
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+          ),
         }
       })
-    return [{ value: '', label: t('All Groups', '全部分组') }, ...items]
+    return [
+      {
+        value: '',
+        label: t('All Groups', '全部分组'),
+        labelNode: (
+          <div className='flex items-center justify-between gap-2 rounded-md border border-primary/20 bg-primary/[0.05] px-2 py-1'>
+            <span className='text-xs font-semibold text-foreground'>
+              {t('All Groups', '全部分组')}
+            </span>
+            <span className='rounded bg-primary/10 px-1.5 py-0.5 font-mono text-[10px] font-medium text-primary'>
+              {items.length} {t('Groups', '分组')}
+            </span>
+          </div>
+        ),
+      },
+      ...items,
+    ]
   }, [isAdmin, adminGroups, userGroups, t])
 
   const { data: rankedModelsData } = useQuery({
@@ -383,29 +522,62 @@ export function CommonLogsFilterBar<TData>(
       const totalQuota = item.used_quota || 0
       const todayText = todayQuota > 0 ? formatLogQuota(todayQuota) : '$0'
       const totalText = totalQuota > 0 ? formatLogQuota(totalQuota) : '$0'
+      const primaryGroup = src?.groups?.[0]?.group
+      const style = getFilterCardVisualStyle(item.base_url, primaryGroup)
       return {
         value: item.base_url,
         label: item.base_url,
         todayQuota,
         totalQuota,
-        description: (
-          <span className='inline-flex items-center gap-1.5 text-[11px] font-mono'>
+        labelNode: (
+          <div
+            className={cn(
+              'flex flex-wrap items-center justify-between gap-2 rounded-md border px-2 py-1 transition-colors',
+              style.rowBg
+            )}
+          >
             <span
               className={cn(
-                todayQuota > 0
-                  ? 'font-semibold text-emerald-600 dark:text-emerald-400'
-                  : 'text-muted-foreground font-normal'
+                'inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 font-mono text-xs font-semibold whitespace-nowrap shadow-2xs',
+                style.badgeBg
               )}
             >
-              {t('Today: ', '当天: ')}
-              {todayText}
+              <span
+                className={cn('size-1.5 shrink-0 rounded-full', style.dot)}
+              />
+              {item.base_url}
             </span>
-            <span className='text-muted-foreground/40'>·</span>
-            <span className='text-muted-foreground font-normal'>
-              {t('Total: ', '总计: ')}
-              {totalText}
-            </span>
-          </span>
+
+            <div className='flex flex-wrap items-center gap-1 shrink-0'>
+              <span
+                className={cn(
+                  'inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 font-mono text-[11px] tabular-nums whitespace-nowrap',
+                  todayQuota > 0
+                    ? 'border-emerald-500/25 bg-emerald-500/12 font-semibold text-emerald-700 dark:text-emerald-300'
+                    : 'border-border/60 bg-background/70 text-muted-foreground'
+                )}
+              >
+                <span className='font-sans text-[10px] font-medium opacity-80'>
+                  {t('TodayLabel', '当天')}
+                </span>
+                {todayText}
+              </span>
+
+              <span
+                className={cn(
+                  'inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 font-mono text-[11px] tabular-nums whitespace-nowrap',
+                  totalQuota > 0
+                    ? 'border-indigo-500/25 bg-indigo-500/12 font-semibold text-indigo-700 dark:text-emerald-300 dark:text-indigo-300'
+                    : 'border-border/60 bg-background/70 text-muted-foreground'
+                )}
+              >
+                <span className='font-sans text-[10px] font-medium opacity-80'>
+                  {t('TotalLabel', '总计')}
+                </span>
+                {totalText}
+              </span>
+            </div>
+          </div>
         ),
       }
     })
@@ -418,7 +590,16 @@ export function CommonLogsFilterBar<TData>(
       {
         value: '',
         label: t('All API Addresses', '全部 API 地址'),
-        description: '',
+        labelNode: (
+          <div className='flex items-center justify-between gap-2 rounded-md border border-primary/20 bg-primary/[0.05] px-2 py-1'>
+            <span className='text-xs font-semibold text-foreground'>
+              {t('All API Addresses', '全部 API 地址')}
+            </span>
+            <span className='rounded bg-primary/10 px-1.5 py-0.5 font-mono text-[10px] font-medium text-primary'>
+              {items.length} {t('Addresses', '个地址')}
+            </span>
+          </div>
+        ),
       },
       ...items,
     ]
