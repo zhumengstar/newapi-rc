@@ -2793,6 +2793,25 @@ func TestEnsureGeminiSchemaCleanliness(t *testing.T) {
 	assert.NotContains(t, cleanedToolsStr, `"empty key property"`)
 	assert.NotContains(t, cleanedToolsStr, `"invalid repeated parts"`)
 	assert.Contains(t, cleanedToolsStr, `"required":["valid_prop"]`)
+
+	// 测试 4: contents 末尾为 role="model" 预填充（Assistant Prefill）或空白 model 消息，以及空 systemInstruction
+	prefillJSON := `{
+		"systemInstruction": {"parts": [{"text": "   "}]},
+		"contents": [
+			{"role": "user", "parts": [{"text": "Write a scene"}]},
+			{"role": "model", "parts": [{"text": "Understood, here is the scene:"}]},
+			{"role": "model", "parts": [{"text": "."}]}
+		]
+	}`
+	cleanedPrefillBytes, err := EnsureGeminiSchemaCleanliness([]byte(prefillJSON))
+	require.NoError(t, err)
+	var prefillMap map[string]any
+	require.NoError(t, json.Unmarshal(cleanedPrefillBytes, &prefillMap))
+	assert.Nil(t, prefillMap["systemInstruction"], "empty systemInstruction should be stripped")
+	prefillContents := prefillMap["contents"].([]any)
+	require.Len(t, prefillContents, 3, "empty dot model turn popped, non-empty model prefill followed by user Continue.")
+	lastTurn := prefillContents[len(prefillContents)-1].(map[string]any)
+	assert.Equal(t, "user", lastTurn["role"])
 }
 
 func TestApplyParamOverrideRecursiveDelete(t *testing.T) {

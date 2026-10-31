@@ -2643,7 +2643,157 @@ func cleanEmptyEnumsInJSONNode(node any) (any, bool) {
 }
 
 func cleanGeminiContentsAndParts(root any) bool {
-	return recursiveCleanGeminiParts(root)
+	modified := false
+	if rootMap, ok := root.(map[string]any); ok {
+		// 1. 先清理全空的 systemInstruction / system_instruction，避免后续 cleanPartsList 将空字符串转成空格 " " 发送给上游
+		for _, sysKey := range []string{"systemInstruction", "system_instruction"} {
+			if sysVal, exists := rootMap[sysKey]; exists && sysVal != nil {
+				if sysMap, sOk := sysVal.(map[string]any); sOk {
+					if isGeminiPartsAllEmpty(sysMap["parts"], false) {
+						delete(rootMap, sysKey)
+						modified = true
+					}
+				}
+			}
+		}
+	}
+
+	if recursiveCleanGeminiParts(root) {
+		modified = true
+	}
+
+	if rootMap, ok := root.(map[string]any); ok {
+		if rawContents, hasContents := rootMap["contents"]; hasContents && rawContents != nil {
+			if contents, cOk := rawContents.([]any); cOk && len(contents) > 0 {
+				for i, item := range contents {
+					if cMap, mOk := item.(map[string]any); mOk {
+						role := strings.ToLower(strings.TrimSpace(fmt.Sprintf("%v", cMap["role"])))
+						if role == "assistant" {
+							cMap["role"] = "model"
+							modified = true
+						} else if i == 0 && (role == "" || role == "<nil>") {
+							cMap["role"] = "user"
+							modified = true
+						}
+					}
+				}
+
+				// 2. 处理 contents 末尾为 role="model"（如酒馆 SillyTavern / RP 客户端的 Assistant Prefill 预填充）：
+				// Google Gemini / Vertex AI / CodeAssist 严格要求多轮对话必须以 user 或 functionResponse 结尾，
+				// 否则上游会报 400 (或被上游网关包装为 500 upstream service request failed)。
+				// - 若末尾 model 消息为空白或占位符（"."、"..."），直接剔除（pop）；
+				// - 若末尾 model 消息包含实际预填充文本，则在末尾自动追加一条 user 引导消息，既保留预填充上文又满足以 user 结尾。
+				for len(contents) > 0 {
+					lastIdx := len(contents) - 1
+					lastMsg, mOk := contents[lastIdx].(map[string]any)
+					if !mOk {
+						break
+					}
+					role := strings.ToLower(strings.TrimSpace(fmt.Sprintf("%v", lastMsg["role"])))
+					if role != "model" && role != "assistant" {
+						break
+					}
+					if hasGeminiToolOrCodePart(lastMsg["parts"]) {
+						break
+					}
+					if isGeminiPartsAllEmpty(lastMsg["parts"], true) {
+						contents = contents[:lastIdx]
+						modified = true
+						continue
+					}
+					contents = append(contents, map[string]any{
+						"role":  "user",
+						"parts": []any{map[string]any{"text": "Continue."}},
+					})
+					modified = true
+					break
+				}
+
+				if len(contents) == 0 {
+					contents = append(contents, map[string]any{
+						"role":  "user",
+						"parts": []any{map[string]any{"text": " "}},
+					})
+					modified = true
+				}
+				rootMap["contents"] = contents
+			}
+		}
+	}
+
+	return modified
+}
+
+func hasGeminiToolOrCodePart(rawParts any) bool {
+	partsList, ok := rawParts.([]any)
+	if !ok {
+		return false
+	}
+	for _, p := range partsList {
+		partMap, isMap := p.(map[string]any)
+		if !isMap || partMap == nil {
+			continue
+		}
+		for _, k := range []string{"functionCall", "function_call", "functionResponse", "function_response", "executableCode", "executable_code", "codeExecutionResult", "code_execution_result"} {
+			if v, exists := partMap[k]; exists && v != nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isGeminiPartsAllEmpty(rawParts any, treatPlaceholdersAsEmpty bool) bool {
+	partsList, ok := rawParts.([]any)
+	if !ok || len(partsList) == 0 {
+		return true
+	}
+	for _, p := range partsList {
+		if pStr, isStr := p.(string); isStr {
+			trimmed := strings.TrimSpace(pStr)
+			if trimmed == "" {
+				continue
+			}
+			if treatPlaceholdersAsEmpty && (trimmed == "." || trimmed == "..." || trimmed == "。") {
+				continue
+			}
+			return false
+		}
+		partMap, isMap := p.(map[string]any)
+		if !isMap || partMap == nil {
+			continue
+		}
+		if hasGeminiToolOrCodePart(partsList) {
+			return false
+		}
+		for _, ik := range []string{"inlineData", "inline_data"} {
+			if idata, ok := partMap[ik].(map[string]any); ok {
+				if dataStr, hasData := idata["data"].(string); hasData && strings.TrimSpace(dataStr) != "" {
+					return false
+				}
+			}
+		}
+		for _, fk := range []string{"fileData", "file_data"} {
+			if fdata, ok := partMap[fk].(map[string]any); ok {
+				for _, uKey := range []string{"fileUri", "file_uri"} {
+					if u, ok := fdata[uKey].(string); ok && strings.TrimSpace(u) != "" {
+						return false
+					}
+				}
+			}
+		}
+		if tVal, hasText := partMap["text"]; hasText && tVal != nil {
+			trimmed := strings.TrimSpace(fmt.Sprintf("%v", tVal))
+			if trimmed == "" {
+				continue
+			}
+			if treatPlaceholdersAsEmpty && (trimmed == "." || trimmed == "..." || trimmed == "。") {
+				continue
+			}
+			return false
+		}
+	}
+	return true
 }
 
 func cleanPartsList(rawParts any) ([]any, bool) {
