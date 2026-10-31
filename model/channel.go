@@ -118,6 +118,7 @@ var channelSortColumns = map[string]string{
 	"name":          "name",
 	"site_type":     "site_type",
 	"type":          "type",
+	"group":         "group",
 	"priority":      "priority",
 	"weight":        "weight",
 	"balance":       "balance",
@@ -167,10 +168,25 @@ func (options ChannelSortOptions) Apply(query *gorm.DB) *gorm.DB {
 			query = query.Order(gorm.Expr("CASE WHEN channel_ratio IS NULL THEN 1 ELSE 0 END ASC"))
 		}
 		isDesc := options.SortOrder != "asc"
-		query = query.Order(clause.OrderByColumn{
-			Column: clause.Column{Name: columnName},
-			Desc:   isDesc,
-		})
+		if columnName == "group" {
+			query = query.Order(clause.OrderByColumn{
+				Column: clause.Column{Name: commonGroupCol, Raw: true},
+				Desc:   isDesc,
+			})
+			query = query.Order(clause.OrderByColumn{
+				Column: clause.Column{Name: "priority"},
+				Desc:   true,
+			})
+			query = query.Order(clause.OrderByColumn{
+				Column: clause.Column{Name: "weight"},
+				Desc:   true,
+			})
+		} else {
+			query = query.Order(clause.OrderByColumn{
+				Column: clause.Column{Name: columnName},
+				Desc:   isDesc,
+			})
+		}
 		if columnName == "priority" {
 			query = query.Order(clause.OrderByColumn{
 				Column: clause.Column{Name: "weight"},

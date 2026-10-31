@@ -92,6 +92,14 @@ func TestParseKnownProviderModelSuffix(t *testing.T) {
 			wantMode:           ModeEnabled,
 		},
 		{
+			name:               "claude count-based alias without thinking",
+			model:              "claude-opus-4-6-c",
+			allowThinkingAlias: true,
+			wantBase:           "claude-opus-4-6",
+			wantFound:          true,
+			wantMode:           ModeUnset,
+		},
+		{
 			name:               "claude count-based nothinking alias",
 			model:              "claude-opus-4-6-nothinking-c",
 			allowThinkingAlias: true,

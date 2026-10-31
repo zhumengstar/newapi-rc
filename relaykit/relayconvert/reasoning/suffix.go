@@ -142,8 +142,17 @@ func ParseClaudeModelSuffix(modelName string, allowThinkingAlias bool) (string, 
 		return modelName, Intent{}, false, nil
 	}
 	base, intent, found, err := parseProviderModelSuffix(bare, "claude-", allowThinkingAlias, true)
-	if err != nil || !found || !legacyClaudeModelPattern.MatchString(base) {
+	if err != nil {
 		return modelName, Intent{}, false, err
+	}
+	if !found {
+		if before, ok := strings.CutSuffix(bare, "-c"); ok && legacyClaudeModelPattern.MatchString(before) {
+			return prefix + before, Intent{Source: SourceSuffix}, true, nil
+		}
+		return modelName, Intent{}, false, nil
+	}
+	if !legacyClaudeModelPattern.MatchString(base) {
+		return modelName, Intent{}, false, nil
 	}
 	return prefix + base, intent, true, nil
 }

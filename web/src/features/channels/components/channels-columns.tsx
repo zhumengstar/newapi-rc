@@ -1696,7 +1696,6 @@ export function useChannelsColumns(
           return groupArray.some((g) => value.includes(g))
         },
         size: 170,
-        enableSorting: false,
       },
 
       // Tag column

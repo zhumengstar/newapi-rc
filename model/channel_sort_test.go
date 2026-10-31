@@ -140,3 +140,36 @@ func TestGetAllChannelsSortsByPriorityAndWeight(t *testing.T) {
 	}
 	assert.Equal(t, []string{"p10-w30", "p20-w50", "p20-w80"}, names)
 }
+
+func TestGetAllChannelsSortsByGroup(t *testing.T) {
+	truncateTables(t)
+	require.NoError(t, DB.Exec("DELETE FROM channels").Error)
+
+	p10 := int64(10)
+	p20 := int64(20)
+
+	channels := []Channel{
+		{Name: "group-b-p10", Key: "k1", Group: "beta", Priority: &p10},
+		{Name: "group-a", Key: "k2", Group: "alpha", Priority: &p10},
+		{Name: "group-b-p20", Key: "k3", Group: "beta", Priority: &p20},
+	}
+	require.NoError(t, DB.Create(&channels).Error)
+
+	// Ascending by group, with tie-break priority desc
+	got, err := GetAllChannels(0, 10, false, false, NewChannelSortOptions("group", "asc", false))
+	require.NoError(t, err)
+	names := make([]string, len(got))
+	for i, ch := range got {
+		names[i] = ch.Name
+	}
+	assert.Equal(t, []string{"group-a", "group-b-p20", "group-b-p10"}, names)
+
+	// Descending by group, with tie-break priority desc
+	got, err = GetAllChannels(0, 10, false, false, NewChannelSortOptions("group", "desc", false))
+	require.NoError(t, err)
+	names = make([]string, len(got))
+	for i, ch := range got {
+		names[i] = ch.Name
+	}
+	assert.Equal(t, []string{"group-b-p20", "group-b-p10", "group-a"}, names)
+}

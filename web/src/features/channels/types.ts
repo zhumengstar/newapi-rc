@@ -317,6 +317,7 @@ export type ChannelSortBy =
   | 'name'
   | 'site_type'
   | 'type'
+  | 'group'
   | 'priority'
   | 'weight'
   | 'balance'

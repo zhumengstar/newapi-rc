@@ -134,6 +134,7 @@ const CHANNEL_SORTABLE_COLUMNS = new Set<ChannelSortBy>([
   'name',
   'site_type',
   'type',
+  'group',
   'priority',
   'weight',
   'balance',
