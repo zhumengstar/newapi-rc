@@ -195,24 +195,6 @@ export function CommonLogsFilterBar<TData>(
     }))
   }, [userCandidatesData])
 
-  const { data: apiAddressesData } = useQuery({
-    queryKey: ['channel-api-addresses', filters.group],
-    queryFn: async () =>
-      requireServerSuccess(await getChannelApiAddresses(filters.group)),
-    enabled: isAdmin,
-    staleTime: 30 * 1000,
-  })
-
-  const apiAddressOptions = useMemo(() => {
-    const list = apiAddressesData?.data ?? []
-    return list.map((item) => ({
-      value: item.base_url,
-      label:
-        item.used_quota > 0
-          ? `${item.base_url} (${formatLogQuota(item.used_quota)})`
-          : item.base_url,
-    }))
-  }, [apiAddressesData])
 
   const searchState = useMemo<CommonLogDraft>(() => {
     const { start, end } = getDefaultTimeRange()
@@ -268,6 +250,31 @@ export function CommonLogsFilterBar<TData>(
     draft.sourceKey === searchState.sourceKey ? draft : searchState
   const filters = activeDraft.filters
   const logType = activeDraft.logType
+
+  const { data: apiAddressesData } = useQuery({
+    queryKey: ['channel-api-addresses', filters.group],
+    queryFn: async () => {
+      try {
+        const res = await getChannelApiAddresses(filters.group)
+        return res?.data ?? []
+      } catch {
+        return []
+      }
+    },
+    enabled: isAdmin,
+    staleTime: 30 * 1000,
+  })
+
+  const apiAddressOptions = useMemo(() => {
+    const list = apiAddressesData ?? []
+    return list.map((item) => ({
+      value: item.base_url,
+      label:
+        item.used_quota > 0
+          ? `${item.base_url} (${formatLogQuota(item.used_quota)})`
+          : item.base_url,
+    }))
+  }, [apiAddressesData])
 
   const handleChange = useCallback(
     (field: keyof CommonLogFilters, value: Date | string | undefined) => {
