@@ -510,6 +510,7 @@ func getTodayUserConsumptionMap() (map[int]int64, []int, error) {
 type UserConsumptionCandidate struct {
 	Username           string `json:"username"`
 	TodayConsumedQuota int64  `json:"today_consumed_quota"`
+	DailyConsumedQuota int64  `json:"daily_consumed_quota"`
 	TotalConsumedQuota int64  `json:"total_consumed_quota"`
 	RemainQuota        int64  `json:"remain_quota"`
 	Group              string `json:"group"`
@@ -532,6 +533,8 @@ func GetTodayConsumptionUsers() ([]UserConsumptionCandidate, error) {
 	todayConsumptionUsersCacheMu.RUnlock()
 
 	todayStart := shanghaiTodayStartUnix()
+	yesterdayStart := todayStart - 86400
+	last24hStart := now.Unix() - 86400
 
 	var quotaDB *gorm.DB = LOG_DB
 	if quotaDB == nil {
@@ -539,16 +542,24 @@ func GetTodayConsumptionUsers() ([]UserConsumptionCandidate, error) {
 	}
 
 	type userQuotaRow struct {
-		Username string `gorm:"column:username"`
-		Quota    int64  `gorm:"column:today_quota"`
+		Username       string `gorm:"column:username"`
+		TodayQuota     int64  `gorm:"column:today_quota"`
+		YesterdayQuota int64  `gorm:"column:yesterday_quota"`
+		Last24hQuota   int64  `gorm:"column:last_24h_quota"`
 	}
 	var rows []userQuotaRow
 	err := quotaDB.Table("logs").
-		Select("username, COALESCE(SUM(quota), 0) AS today_quota").
-		Where("type = ? AND created_at >= ? AND username != ''", LogTypeConsume, todayStart).
+		Select(
+			"username, "+
+				"COALESCE(SUM(CASE WHEN created_at >= ? THEN quota ELSE 0 END), 0) AS today_quota, "+
+				"COALESCE(SUM(CASE WHEN created_at >= ? AND created_at < ? THEN quota ELSE 0 END), 0) AS yesterday_quota, "+
+				"COALESCE(SUM(CASE WHEN created_at >= ? THEN quota ELSE 0 END), 0) AS last_24h_quota",
+			todayStart, yesterdayStart, todayStart, last24hStart,
+		).
+		Where("type = ? AND created_at >= ? AND username != ''", LogTypeConsume, yesterdayStart).
 		Group("username").
 		Having("SUM(quota) > 0").
-		Order("today_quota DESC").
+		Order("today_quota DESC, last_24h_quota DESC").
 		Scan(&rows).Error
 	if err != nil {
 		return nil, err
@@ -582,9 +593,17 @@ func GetTodayConsumptionUsers() ([]UserConsumptionCandidate, error) {
 		if row.Username != "" && !seenUsernames[row.Username] {
 			seenUsernames[row.Username] = true
 			meta := userMetaMap[row.Username]
+			dailyQuota := row.TodayQuota
+			if row.YesterdayQuota > dailyQuota {
+				dailyQuota = row.YesterdayQuota
+			}
+			if row.Last24hQuota > dailyQuota {
+				dailyQuota = row.Last24hQuota
+			}
 			candidates = append(candidates, UserConsumptionCandidate{
 				Username:           row.Username,
-				TodayConsumedQuota: row.Quota,
+				TodayConsumedQuota: row.TodayQuota,
+				DailyConsumedQuota: dailyQuota,
 				TotalConsumedQuota: meta.UsedQuota,
 				RemainQuota:        meta.Quota,
 				Group:              meta.Group,
@@ -598,6 +617,7 @@ func GetTodayConsumptionUsers() ([]UserConsumptionCandidate, error) {
 			candidates = append(candidates, UserConsumptionCandidate{
 				Username:           meta.Username,
 				TodayConsumedQuota: 0,
+				DailyConsumedQuota: 0,
 				TotalConsumedQuota: meta.UsedQuota,
 				RemainQuota:        meta.Quota,
 				Group:              meta.Group,

@@ -301,26 +301,28 @@ function DataTableFacetedFilterInner<TData, TValue>({
         {option.labelNode ? (
           <div
             className={cn(
-              'min-w-0 flex-1 leading-tight text-left',
+              'w-full min-w-0 flex-1 leading-tight text-left',
               renderOptionActions && 'pe-1'
             )}
           >
             {option.labelNode}
           </div>
         ) : (
-          <span
-            className={cn(
-              'min-w-0 flex-1 break-all whitespace-normal leading-tight text-left',
-              renderOptionActions && 'pe-2'
-            )}
-            title={t(option.label)}
-          >
-            {t(option.label)}
-          </span>
+          <>
+            <span
+              className={cn(
+                'min-w-0 flex-1 break-all whitespace-normal leading-tight text-left',
+                renderOptionActions && 'pe-2'
+              )}
+              title={t(option.label)}
+            >
+              {t(option.label)}
+            </span>
+            {count}
+          </>
         )}
-        {count}
         {renderOptionActions ? (
-          <span className='ms-auto flex shrink-0 items-center gap-1'>
+          <span className='ms-auto flex min-w-7 shrink-0 items-center justify-end gap-1'>
             {renderOptionActions(option)}
           </span>
         ) : null}

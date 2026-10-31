@@ -953,7 +953,7 @@ export function ChannelsTable() {
         label: t('All Groups'),
         value: 'all',
         labelNode: (
-          <div className='flex items-center justify-between gap-2 rounded-md border border-primary/20 bg-primary/[0.05] px-2 py-1'>
+          <div className='flex w-full items-center justify-between gap-2 rounded-md border border-primary/20 bg-primary/[0.05] px-2.5 py-1'>
             <span className='text-xs font-semibold text-foreground'>
               {t('All Groups')}
             </span>
@@ -988,28 +988,29 @@ export function ChannelsTable() {
           labelNode: (
             <div
               className={cn(
-                'flex flex-wrap items-center justify-between gap-1.5 rounded-md border px-2 py-1 transition-colors',
+                'flex w-full items-center justify-between gap-2 rounded-md border px-2 py-1 transition-colors',
                 style.rowBg
               )}
             >
-              {/* 左侧：分组名称色块徽章 */}
+              {/* 左侧：固定宽度分组名称色块徽章 */}
               <span
+                title={label}
                 className={cn(
-                  'inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-xs font-semibold whitespace-nowrap shadow-2xs',
+                  'inline-flex w-[140px] shrink-0 items-center gap-1.5 rounded-md border px-2 py-0.5 text-xs font-semibold whitespace-nowrap shadow-2xs',
                   style.badgeBg
                 )}
               >
                 <span
                   className={cn('size-1.5 shrink-0 rounded-full', style.dot)}
                 />
-                {label}
+                <span className='truncate'>{label}</span>
               </span>
 
-              {/* 右侧：实时速率 / 今日消费 / 倍率 胶囊底色标签 */}
-              <div className='flex flex-wrap items-center gap-1 shrink-0'>
+              {/* 右侧：等宽对齐的实时速率 / 今日消费 / 倍率 胶囊底色标签 */}
+              <div className='flex shrink-0 items-center gap-1.5'>
                 <span
                   className={cn(
-                    'inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 font-mono text-[11px] tabular-nums whitespace-nowrap',
+                    'inline-flex w-[158px] shrink-0 items-center justify-between gap-1 rounded-md border px-2 py-0.5 font-mono text-[11px] tabular-nums whitespace-nowrap',
                     isLive
                       ? 'border-indigo-500/25 bg-indigo-500/12 font-medium text-indigo-700 dark:text-indigo-300'
                       : 'border-border/60 bg-background/70 text-muted-foreground'
@@ -1020,23 +1021,28 @@ export function ChannelsTable() {
                   <span>RPM {rpm}</span>
                 </span>
 
-                {quota > 0 && (
-                  <span className='inline-flex items-center gap-1 rounded-md border border-emerald-500/25 bg-emerald-500/12 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-emerald-700 dark:text-emerald-300 tabular-nums whitespace-nowrap'>
-                    <span className='font-sans text-[10px] font-medium opacity-80'>
-                      {t('Today', '今日')}
-                    </span>
-                    {formatQuotaWithCurrency(quota)}
+                <span
+                  className={cn(
+                    'inline-flex w-[116px] shrink-0 items-center justify-between gap-1 rounded-md border px-2 py-0.5 font-mono text-[11px] tabular-nums whitespace-nowrap',
+                    quota > 0
+                      ? 'border-emerald-500/25 bg-emerald-500/12 font-semibold text-emerald-700 dark:text-emerald-300'
+                      : 'border-border/60 bg-background/70 text-muted-foreground'
+                  )}
+                >
+                  <span className='font-sans text-[10px] font-medium opacity-80'>
+                    {t('Today', '今日')}
                   </span>
-                )}
+                  <span>
+                    {quota > 0 ? formatQuotaWithCurrency(quota) : '$0'}
+                  </span>
+                </span>
 
-                {ratio !== null && (
-                  <span className='inline-flex items-center gap-1 rounded-md border border-amber-500/25 bg-amber-500/12 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-amber-700 dark:text-amber-300 tabular-nums whitespace-nowrap'>
-                    <span className='font-sans text-[10px] font-medium opacity-80'>
-                      {t('RatioLabel', '倍率')}
-                    </span>
-                    {ratio}x
+                <span className='inline-flex w-[80px] shrink-0 items-center justify-between gap-1 rounded-md border border-amber-500/25 bg-amber-500/12 px-2 py-0.5 font-mono text-[11px] font-semibold text-amber-700 dark:text-amber-300 tabular-nums whitespace-nowrap'>
+                  <span className='font-sans text-[10px] font-medium opacity-80'>
+                    {t('RatioLabel', '倍率')}
                   </span>
-                )}
+                  <span>{ratio !== null ? `${ratio}x` : '1x'}</span>
+                </span>
               </div>
             </div>
           ),

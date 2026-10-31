@@ -279,26 +279,27 @@ export function CommonLogsFilterBar<TData>(
           labelNode: (
             <div
               className={cn(
-                'flex flex-wrap items-center justify-between gap-1.5 rounded-md border px-2 py-1 transition-colors',
+                'flex w-full items-center justify-between gap-2 rounded-md border px-2 py-1 transition-colors',
                 style.rowBg
               )}
             >
               <span
+                title={group}
                 className={cn(
-                  'inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-xs font-semibold whitespace-nowrap shadow-2xs',
+                  'inline-flex w-[140px] shrink-0 items-center gap-1.5 rounded-md border px-2 py-0.5 text-xs font-semibold whitespace-nowrap shadow-2xs',
                   style.badgeBg
                 )}
               >
                 <span
                   className={cn('size-1.5 shrink-0 rounded-full', style.dot)}
                 />
-                {group}
+                <span className='truncate'>{group}</span>
               </span>
               {isAdmin && (
-                <div className='flex flex-wrap items-center gap-1 shrink-0'>
+                <div className='flex shrink-0 items-center gap-1.5'>
                   <span
                     className={cn(
-                      'inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 font-mono text-[11px] tabular-nums whitespace-nowrap',
+                      'inline-flex w-[158px] shrink-0 items-center justify-between gap-1 rounded-md border px-2 py-0.5 font-mono text-[11px] tabular-nums whitespace-nowrap',
                       isLive
                         ? 'border-indigo-500/25 bg-indigo-500/12 font-medium text-indigo-700 dark:text-indigo-300'
                         : 'border-border/60 bg-background/70 text-muted-foreground'
@@ -308,22 +309,25 @@ export function CommonLogsFilterBar<TData>(
                     <span className='opacity-40'>·</span>
                     <span>RPM {rpm}</span>
                   </span>
-                  {todayQuota > 0 && (
-                    <span className='inline-flex items-center gap-1 rounded-md border border-emerald-500/25 bg-emerald-500/12 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-emerald-700 dark:text-emerald-300 tabular-nums whitespace-nowrap'>
-                      <span className='font-sans text-[10px] font-medium opacity-80'>
-                        {t('Today', '今天')}
-                      </span>
-                      {todayText}
+                  <span
+                    className={cn(
+                      'inline-flex w-[116px] shrink-0 items-center justify-between gap-1 rounded-md border px-2 py-0.5 font-mono text-[11px] tabular-nums whitespace-nowrap',
+                      todayQuota > 0
+                        ? 'border-emerald-500/25 bg-emerald-500/12 font-semibold text-emerald-700 dark:text-emerald-300'
+                        : 'border-border/60 bg-background/70 text-muted-foreground'
+                    )}
+                  >
+                    <span className='font-sans text-[10px] font-medium opacity-80'>
+                      {t('Today', '今天')}
                     </span>
-                  )}
-                  {ratio !== null && (
-                    <span className='inline-flex items-center gap-1 rounded-md border border-amber-500/25 bg-amber-500/12 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-amber-700 dark:text-amber-300 tabular-nums whitespace-nowrap'>
-                      <span className='font-sans text-[10px] font-medium opacity-80'>
-                        {t('RatioLabel', '倍率')}
-                      </span>
-                      {ratio}x
+                    <span>{todayText}</span>
+                  </span>
+                  <span className='inline-flex w-[80px] shrink-0 items-center justify-between gap-1 rounded-md border border-amber-500/25 bg-amber-500/12 px-2 py-0.5 font-mono text-[11px] font-semibold text-amber-700 dark:text-amber-300 tabular-nums whitespace-nowrap'>
+                    <span className='font-sans text-[10px] font-medium opacity-80'>
+                      {t('RatioLabel', '倍率')}
                     </span>
-                  )}
+                    <span>{ratio !== null ? `${ratio}x` : '1x'}</span>
+                  </span>
                 </div>
               )}
             </div>
@@ -335,7 +339,7 @@ export function CommonLogsFilterBar<TData>(
         value: '',
         label: t('All Groups', '全部分组'),
         labelNode: (
-          <div className='flex items-center justify-between gap-2 rounded-md border border-primary/20 bg-primary/[0.05] px-2 py-1'>
+          <div className='flex w-full items-center justify-between gap-2 rounded-md border border-primary/20 bg-primary/[0.05] px-2.5 py-1'>
             <span className='text-xs font-semibold text-foreground'>
               {t('All Groups', '全部分组')}
             </span>
@@ -381,22 +385,23 @@ export function CommonLogsFilterBar<TData>(
         labelNode: (
           <div
             className={cn(
-              'flex items-center justify-between gap-2 rounded-md border px-2 py-1 transition-colors',
+              'flex w-full items-center justify-between gap-2 rounded-md border px-2 py-1 transition-colors',
               style.rowBg
             )}
           >
             <span
+              title={m}
               className={cn(
-                'inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 font-mono text-xs font-semibold whitespace-nowrap shadow-2xs',
+                'inline-flex w-[235px] shrink-0 items-center gap-1.5 rounded-md border px-2 py-0.5 font-mono text-xs font-semibold whitespace-nowrap shadow-2xs',
                 style.badgeBg
               )}
             >
               <span
                 className={cn('size-1.5 shrink-0 rounded-full', style.dot)}
               />
-              {m}
+              <span className='truncate'>{m}</span>
             </span>
-            <span className='rounded-md border border-border/60 bg-background/80 px-1.5 py-0.5 font-mono text-[10px] font-medium text-muted-foreground whitespace-nowrap'>
+            <span className='inline-flex w-[64px] shrink-0 items-center justify-center rounded-md border border-border/60 bg-background/80 px-1.5 py-0.5 font-mono text-[10px] font-medium text-muted-foreground whitespace-nowrap'>
               {familyLabel}
             </span>
           </div>
@@ -408,7 +413,7 @@ export function CommonLogsFilterBar<TData>(
         value: '',
         label: t('All Models', '全部模型'),
         labelNode: (
-          <div className='flex items-center justify-between gap-2 rounded-md border border-primary/20 bg-primary/[0.05] px-2 py-1'>
+          <div className='flex w-full items-center justify-between gap-2 rounded-md border border-primary/20 bg-primary/[0.05] px-2.5 py-1'>
             <span className='text-xs font-semibold text-foreground'>
               {t('All Models', '全部模型')}
             </span>
@@ -433,9 +438,14 @@ export function CommonLogsFilterBar<TData>(
     const users = userCandidatesData?.data ?? []
     const items = users.map((u) => {
       const todayQuota = u.today_consumed_quota || 0
+      const dailyQuota = Math.max(u.daily_consumed_quota || 0, todayQuota)
       const totalQuota = u.total_consumed_quota || 0
       const remainQuota = u.remain_quota || 0
+      const isLowBalance =
+        (dailyQuota > 0 && remainQuota < dailyQuota) ||
+        (remainQuota <= 0 && totalQuota > 0)
       const todayText = todayQuota > 0 ? formatLogQuota(todayQuota) : '$0'
+      const dailyText = dailyQuota > 0 ? formatLogQuota(dailyQuota) : '$0'
       const totalText = totalQuota > 0 ? formatLogQuota(totalQuota) : '$0'
       const remainText = remainQuota > 0 ? formatLogQuota(remainQuota) : '$0'
       const style = getFilterCardVisualStyle(u.username, u.group)
@@ -445,26 +455,34 @@ export function CommonLogsFilterBar<TData>(
         labelNode: (
           <div
             className={cn(
-              'flex flex-wrap items-center justify-between gap-2 rounded-md border px-2 py-1 transition-colors',
-              style.rowBg
+              'flex w-full items-center justify-between gap-2 rounded-md border px-2 py-1 transition-colors',
+              isLowBalance
+                ? 'border-rose-500/35 bg-rose-500/[0.06]'
+                : style.rowBg
             )}
           >
             <span
+              title={u.username}
               className={cn(
-                'inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 font-mono text-xs font-semibold whitespace-nowrap shadow-2xs',
-                style.badgeBg
+                'inline-flex w-[140px] shrink-0 items-center gap-1.5 rounded-md border px-2 py-0.5 font-mono text-xs font-semibold whitespace-nowrap shadow-2xs',
+                isLowBalance
+                  ? 'border-rose-500/40 bg-rose-500/15 text-rose-700 dark:text-rose-300'
+                  : style.badgeBg
               )}
             >
               <span
-                className={cn('size-1.5 shrink-0 rounded-full', style.dot)}
+                className={cn(
+                  'size-1.5 shrink-0 rounded-full',
+                  isLowBalance ? 'bg-rose-500 animate-pulse' : style.dot
+                )}
               />
-              {u.username}
+              <span className='truncate'>{u.username}</span>
             </span>
 
-            <div className='flex flex-wrap items-center gap-1 shrink-0'>
+            <div className='flex shrink-0 items-center gap-1.5'>
               <span
                 className={cn(
-                  'inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 font-mono text-[11px] tabular-nums whitespace-nowrap',
+                  'inline-flex w-[116px] shrink-0 items-center justify-between gap-1 rounded-md border px-2 py-0.5 font-mono text-[11px] tabular-nums whitespace-nowrap',
                   todayQuota > 0
                     ? 'border-emerald-500/25 bg-emerald-500/12 font-semibold text-emerald-700 dark:text-emerald-300'
                     : 'border-border/60 bg-background/70 text-muted-foreground'
@@ -473,26 +491,46 @@ export function CommonLogsFilterBar<TData>(
                 <span className='font-sans text-[10px] font-medium opacity-80'>
                   {t('Today', '今天')}
                 </span>
-                {todayText}
+                <span>{todayText}</span>
               </span>
 
-              {remainQuota > 0 && (
-                <span className='inline-flex items-center gap-1 rounded-md border border-amber-500/25 bg-amber-500/12 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-amber-700 dark:text-amber-300 tabular-nums whitespace-nowrap'>
-                  <span className='font-sans text-[10px] font-medium opacity-80'>
-                    {t('BalanceLabel', '余额')}
-                  </span>
-                  {remainText}
+              <span
+                title={
+                  isLowBalance
+                    ? `余额不足一天消耗（近1天消耗: ${dailyText}，当前余额: ${remainText}）`
+                    : `当前余额: ${remainText}`
+                }
+                className={cn(
+                  'inline-flex w-[134px] shrink-0 items-center justify-between gap-1 rounded-md border px-2 py-0.5 font-mono text-[11px] tabular-nums whitespace-nowrap',
+                  isLowBalance
+                    ? 'border-rose-500/50 bg-rose-500/15 font-bold text-rose-600 ring-1 ring-rose-500/25 dark:border-rose-500/50 dark:bg-rose-500/20 dark:text-rose-300'
+                    : remainQuota > 0
+                      ? 'border-amber-500/25 bg-amber-500/12 font-semibold text-amber-700 dark:text-amber-300'
+                      : 'border-border/60 bg-background/70 text-muted-foreground'
+                )}
+              >
+                <span className='inline-flex items-center gap-0.5 font-sans text-[10px] font-medium opacity-90'>
+                  {isLowBalance && (
+                    <span className='size-1.5 rounded-full bg-rose-500 shrink-0' />
+                  )}
+                  {t('BalanceLabel', '余额')}
                 </span>
-              )}
+                <span>{remainText}</span>
+              </span>
 
-              {totalQuota > 0 && (
-                <span className='inline-flex items-center gap-1 rounded-md border border-indigo-500/25 bg-indigo-500/12 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-indigo-700 dark:text-indigo-300 tabular-nums whitespace-nowrap'>
-                  <span className='font-sans text-[10px] font-medium opacity-80'>
-                    {t('TotalLabel', '总计')}
-                  </span>
-                  {totalText}
+              <span
+                className={cn(
+                  'inline-flex w-[138px] shrink-0 items-center justify-between gap-1 rounded-md border px-2 py-0.5 font-mono text-[11px] tabular-nums whitespace-nowrap',
+                  totalQuota > 0
+                    ? 'border-indigo-500/25 bg-indigo-500/12 font-semibold text-indigo-700 dark:text-indigo-300'
+                    : 'border-border/60 bg-background/70 text-muted-foreground'
+                )}
+              >
+                <span className='font-sans text-[10px] font-medium opacity-80'>
+                  {t('TotalLabel', '总计')}
                 </span>
-              )}
+                <span>{totalText}</span>
+              </span>
             </div>
           </div>
         ),
@@ -503,7 +541,7 @@ export function CommonLogsFilterBar<TData>(
         value: '',
         label: t('All Users', '全部用户'),
         labelNode: (
-          <div className='flex items-center justify-between gap-2 rounded-md border border-primary/20 bg-primary/[0.05] px-2 py-1'>
+          <div className='flex w-full items-center justify-between gap-2 rounded-md border border-primary/20 bg-primary/[0.05] px-2.5 py-1'>
             <span className='text-xs font-semibold text-foreground'>
               {t('All Users', '全部用户')}
             </span>
@@ -669,26 +707,27 @@ export function CommonLogsFilterBar<TData>(
         labelNode: (
           <div
             className={cn(
-              'flex flex-wrap items-center justify-between gap-2 rounded-md border px-2 py-1 transition-colors',
+              'flex w-full items-center justify-between gap-2 rounded-md border px-2 py-1 transition-colors',
               style.rowBg
             )}
           >
             <span
+              title={item.base_url}
               className={cn(
-                'inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 font-mono text-xs font-semibold whitespace-nowrap shadow-2xs',
+                'inline-flex w-[215px] shrink-0 items-center gap-1.5 rounded-md border px-2 py-0.5 font-mono text-xs font-semibold whitespace-nowrap shadow-2xs',
                 style.badgeBg
               )}
             >
               <span
                 className={cn('size-1.5 shrink-0 rounded-full', style.dot)}
               />
-              {item.base_url}
+              <span className='truncate'>{item.base_url}</span>
             </span>
 
-            <div className='flex flex-wrap items-center gap-1 shrink-0'>
+            <div className='flex shrink-0 items-center gap-1.5'>
               <span
                 className={cn(
-                  'inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 font-mono text-[11px] tabular-nums whitespace-nowrap',
+                  'inline-flex w-[128px] shrink-0 items-center justify-between gap-1 rounded-md border px-2 py-0.5 font-mono text-[11px] tabular-nums whitespace-nowrap',
                   todayQuota > 0
                     ? 'border-emerald-500/25 bg-emerald-500/12 font-semibold text-emerald-700 dark:text-emerald-300'
                     : 'border-border/60 bg-background/70 text-muted-foreground'
@@ -697,21 +736,21 @@ export function CommonLogsFilterBar<TData>(
                 <span className='font-sans text-[10px] font-medium opacity-80'>
                   {t('TodayLabel', '当天')}
                 </span>
-                {todayText}
+                <span>{todayText}</span>
               </span>
 
               <span
                 className={cn(
-                  'inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 font-mono text-[11px] tabular-nums whitespace-nowrap',
+                  'inline-flex w-[138px] shrink-0 items-center justify-between gap-1 rounded-md border px-2 py-0.5 font-mono text-[11px] tabular-nums whitespace-nowrap',
                   totalQuota > 0
-                    ? 'border-indigo-500/25 bg-indigo-500/12 font-semibold text-indigo-700 dark:text-emerald-300 dark:text-indigo-300'
+                    ? 'border-indigo-500/25 bg-indigo-500/12 font-semibold text-indigo-700 dark:text-indigo-300'
                     : 'border-border/60 bg-background/70 text-muted-foreground'
                 )}
               >
                 <span className='font-sans text-[10px] font-medium opacity-80'>
                   {t('TotalLabel', '总计')}
                 </span>
-                {totalText}
+                <span>{totalText}</span>
               </span>
             </div>
           </div>
@@ -728,7 +767,7 @@ export function CommonLogsFilterBar<TData>(
         value: '',
         label: t('All API Addresses', '全部 API 地址'),
         labelNode: (
-          <div className='flex items-center justify-between gap-2 rounded-md border border-primary/20 bg-primary/[0.05] px-2 py-1'>
+          <div className='flex w-full items-center justify-between gap-2 rounded-md border border-primary/20 bg-primary/[0.05] px-2.5 py-1'>
             <span className='text-xs font-semibold text-foreground'>
               {t('All API Addresses', '全部 API 地址')}
             </span>
