@@ -161,10 +161,11 @@ export function CommonLogsFilterBar<TData>(
     const groups = isAdmin
       ? (adminGroups?.data ?? [])
       : Object.keys(userGroups?.data ?? {})
-    return groups
+    const items = groups
       .filter((group) => group !== 'auto')
       .map((group) => ({ label: group, value: group }))
-  }, [isAdmin, adminGroups, userGroups])
+    return [{ value: '', label: t('All Groups', '全部分组') }, ...items]
+  }, [isAdmin, adminGroups, userGroups, t])
 
   const { data: rankedModelsData } = useQuery({
     queryKey: ['ranked-models'],
@@ -174,8 +175,9 @@ export function CommonLogsFilterBar<TData>(
 
   const modelOptions = useMemo(() => {
     const list = rankedModelsData?.data ?? []
-    return list.map((m) => ({ label: m, value: m }))
-  }, [rankedModelsData])
+    const items = list.map((m) => ({ label: m, value: m }))
+    return [{ value: '', label: t('All Models', '全部模型') }, ...items]
+  }, [rankedModelsData, t])
 
   const { data: userCandidatesData } = useQuery({
     queryKey: ['today-consumption-users'],
@@ -186,14 +188,15 @@ export function CommonLogsFilterBar<TData>(
 
   const userOptions = useMemo(() => {
     const users = userCandidatesData?.data ?? []
-    return users.map((u) => ({
+    const items = users.map((u) => ({
       value: u.username,
       label:
         u.today_consumed_quota > 0
           ? `${u.username} (${formatLogQuota(u.today_consumed_quota)})`
           : u.username,
     }))
-  }, [userCandidatesData])
+    return [{ value: '', label: t('All Users', '全部用户') }, ...items]
+  }, [userCandidatesData, t])
 
 
   const searchState = useMemo<CommonLogDraft>(() => {
@@ -285,7 +288,7 @@ export function CommonLogsFilterBar<TData>(
 
   const apiAddressOptions = useMemo(() => {
     const list = apiAddressesData ?? []
-    return list.map((item) => {
+    const items = list.map((item) => {
       const quota = item.period_quota > 0 ? item.period_quota : item.used_quota
       const hasPeriod = item.period_quota > 0
       const quotaText = formatLogQuota(quota)
@@ -296,6 +299,14 @@ export function CommonLogsFilterBar<TData>(
         description: quota > 0 ? desc : '$0',
       }
     })
+    return [
+      {
+        value: '',
+        label: t('All API Addresses', '全部 API 地址'),
+        description: '',
+      },
+      ...items,
+    ]
   }, [apiAddressesData, t])
 
   const handleChange = useCallback(

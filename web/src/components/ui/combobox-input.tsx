@@ -73,7 +73,7 @@ export function ComboboxInput({
   const listRef = React.useRef<HTMLUListElement>(null)
   const pointerFocusRef = React.useRef(false)
   const selectedOption = React.useMemo(
-    () => options.find((option) => option.value === value),
+    () => (value ? options.find((option) => option.value === value) : undefined),
     [options, value]
   )
   const displayValue = open ? searchValue : (selectedOption?.label ?? value)
@@ -246,42 +246,46 @@ export function ComboboxInput({
               role='listbox'
               className='max-h-[220px] overflow-y-auto p-1'
             >
-              {filteredOptions.map((option, index) => (
-                <li
-                  key={option.value}
-                  id={`${listId}-${index}`}
-                  role='option'
-                  aria-selected={value === option.value}
-                  data-highlighted={index === highlightedIndex}
-                  className={cn(
-                    'relative flex cursor-pointer items-center justify-between gap-3 rounded-sm px-2.5 py-1.5 text-sm select-none',
-                    index === highlightedIndex &&
-                      'bg-accent text-accent-foreground',
-                    value === option.value && 'font-medium'
-                  )}
-                  onMouseEnter={() => setHighlightedIndex(index)}
-                  onMouseDown={(e) => {
-                    e.preventDefault() // Prevent blur
-                    handleSelect(option.value)
-                  }}
-                >
-                  <div className='flex items-center gap-2 min-w-0 flex-1'>
-                    <Check
-                      className={cn(
-                        'size-4 shrink-0',
-                        value === option.value ? 'opacity-100' : 'opacity-0'
-                      )}
-                    />
-                    {option.icon && <span aria-hidden>{option.icon}</span>}
-                    <span className='truncate font-mono text-xs'>{option.label}</span>
-                  </div>
-                  {option.description && (
-                    <span className='shrink-0 text-xs font-mono font-medium text-emerald-600 dark:text-emerald-400'>
-                      {option.description}
-                    </span>
-                  )}
-                </li>
-              ))}
+              {filteredOptions.map((option, index) => {
+                const isSelected =
+                  value === option.value || (!value && !option.value)
+                return (
+                  <li
+                    key={option.value}
+                    id={`${listId}-${index}`}
+                    role='option'
+                    aria-selected={isSelected}
+                    data-highlighted={index === highlightedIndex}
+                    className={cn(
+                      'relative flex cursor-pointer items-center justify-between gap-3 rounded-sm px-2.5 py-1.5 text-sm select-none',
+                      index === highlightedIndex &&
+                        'bg-accent text-accent-foreground',
+                      isSelected && 'font-medium'
+                    )}
+                    onMouseEnter={() => setHighlightedIndex(index)}
+                    onMouseDown={(e) => {
+                      e.preventDefault() // Prevent blur
+                      handleSelect(option.value)
+                    }}
+                  >
+                    <div className='flex items-center gap-2 min-w-0 flex-1'>
+                      <Check
+                        className={cn(
+                          'size-4 shrink-0',
+                          isSelected ? 'opacity-100' : 'opacity-0'
+                        )}
+                      />
+                      {option.icon && <span aria-hidden>{option.icon}</span>}
+                      <span className='truncate font-mono text-xs'>{option.label}</span>
+                    </div>
+                    {option.description && (
+                      <span className='shrink-0 text-xs font-mono font-medium text-emerald-600 dark:text-emerald-400'>
+                        {option.description}
+                      </span>
+                    )}
+                  </li>
+                )
+              })}
             </ul>
           ) : (
             <div className='px-2 py-6 text-center text-sm'>
