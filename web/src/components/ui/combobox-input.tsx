@@ -365,7 +365,7 @@ export function ComboboxInput({
               return (
                 <div
                   className={cn(
-                    'bg-popover text-popover-foreground absolute top-0 z-110 w-[390px] max-w-[90vw] rounded-xl border shadow-xl',
+                    'bg-popover text-popover-foreground absolute top-0 z-110 w-[456px] max-w-[92vw] rounded-xl border shadow-xl',
                     hoverSide === 'right'
                       ? 'left-full ml-1.5'
                       : 'right-full mr-1.5'

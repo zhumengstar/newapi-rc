@@ -117,24 +117,24 @@ export function ApiAddressHoverPanel({
   return (
     <div className='p-3 space-y-3 text-xs'>
       {/* 1. 顶部地址信息与完整配置按钮 */}
-      <div className='flex items-start justify-between gap-2 border-b border-border/60 pb-2.5'>
-        <div className='min-w-0 space-y-1'>
-          <div className='flex items-center gap-1.5'>
+      <div className='flex items-center justify-between gap-2 border-b border-border/60 pb-2.5'>
+        <div className='min-w-0 flex-1 space-y-1'>
+          <div className='flex items-center gap-1.5 min-w-0'>
             <Globe className='size-3.5 text-primary shrink-0' />
             <span
-              className='font-mono font-semibold text-foreground truncate max-w-[210px]'
+              className='font-mono font-semibold text-foreground truncate'
               title={source.display_base_url}
             >
               {source.display_base_url}
             </span>
           </div>
-          <div className='flex items-center gap-1.5 flex-wrap text-[11px] text-muted-foreground'>
-            <span>
+          <div className='flex items-center gap-1.5 whitespace-nowrap overflow-hidden text-[11px] text-muted-foreground'>
+            <span className='shrink-0'>
               {source.channel_count} 个渠道 ({source.enabled_channel_count} 启用)
             </span>
             <span
               className={cn(
-                'inline-flex items-center rounded px-1.5 py-0.5 font-mono text-[10px]',
+                'inline-flex shrink-0 items-center rounded px-1.5 py-0.5 font-mono text-[10px] tabular-nums',
                 (source.today_quota || 0) > 0
                   ? 'bg-emerald-500/10 font-semibold text-emerald-600 dark:text-emerald-400 border border-emerald-500/20'
                   : 'bg-muted/60 text-muted-foreground'
@@ -145,10 +145,10 @@ export function ApiAddressHoverPanel({
             {source.wechat_name && (
               <Badge
                 variant='outline'
-                className='h-4 px-1.5 text-[10px] border-emerald-300 text-emerald-700 bg-emerald-50 dark:border-emerald-800 dark:text-emerald-300 dark:bg-emerald-950/40 flex items-center gap-0.5'
+                className='h-4 px-1.5 text-[10px] shrink-0 border-emerald-300 text-emerald-700 bg-emerald-50 dark:border-emerald-800 dark:text-emerald-300 dark:bg-emerald-950/40 flex items-center gap-0.5'
               >
                 <MessageSquare className='size-2.5' />
-                {source.wechat_name}
+                <span className='truncate max-w-[90px]'>{source.wechat_name}</span>
               </Badge>
             )}
           </div>
@@ -196,7 +196,7 @@ export function ApiAddressHoverPanel({
           )}
         </div>
 
-        <div className='rounded-lg border border-border/70 bg-muted/20 divide-y divide-border/40 max-h-[190px] overflow-y-auto'>
+        <div className='rounded-lg border border-border/70 bg-muted/20 p-1.5 space-y-1 max-h-[210px] overflow-y-auto'>
           {sortedGroups.length === 0 ? (
             <div className='py-4 text-center text-[11px] text-muted-foreground'>
               暂无关联分组
@@ -221,46 +221,49 @@ export function ApiAddressHoverPanel({
               return (
                 <div
                   key={grp}
-                  className='flex items-center justify-between gap-2 px-2.5 py-1.5 hover:bg-muted/40 transition-colors'
+                  className='flex items-center justify-between gap-1.5 rounded-md border border-border/50 bg-background/80 px-2 py-1 whitespace-nowrap hover:bg-muted/40 transition-colors'
                 >
-                  <div className='flex items-center gap-1.5 min-w-0 flex-1 flex-wrap'>
+                  <div className='flex items-center gap-1.5 min-w-0 flex-1 overflow-hidden'>
                     <Badge
                       variant='outline'
                       className={cn(
-                        'h-3.5 px-1 text-[9px] shrink-0 font-normal',
+                        'h-4 w-[46px] justify-center px-1 text-[9px] shrink-0 font-medium',
                         family.badgeClassName
                       )}
                     >
                       {family.name.split(' / ')[0]}
                     </Badge>
-                    <GroupBadge
-                      group={grp}
-                      copyable={false}
-                      className='text-[11px] font-medium'
-                    />
-                    <span
-                      className={cn(
-                        'inline-flex items-center rounded px-1.5 py-0.5 font-mono text-[10px] shrink-0',
-                        effectiveQuota > 0
-                          ? 'bg-emerald-500/10 font-semibold text-emerald-600 dark:text-emerald-400 border border-emerald-500/20'
-                          : 'bg-muted/60 text-muted-foreground font-normal'
-                      )}
-                      title='该分组在此地址下的当天消耗收入'
-                    >
-                      当天 {effectiveQuota > 0 ? formatLogQuota(effectiveQuota) : '$0'}
-                    </span>
+                    <div className='min-w-0 flex-1 overflow-hidden'>
+                      <GroupBadge
+                        group={grp}
+                        copyable={false}
+                        className='max-w-full truncate text-[11px] font-medium'
+                      />
+                    </div>
                   </div>
 
                   <div className='flex items-center gap-1.5 shrink-0'>
-                    {custRatio !== undefined && (
-                      <span
-                        className='text-[10px] text-muted-foreground font-mono'
-                        title='平台对该分组的默认对客倍率'
-                      >
-                        售{custRatio}x
+                    <span
+                      className={cn(
+                        'inline-flex w-[112px] shrink-0 items-center justify-between gap-1 rounded border px-1.5 py-0.5 font-mono text-[10px] tabular-nums whitespace-nowrap',
+                        effectiveQuota > 0
+                          ? 'bg-emerald-500/10 font-semibold text-emerald-600 dark:text-emerald-400 border-emerald-500/20'
+                          : 'bg-muted/60 text-muted-foreground font-normal border-border/50'
+                      )}
+                      title='该分组在此地址下的当天消耗收入'
+                    >
+                      <span className='font-sans text-[9px] opacity-80'>当天</span>
+                      <span>
+                        {effectiveQuota > 0 ? formatLogQuota(effectiveQuota) : '$0'}
                       </span>
-                    )}
-                    <div className='relative w-[68px]'>
+                    </span>
+                    <span
+                      className='inline-flex w-[48px] shrink-0 items-center justify-end text-[10px] text-muted-foreground font-mono tabular-nums whitespace-nowrap'
+                      title='平台对该分组的默认对客倍率'
+                    >
+                      {custRatio !== undefined ? `售${custRatio}x` : '—'}
+                    </span>
+                    <div className='relative w-[66px] shrink-0'>
                       <Input
                         type='number'
                         step='0.001'
@@ -320,7 +323,7 @@ export function ApiAddressHoverPanel({
         {rules.length === 0 ? (
           <div
             onClick={() => onOpenFullConfig(source)}
-            className='rounded-lg border border-dashed border-border/80 bg-muted/15 px-3 py-2 text-center text-[11px] text-muted-foreground hover:border-primary/50 hover:text-foreground cursor-pointer transition-colors'
+            className='rounded-lg border border-dashed border-border/80 bg-muted/15 px-3 py-2 text-center text-[11px] whitespace-nowrap text-muted-foreground hover:border-primary/50 hover:text-foreground cursor-pointer transition-colors'
           >
             暂未配置专属模型成本单价，点击配置按次 ($/次) 或按量 ($/M) 成本
           </div>
