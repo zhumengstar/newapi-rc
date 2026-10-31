@@ -132,7 +132,10 @@ func (e *NewAPIError) Error() string {
 		// fallback message when underlying error is missing
 		return string(e.errorCode)
 	}
-	return e.Err.Error()
+	if e.errorCode == ErrorCodeCountTokenFailed {
+		return e.Err.Error()
+	}
+	return kitutil.MaskSensitiveInfo(e.Err.Error())
 }
 
 func (e *NewAPIError) ErrorWithStatusCode() string {

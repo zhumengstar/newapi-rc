@@ -37,6 +37,11 @@ func TestMaskSensitiveInfo_NoAvailableChannel(t *testing.T) {
 			input:    "获取分组 Gemini4按量组 下模型 gemini-4-argon 的可用渠道失败（retry）",
 			expected: "模型当前服务能力暂不可用，请稍后重试",
 		},
+		{
+			name:     "Dangling under group and distributor error",
+			input:    "error: failed under group Gemini老客折扣0.1x (distributor)",
+			expected: "error: failed",
+		},
 	}
 
 	for _, tt := range tests {

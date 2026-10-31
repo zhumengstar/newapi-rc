@@ -24,6 +24,9 @@ var (
 
 	// maskDistributorPattern matches any remaining distributor tags
 	maskDistributorPattern = regexp.MustCompile(`(?i)\s*\([^\)]*distributor[^\)]*\)`)
+
+	// maskDistributorGroupPattern matches any dangling "under group <GROUP>" disclosures
+	maskDistributorGroupPattern = regexp.MustCompile(`(?i)under group\s+[^,;\(\)]+`)
 )
 
 // maskHostTail returns the tail parts of a domain/host that should be preserved.
@@ -142,6 +145,7 @@ func MaskSensitiveInfo(str string) string {
 	// Mask upstream and internal channel missing / distributor routing errors
 	str = maskNoAvailableChannelPattern.ReplaceAllString(str, "The model is temporarily overloaded or unavailable. Please try again later.")
 	str = maskNoChannelZhPattern.ReplaceAllString(str, "模型当前服务能力暂不可用，请稍后重试")
+	str = maskDistributorGroupPattern.ReplaceAllString(str, "")
 	str = maskDistributorPattern.ReplaceAllString(str, "")
 
 	return str
