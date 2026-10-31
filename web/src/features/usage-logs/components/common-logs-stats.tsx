@@ -36,16 +36,26 @@ function StatBadge(props: {
   label: string
   value: string | number
   accent: string
+  cardClass?: string
+  valueClass?: string
   title?: string
 }) {
   return (
     <span
       title={props.title}
-      className='border-border/60 bg-muted/25 inline-flex h-7 items-center gap-2 rounded-md border px-2.5 text-xs shadow-xs'
+      className={cn(
+        'inline-flex h-7 items-center gap-1.5 rounded-md border px-2.5 text-xs shadow-2xs transition-colors',
+        props.cardClass ?? 'border-border/60 bg-muted/25'
+      )}
     >
-      <span className={cn('h-3.5 w-0.5 rounded-full', props.accent)} />
-      <span className='text-muted-foreground'>{props.label}</span>
-      <span className='text-foreground/85 font-mono font-semibold tabular-nums'>
+      <span className={cn('size-1.5 shrink-0 rounded-full', props.accent)} />
+      <span className='text-muted-foreground font-medium'>{props.label}</span>
+      <span
+        className={cn(
+          'font-mono font-semibold tabular-nums',
+          props.valueClass ?? 'text-foreground/90'
+        )}
+      >
         {props.value}
       </span>
     </span>
@@ -108,21 +118,27 @@ export function CommonLogsStats() {
   }
 
   return (
-    <div className='flex flex-wrap items-center gap-2'>
+    <div className='flex flex-wrap items-center gap-1.5'>
       <StatBadge
         label={t('Usage')}
         value={sensitiveVisible ? formatLogQuota(stats?.quota || 0) : '••••'}
-        accent='bg-sky-500/70'
+        accent='bg-sky-500'
+        cardClass='border-sky-500/20 bg-sky-500/[0.06]'
+        valueClass='text-sky-700 dark:text-sky-300'
       />
       <StatBadge
         label={t('RPM')}
         value={stats?.rpm || 0}
-        accent='bg-rose-500/65'
+        accent='bg-rose-500'
+        cardClass='border-rose-500/20 bg-rose-500/[0.06]'
+        valueClass='text-rose-700 dark:text-rose-300'
       />
       <StatBadge
         label={t('TPM')}
         value={stats?.tpm || 0}
-        accent='bg-slate-400/70'
+        accent='bg-indigo-500'
+        cardClass='border-indigo-500/20 bg-indigo-500/[0.06]'
+        valueClass='text-indigo-700 dark:text-indigo-300'
       />
       {isAdmin && (
         <StatBadge
@@ -132,7 +148,9 @@ export function CommonLogsStats() {
               ? formatLogQuota(stats?.mpm ?? 0)
               : '••••'
           }
-          accent='bg-emerald-500/70'
+          accent='bg-emerald-500'
+          cardClass='border-emerald-500/20 bg-emerald-500/[0.06]'
+          valueClass='text-emerald-700 dark:text-emerald-300'
           title={t('Current Minute Spend (MPM)') || '最近一分钟消耗金额 (MPM)'}
         />
       )}

@@ -443,6 +443,11 @@ func ShanghaiTodayStartUnix() int64 {
 	return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, location).Unix()
 }
 
+// ShanghaiUserLogMinStartUnix 返回普通用户可查询的日志最早时间戳（保留今昨两天的数据日志）
+func ShanghaiUserLogMinStartUnix() int64 {
+	return ShanghaiTodayStartUnix() - 86400
+}
+
 func shanghaiTodayStartUnix() int64 {
 	return ShanghaiTodayStartUnix()
 }
@@ -505,6 +510,9 @@ func getTodayUserConsumptionMap() (map[int]int64, []int, error) {
 type UserConsumptionCandidate struct {
 	Username           string `json:"username"`
 	TodayConsumedQuota int64  `json:"today_consumed_quota"`
+	TotalConsumedQuota int64  `json:"total_consumed_quota"`
+	RemainQuota        int64  `json:"remain_quota"`
+	Group              string `json:"group"`
 }
 
 var (
@@ -546,29 +554,54 @@ func GetTodayConsumptionUsers() ([]UserConsumptionCandidate, error) {
 		return nil, err
 	}
 
-	seenUsernames := make(map[string]bool, len(rows)+100)
-	candidates := make([]UserConsumptionCandidate, 0, len(rows)+50)
+	type userMetaRow struct {
+		Username  string `gorm:"column:username"`
+		UsedQuota int64  `gorm:"column:used_quota"`
+		Quota     int64  `gorm:"column:quota"`
+		Group     string `gorm:"column:group"`
+	}
+	var userMetas []userMetaRow
+	userMetaMap := make(map[string]userMetaRow)
+	if err := DB.Unscoped().Model(&User{}).
+		Select("username, used_quota, quota, \"group\"").
+		Where("status = 1 AND username != ''").
+		Order("used_quota DESC, id DESC").
+		Scan(&userMetas).Error; err == nil {
+		userMetaMap = make(map[string]userMetaRow, len(userMetas))
+		for _, m := range userMetas {
+			if m.Username != "" {
+				userMetaMap[m.Username] = m
+			}
+		}
+	}
+
+	seenUsernames := make(map[string]bool, len(rows)+len(userMetas))
+	candidates := make([]UserConsumptionCandidate, 0, len(rows)+len(userMetas))
 
 	for _, row := range rows {
 		if row.Username != "" && !seenUsernames[row.Username] {
 			seenUsernames[row.Username] = true
+			meta := userMetaMap[row.Username]
 			candidates = append(candidates, UserConsumptionCandidate{
 				Username:           row.Username,
 				TodayConsumedQuota: row.Quota,
+				TotalConsumedQuota: meta.UsedQuota,
+				RemainQuota:        meta.Quota,
+				Group:              meta.Group,
 			})
 		}
 	}
 
-	var allUsernames []string
-	if err := DB.Unscoped().Model(&User{}).Where("status = 1 AND username != ''").Order("id DESC").Pluck("username", &allUsernames).Error; err == nil {
-		for _, name := range allUsernames {
-			if !seenUsernames[name] {
-				seenUsernames[name] = true
-				candidates = append(candidates, UserConsumptionCandidate{
-					Username:           name,
-					TodayConsumedQuota: 0,
-				})
-			}
+	for _, meta := range userMetas {
+		if meta.Username != "" && !seenUsernames[meta.Username] {
+			seenUsernames[meta.Username] = true
+			candidates = append(candidates, UserConsumptionCandidate{
+				Username:           meta.Username,
+				TodayConsumedQuota: 0,
+				TotalConsumedQuota: meta.UsedQuota,
+				RemainQuota:        meta.Quota,
+				Group:              meta.Group,
+			})
 		}
 	}
 

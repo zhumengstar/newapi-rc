@@ -60,9 +60,9 @@ func GetUserLogs(c *gin.Context) {
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
 	if c.GetInt("role") < common.RoleAdminUser && common.UserOnlyViewTodayLogsEnabled {
-		todayStart := model.ShanghaiTodayStartUnix()
-		if startTimestamp < todayStart {
-			startTimestamp = todayStart
+		minStart := model.ShanghaiUserLogMinStartUnix()
+		if startTimestamp < minStart {
+			startTimestamp = minStart
 		}
 	}
 	tokenName := c.Query("token_name")
@@ -133,7 +133,7 @@ func GetLogByKey(c *gin.Context) {
 	}
 	var minTimestamp int64
 	if c.GetInt("role") < common.RoleAdminUser && common.UserOnlyViewTodayLogsEnabled {
-		minTimestamp = model.ShanghaiTodayStartUnix()
+		minTimestamp = model.ShanghaiUserLogMinStartUnix()
 	}
 	logs, err := model.GetLogByTokenId(tokenId, minTimestamp)
 	if err != nil {
@@ -185,9 +185,9 @@ func GetLogsSelfStat(c *gin.Context) {
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
 	if c.GetInt("role") < common.RoleAdminUser && common.UserOnlyViewTodayLogsEnabled {
-		todayStart := model.ShanghaiTodayStartUnix()
-		if startTimestamp < todayStart {
-			startTimestamp = todayStart
+		minStart := model.ShanghaiUserLogMinStartUnix()
+		if startTimestamp < minStart {
+			startTimestamp = minStart
 		}
 	}
 	tokenName := c.Query("token_name")

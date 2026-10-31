@@ -31,58 +31,58 @@ func TestLogTodayFilterDynamicOption(t *testing.T) {
 	}()
 
 	gin.SetMode(gin.TestMode)
-	todayStart := model.ShanghaiTodayStartUnix()
-	yesterday := todayStart - 86400
+	minStart := model.ShanghaiUserLogMinStartUnix()
+	threeDaysAgo := minStart - 86400
 
-	// 1. 普通用户在 UserOnlyViewTodayLogsEnabled = true 下查询
+	// 1. 普通用户在 UserOnlyViewTodayLogsEnabled = true 下查询（保留两天数据日志）
 	{
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
-		c.Request, _ = http.NewRequest(http.MethodGet, "/api/log/self?start_timestamp="+strconv.FormatInt(yesterday, 10), nil)
+		c.Request, _ = http.NewRequest(http.MethodGet, "/api/log/self?start_timestamp="+strconv.FormatInt(threeDaysAgo, 10), nil)
 		c.Set("id", 100)
 		c.Set("role", common.RoleCommonUser)
 
 		startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 		if c.GetInt("role") < common.RoleAdminUser && common.UserOnlyViewTodayLogsEnabled {
-			tStart := model.ShanghaiTodayStartUnix()
+			tStart := model.ShanghaiUserLogMinStartUnix()
 			if startTimestamp < tStart {
 				startTimestamp = tStart
 			}
 		}
-		assert.Equal(t, todayStart, startTimestamp)
+		assert.Equal(t, minStart, startTimestamp)
 	}
 
 	// 2. 管理员不受限制
 	{
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
-		c.Request, _ = http.NewRequest(http.MethodGet, "/api/log/self?start_timestamp="+strconv.FormatInt(yesterday, 10), nil)
+		c.Request, _ = http.NewRequest(http.MethodGet, "/api/log/self?start_timestamp="+strconv.FormatInt(threeDaysAgo, 10), nil)
 		c.Set("id", 1)
 		c.Set("role", common.RoleAdminUser)
 
 		startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 		if c.GetInt("role") < common.RoleAdminUser && common.UserOnlyViewTodayLogsEnabled {
-			tStart := model.ShanghaiTodayStartUnix()
+			tStart := model.ShanghaiUserLogMinStartUnix()
 			if startTimestamp < tStart {
 				startTimestamp = tStart
 			}
 		}
-		assert.Equal(t, yesterday, startTimestamp)
+		assert.Equal(t, threeDaysAgo, startTimestamp)
 	}
 
 	// 3. 当关闭配置项时，普通用户也不受限制
 	{
 		common.UserOnlyViewTodayLogsEnabled = false
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
-		c.Request, _ = http.NewRequest(http.MethodGet, "/api/log/self?start_timestamp="+strconv.FormatInt(yesterday, 10), nil)
+		c.Request, _ = http.NewRequest(http.MethodGet, "/api/log/self?start_timestamp="+strconv.FormatInt(threeDaysAgo, 10), nil)
 		c.Set("id", 100)
 		c.Set("role", common.RoleCommonUser)
 
 		startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 		if c.GetInt("role") < common.RoleAdminUser && common.UserOnlyViewTodayLogsEnabled {
-			tStart := model.ShanghaiTodayStartUnix()
+			tStart := model.ShanghaiUserLogMinStartUnix()
 			if startTimestamp < tStart {
 				startTimestamp = tStart
 			}
 		}
-		assert.Equal(t, yesterday, startTimestamp)
+		assert.Equal(t, threeDaysAgo, startTimestamp)
 	}
 }

@@ -388,9 +388,9 @@ func GetUserTask(c *gin.Context) {
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
 	if c.GetInt("role") < common.RoleAdminUser && common.UserOnlyViewTodayLogsEnabled {
-		todayStart := model.ShanghaiTodayStartUnix()
-		if startTimestamp < todayStart {
-			startTimestamp = todayStart
+		minStart := model.ShanghaiUserLogMinStartUnix()
+		if startTimestamp < minStart {
+			startTimestamp = minStart
 		}
 	}
 	queryParams := model.SyncTaskQueryParams{Platform: constant.TaskPlatform(c.Query("platform")), TaskID: c.Query("task_id"), Status: c.Query("status"), Action: c.Query("action"), StartTimestamp: startTimestamp, EndTimestamp: endTimestamp}

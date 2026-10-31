@@ -311,10 +311,10 @@ func GetUserMidjourney(c *gin.Context) {
 	startTimestamp := c.Query("start_timestamp")
 	endTimestamp := c.Query("end_timestamp")
 	if c.GetInt("role") < common.RoleAdminUser && common.UserOnlyViewTodayLogsEnabled {
-		todayStart := model.ShanghaiTodayStartUnix()
+		minStart := model.ShanghaiUserLogMinStartUnix()
 		startVal, _ := strconv.ParseInt(startTimestamp, 10, 64)
-		if startVal < todayStart {
-			startTimestamp = strconv.FormatInt(todayStart, 10)
+		if startVal < minStart {
+			startTimestamp = strconv.FormatInt(minStart, 10)
 		}
 	}
 

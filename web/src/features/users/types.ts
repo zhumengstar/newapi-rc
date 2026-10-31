@@ -184,4 +184,7 @@ export type UsersDialogType = 'create' | 'update' | 'delete'
 export interface UserConsumptionCandidate {
   username: string
   today_consumed_quota: number
+  total_consumed_quota?: number
+  remain_quota?: number
+  group?: string
 }

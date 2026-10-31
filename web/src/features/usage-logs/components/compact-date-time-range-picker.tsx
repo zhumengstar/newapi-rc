@@ -97,11 +97,21 @@ export function CompactDateTimeRangePicker({
     setOpen(false)
   }
 
-  const applyPreset = (kind: 'today' | '7d' | 'week' | '30d' | 'month') => {
+  const applyPreset = (
+    kind: 'today' | 'yesterday' | '2d' | '7d' | 'week' | '30d' | 'month'
+  ) => {
     const now = dayjs()
     const presets = {
       today: {
         start: now.startOf('day').toDate(),
+        end: now.endOf('day').toDate(),
+      },
+      yesterday: {
+        start: now.subtract(1, 'day').startOf('day').toDate(),
+        end: now.subtract(1, 'day').endOf('day').toDate(),
+      },
+      '2d': {
+        start: now.subtract(1, 'day').startOf('day').toDate(),
         end: now.endOf('day').toDate(),
       },
       '7d': {
@@ -194,6 +204,24 @@ export function CompactDateTimeRangePicker({
               onClick={() => applyPreset('today')}
             >
               {t('Today')}
+            </Button>
+            <Button
+              type='button'
+              variant='secondary'
+              size='sm'
+              className='h-7 flex-1 px-2 text-xs'
+              onClick={() => applyPreset('yesterday')}
+            >
+              {t('Yesterday', '昨天')}
+            </Button>
+            <Button
+              type='button'
+              variant='secondary'
+              size='sm'
+              className='h-7 flex-1 px-2 text-xs'
+              onClick={() => applyPreset('2d')}
+            >
+              {t('2 Days', '近2天')}
             </Button>
             <Button
               type='button'

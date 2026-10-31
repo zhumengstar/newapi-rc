@@ -357,27 +357,164 @@ export function CommonLogsFilterBar<TData>(
 
   const modelOptions = useMemo(() => {
     const list = rankedModelsData?.data ?? []
-    const items = list.map((m) => ({ label: m, value: m }))
-    return [{ value: '', label: t('All Models', '全部模型') }, ...items]
+    const items = list.map((m) => {
+      const style = getFilterCardVisualStyle(m)
+      const lower = m.toLowerCase()
+      const familyLabel =
+        lower.includes('claude') || lower.includes('cc')
+          ? 'Claude'
+          : lower.includes('gemini')
+            ? 'Gemini'
+            : lower.includes('gpt') ||
+                lower.includes('o1') ||
+                lower.includes('o3') ||
+                lower.includes('codex')
+              ? 'OpenAI'
+              : lower.includes('banana') ||
+                  lower.includes('imagen') ||
+                  lower.includes('flux')
+                ? 'Image'
+                : 'Model'
+      return {
+        label: m,
+        value: m,
+        labelNode: (
+          <div
+            className={cn(
+              'flex items-center justify-between gap-2 rounded-md border px-2 py-1 transition-colors',
+              style.rowBg
+            )}
+          >
+            <span
+              className={cn(
+                'inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 font-mono text-xs font-semibold whitespace-nowrap shadow-2xs',
+                style.badgeBg
+              )}
+            >
+              <span
+                className={cn('size-1.5 shrink-0 rounded-full', style.dot)}
+              />
+              {m}
+            </span>
+            <span className='rounded-md border border-border/60 bg-background/80 px-1.5 py-0.5 font-mono text-[10px] font-medium text-muted-foreground whitespace-nowrap'>
+              {familyLabel}
+            </span>
+          </div>
+        ),
+      }
+    })
+    return [
+      {
+        value: '',
+        label: t('All Models', '全部模型'),
+        labelNode: (
+          <div className='flex items-center justify-between gap-2 rounded-md border border-primary/20 bg-primary/[0.05] px-2 py-1'>
+            <span className='text-xs font-semibold text-foreground'>
+              {t('All Models', '全部模型')}
+            </span>
+            <span className='rounded bg-primary/10 px-1.5 py-0.5 font-mono text-[10px] font-medium text-primary'>
+              {items.length} {t('Models', '个模型')}
+            </span>
+          </div>
+        ),
+      },
+      ...items,
+    ]
   }, [rankedModelsData, t])
 
   const { data: userCandidatesData } = useQuery({
     queryKey: ['today-consumption-users'],
     queryFn: async () => requireServerSuccess(await getTodayConsumptionUsers()),
     enabled: isAdmin,
-    staleTime: 60 * 1000,
+    staleTime: 15 * 1000,
   })
 
   const userOptions = useMemo(() => {
     const users = userCandidatesData?.data ?? []
-    const items = users.map((u) => ({
-      value: u.username,
-      label:
-        u.today_consumed_quota > 0
-          ? `${u.username} (${formatLogQuota(u.today_consumed_quota)})`
-          : u.username,
-    }))
-    return [{ value: '', label: t('All Users', '全部用户') }, ...items]
+    const items = users.map((u) => {
+      const todayQuota = u.today_consumed_quota || 0
+      const totalQuota = u.total_consumed_quota || 0
+      const remainQuota = u.remain_quota || 0
+      const todayText = todayQuota > 0 ? formatLogQuota(todayQuota) : '$0'
+      const totalText = totalQuota > 0 ? formatLogQuota(totalQuota) : '$0'
+      const remainText = remainQuota > 0 ? formatLogQuota(remainQuota) : '$0'
+      const style = getFilterCardVisualStyle(u.username, u.group)
+      return {
+        value: u.username,
+        label: u.username,
+        labelNode: (
+          <div
+            className={cn(
+              'flex flex-wrap items-center justify-between gap-2 rounded-md border px-2 py-1 transition-colors',
+              style.rowBg
+            )}
+          >
+            <span
+              className={cn(
+                'inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 font-mono text-xs font-semibold whitespace-nowrap shadow-2xs',
+                style.badgeBg
+              )}
+            >
+              <span
+                className={cn('size-1.5 shrink-0 rounded-full', style.dot)}
+              />
+              {u.username}
+            </span>
+
+            <div className='flex flex-wrap items-center gap-1 shrink-0'>
+              <span
+                className={cn(
+                  'inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 font-mono text-[11px] tabular-nums whitespace-nowrap',
+                  todayQuota > 0
+                    ? 'border-emerald-500/25 bg-emerald-500/12 font-semibold text-emerald-700 dark:text-emerald-300'
+                    : 'border-border/60 bg-background/70 text-muted-foreground'
+                )}
+              >
+                <span className='font-sans text-[10px] font-medium opacity-80'>
+                  {t('Today', '今天')}
+                </span>
+                {todayText}
+              </span>
+
+              {remainQuota > 0 && (
+                <span className='inline-flex items-center gap-1 rounded-md border border-amber-500/25 bg-amber-500/12 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-amber-700 dark:text-amber-300 tabular-nums whitespace-nowrap'>
+                  <span className='font-sans text-[10px] font-medium opacity-80'>
+                    {t('BalanceLabel', '余额')}
+                  </span>
+                  {remainText}
+                </span>
+              )}
+
+              {totalQuota > 0 && (
+                <span className='inline-flex items-center gap-1 rounded-md border border-indigo-500/25 bg-indigo-500/12 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-indigo-700 dark:text-indigo-300 tabular-nums whitespace-nowrap'>
+                  <span className='font-sans text-[10px] font-medium opacity-80'>
+                    {t('TotalLabel', '总计')}
+                  </span>
+                  {totalText}
+                </span>
+              )}
+            </div>
+          </div>
+        ),
+      }
+    })
+    return [
+      {
+        value: '',
+        label: t('All Users', '全部用户'),
+        labelNode: (
+          <div className='flex items-center justify-between gap-2 rounded-md border border-primary/20 bg-primary/[0.05] px-2 py-1'>
+            <span className='text-xs font-semibold text-foreground'>
+              {t('All Users', '全部用户')}
+            </span>
+            <span className='rounded bg-primary/10 px-1.5 py-0.5 font-mono text-[10px] font-medium text-primary'>
+              {items.length} {t('Users', '个用户')}
+            </span>
+          </div>
+        ),
+      },
+      ...items,
+    ]
   }, [userCandidatesData, t])
 
 
