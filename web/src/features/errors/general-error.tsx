@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { useEffect } from 'react'
 import { useNavigate, useRouter } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
 
@@ -23,6 +24,7 @@ import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 
 const FEEDBACK_URL = 'https://github.com/QuantumNous/new-api/issues'
+const CHUNK_RELOAD_KEY = 'newapi:chunk-reload-ts'
 
 type GeneralErrorProps = React.HTMLAttributes<HTMLDivElement> & {
   minimal?: boolean
@@ -37,6 +39,21 @@ function getHttpStatus(error: unknown): number | undefined {
   return typeof status === 'number' ? status : undefined
 }
 
+function isChunkLoadError(error: unknown): boolean {
+  if (!error) return false
+  const message =
+    error instanceof Error
+      ? `${error.name}: ${error.message}`
+      : String(error)
+  return (
+    message.includes('ChunkLoadError') ||
+    message.includes('Loading chunk') ||
+    message.includes('Failed to fetch dynamically imported module') ||
+    message.includes('Importing a module script failed') ||
+    message.includes("Unexpected token '<'")
+  )
+}
+
 export function GeneralError({
   className,
   minimal = false,
@@ -47,6 +64,20 @@ export function GeneralError({
   const { history } = useRouter()
   const status = getHttpStatus(error)
   const isRateLimited = status === 429
+
+  useEffect(() => {
+    if (!isChunkLoadError(error) || typeof window === 'undefined') return
+    try {
+      const lastReload = Number(sessionStorage.getItem(CHUNK_RELOAD_KEY) || '0')
+      const now = Date.now()
+      if (now - lastReload > 15_000) {
+        sessionStorage.setItem(CHUNK_RELOAD_KEY, String(now))
+        window.location.reload()
+      }
+    } catch {
+      /* ignore storage errors */
+    }
+  }, [error])
   const title = isRateLimited
     ? t('Too many requests')
     : `${t('Oops! Something went wrong')} ${`:')`}`

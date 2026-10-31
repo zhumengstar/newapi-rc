@@ -2,6 +2,8 @@ package gemini
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -154,6 +156,7 @@ func countGeminiBillableFunctionCalls(info *relaycommon.RelayInfo, response *dto
 }
 
 func buildUsageFromGeminiResponse(c *gin.Context, info *relaycommon.RelayInfo, response *dto.GeminiChatResponse) dto.Usage {
+	ensureGeminiInlineImageUsageMetadata(response)
 	metadata := response.GetUsageMetadata()
 	if dto.HasGeminiUsageMetadataTokens(metadata) {
 		usage := buildUsageFromGeminiMetadata(metadata, info.GetEstimatePromptTokens())
@@ -161,8 +164,183 @@ func buildUsageFromGeminiResponse(c *gin.Context, info *relaycommon.RelayInfo, r
 		return usage
 	}
 	usage := service.ResponseText2Usage(c, geminiResponseUsageText(response), info.UpstreamModelName, info.GetEstimatePromptTokens())
+	if imgBaseTokens := geminiResponseInlineImageBaseTokens(response); imgBaseTokens > 0 && usage.CompletionTokens < imgBaseTokens {
+		usage.CompletionTokens += imgBaseTokens
+		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+	}
 	attachEstimatedGeminiBillingUsage(usage)
 	return *usage
+}
+
+func decodeBase64Prefix(b64 string, maxChars int) []byte {
+	s := strings.TrimSpace(b64)
+	if s == "" {
+		return nil
+	}
+	if maxChars > 0 && len(s) > maxChars {
+		s = s[:(maxChars/4)*4]
+	}
+	if raw, err := base64.StdEncoding.DecodeString(s); err == nil && len(raw) > 0 {
+		return raw
+	}
+	if raw, err := base64.RawStdEncoding.DecodeString(strings.TrimRight(s, "=")); err == nil && len(raw) > 0 {
+		return raw
+	}
+	return nil
+}
+
+func parseImageDimensionsFromBytes(raw []byte) (int, int) {
+	if len(raw) >= 24 && string(raw[:8]) == "\x89PNG\r\n\x1a\n" {
+		w := int(binary.BigEndian.Uint32(raw[16:20]))
+		h := int(binary.BigEndian.Uint32(raw[20:24]))
+		return w, h
+	}
+	if len(raw) >= 4 && raw[0] == 0xff && raw[1] == 0xd8 {
+		i := 2
+		for i+4 <= len(raw) {
+			if raw[i] != 0xff {
+				i++
+				continue
+			}
+			for i < len(raw) && raw[i] == 0xff {
+				i++
+			}
+			if i >= len(raw) {
+				break
+			}
+			marker := raw[i]
+			i++
+			if marker == 0xd8 || marker == 0xd9 || (marker >= 0xd0 && marker <= 0xd7) || marker == 0x01 {
+				continue
+			}
+			if i+2 > len(raw) {
+				break
+			}
+			segLen := int(binary.BigEndian.Uint16(raw[i : i+2]))
+			if segLen < 2 {
+				break
+			}
+			switch marker {
+			case 0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf:
+				if i+7 <= len(raw) {
+					h := int(binary.BigEndian.Uint16(raw[i+3 : i+5]))
+					w := int(binary.BigEndian.Uint16(raw[i+5 : i+7]))
+					return w, h
+				}
+				return 0, 0
+			}
+			i += segLen
+		}
+	}
+	if len(raw) >= 30 && string(raw[:4]) == "RIFF" && string(raw[8:12]) == "WEBP" {
+		chunkType := string(raw[12:16])
+		switch chunkType {
+		case "VP8 ":
+			if raw[23] == 0x9d && raw[24] == 0x01 && raw[25] == 0x2a {
+				w := int(binary.LittleEndian.Uint16(raw[26:28]) & 0x3fff)
+				h := int(binary.LittleEndian.Uint16(raw[28:30]) & 0x3fff)
+				return w, h
+			}
+		case "VP8L":
+			bits := binary.LittleEndian.Uint32(raw[21:25])
+			w := int(bits&0x3fff) + 1
+			h := int((bits>>14)&0x3fff) + 1
+			return w, h
+		case "VP8X":
+			w := int(raw[24]) | int(raw[25])<<8 | int(raw[26])<<16 + 1
+			h := int(raw[27]) | int(raw[28])<<8 | int(raw[29])<<16 + 1
+			return w, h
+		}
+	}
+	return 0, 0
+}
+
+func parseBase64ImageDimensions(b64Data string) (int, int) {
+	if raw := decodeBase64Prefix(b64Data, 65536); len(raw) > 0 {
+		if w, h := parseImageDimensionsFromBytes(raw); w > 0 && h > 0 {
+			return w, h
+		}
+	}
+	if len(b64Data) > 65536 {
+		if raw := decodeBase64Prefix(b64Data, 0); len(raw) > 0 {
+			return parseImageDimensionsFromBytes(raw)
+		}
+	}
+	return 0, 0
+}
+
+// geminiImageBaseTokensForDimensions returns Google's official base output token count
+// for a generated image according to its pixel resolution tier (512 / 1K / 2K / 4K).
+func geminiImageBaseTokensForDimensions(w, h int) int {
+	if w <= 0 || h <= 0 {
+		return 0
+	}
+	maxDim := w
+	if h > maxDim {
+		maxDim = h
+	}
+	switch {
+	case maxDim <= 640:
+		return 747
+	case maxDim <= 1536:
+		return 1120
+	case maxDim <= 3072:
+		return 1680
+	default:
+		return 2520
+	}
+}
+
+func geminiPartInlineImageBaseTokens(part *dto.GeminiPart) int {
+	if part == nil || part.InlineData == nil || part.InlineData.Data == "" {
+		return 0
+	}
+	mime := strings.ToLower(strings.TrimSpace(part.InlineData.MimeType))
+	if mime != "" && !strings.HasPrefix(mime, "image/") {
+		return 0
+	}
+	w, h := parseBase64ImageDimensions(part.InlineData.Data)
+	return geminiImageBaseTokensForDimensions(w, h)
+}
+
+func geminiResponseInlineImageBaseTokens(response *dto.GeminiChatResponse) int {
+	if response == nil {
+		return 0
+	}
+	total := 0
+	for i := range response.Candidates {
+		for j := range response.Candidates[i].Content.Parts {
+			total += geminiPartInlineImageBaseTokens(&response.Candidates[i].Content.Parts[j])
+		}
+	}
+	return total
+}
+
+// ensureGeminiInlineImageUsageMetadata checks if the response contains generated inline images
+// whose official resolution-tier base token count (747 / 1120 / 1680 / 2520) was omitted by a
+// wrapped upstream (such as nano-banana-2 reporting only thinking tokens ~600-1100), and adds
+// the missing base image tokens so usageMetadata and logs match official Gemini image token counts.
+func ensureGeminiInlineImageUsageMetadata(response *dto.GeminiChatResponse) bool {
+	if response == nil {
+		return false
+	}
+	imgBaseTokens := geminiResponseInlineImageBaseTokens(response)
+	if imgBaseTokens <= 0 {
+		return false
+	}
+	if response.UsageMetadata.CandidatesTokenCount >= imgBaseTokens {
+		return false
+	}
+	response.UsageMetadata.CandidatesTokenCount += imgBaseTokens
+	total := response.UsageMetadata.PromptTokenCount +
+		response.UsageMetadata.ToolUsePromptTokenCount +
+		response.UsageMetadata.CandidatesTokenCount +
+		response.UsageMetadata.ThoughtsTokenCount
+	if total > response.UsageMetadata.TotalTokenCount {
+		response.UsageMetadata.TotalTokenCount = total
+	}
+	response.HasUsageMetadata = true
+	return true
 }
 
 func geminiResponseInlineImageCount(response *dto.GeminiChatResponse) int {
@@ -212,6 +390,7 @@ func handleFinalStream(c *gin.Context, info *relaycommon.RelayInfo, resp *dto.Ch
 func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response, callback func(data string, geminiResponse *dto.GeminiChatResponse) bool) (*dto.Usage, *types.NewAPIError) {
 	var usage = &dto.Usage{}
 	var imageCount int
+	var imageBaseTokens int
 	var hasBillableUsageMetadata bool
 	var streamErr error
 	var accumulatedUsageMetadata *dto.GeminiUsageMetadata
@@ -276,10 +455,13 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		}
 
 		// 统计图片数量与输出文本
-		for _, candidate := range geminiResponse.Candidates {
-			for _, part := range candidate.Content.Parts {
+		for i := range geminiResponse.Candidates {
+			candidate := &geminiResponse.Candidates[i]
+			for j := range candidate.Content.Parts {
+				part := &candidate.Content.Parts[j]
 				if part.InlineData != nil && part.InlineData.MimeType != "" {
 					imageCount++
+					imageBaseTokens += geminiPartInlineImageBaseTokens(part)
 				}
 				if part.Text != "" {
 					responseText.WriteString(part.Text)
@@ -325,13 +507,24 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 				TotalTokens:  info.GetEstimatePromptTokens(),
 			}
 		}
-		if imageCount != 0 && usage.CompletionTokens == 0 {
+		if imageBaseTokens > 0 && usage.CompletionTokens < imageBaseTokens {
+			usage.CompletionTokens += imageBaseTokens
+			usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+			common.SetContextKey(c, constant.ContextKeyLocalCountTokens, true)
+		} else if imageCount != 0 && usage.CompletionTokens == 0 {
 			usage.CompletionTokens = imageCount * 1400
 			usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 			common.SetContextKey(c, constant.ContextKeyLocalCountTokens, true)
 		}
 		attachEstimatedGeminiBillingUsage(usage)
 	} else {
+		if imageBaseTokens > 0 && usage.CompletionTokens < imageBaseTokens {
+			usage.CompletionTokens += imageBaseTokens
+			usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+			if usage.BillingUsage != nil {
+				usage.BillingUsage = dto.CloneBillingUsageWithEstimatedCompletion(usage.BillingUsage, usage.CompletionTokens)
+			}
+		}
 		patchGeminiZeroCompletionUsage(c, info, usage, responseText.String(), imageCount)
 	}
 

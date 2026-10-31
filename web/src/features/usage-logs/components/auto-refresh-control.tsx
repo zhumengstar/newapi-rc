@@ -56,11 +56,12 @@ interface AutoRefreshControlProps {
 function AutoRefreshControlInner({
   className,
   showManualButton = true,
-}: AutoRefreshControlProps) {
+  context,
+}: AutoRefreshControlProps & {
+  context: NonNullable<ReturnType<typeof useOptionalUsageLogsContext>>
+}) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
-  const context = useOptionalUsageLogsContext()
-  if (!context) return null
   const {
     autoRefresh,
     setAutoRefresh,
@@ -69,9 +70,9 @@ function AutoRefreshControlInner({
     triggerRefresh,
   } = context
 
-  const isFetchingLogs =
-    useIsFetching({ queryKey: ['logs'] }) > 0 ||
-    useIsFetching({ queryKey: ['usage-logs-stats'] }) > 0
+  const fetchingLogsCount = useIsFetching({ queryKey: ['logs'] })
+  const fetchingStatsCount = useIsFetching({ queryKey: ['usage-logs-stats'] })
+  const isFetchingLogs = fetchingLogsCount > 0 || fetchingStatsCount > 0
 
   const handleManualRefresh = useCallback(() => {
     triggerRefresh()
@@ -199,5 +200,5 @@ function AutoRefreshControlInner({
 export function AutoRefreshControl(props: AutoRefreshControlProps) {
   const context = useOptionalUsageLogsContext()
   if (!context) return null
-  return <AutoRefreshControlInner {...props} />
+  return <AutoRefreshControlInner {...props} context={context} />
 }

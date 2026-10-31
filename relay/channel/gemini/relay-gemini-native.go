@@ -106,6 +106,13 @@ func GeminiTextGenerationHandler(c *gin.Context, info *relaycommon.RelayInfo, re
 		}
 	}
 
+	// 如果上游返回了内联生成图片但漏算了图片档位基础 Token（如 nano-banana-2 仅上报思考 Token），自动补齐并同步回写响应体
+	if !isSafetyBlock && ensureGeminiInlineImageUsageMetadata(&geminiResponse) {
+		if newBody, errMarshal := common.Marshal(&geminiResponse); errMarshal == nil {
+			responseBody = newBody
+		}
+	}
+
 	// 计算使用量（优先上游 UsageMetadata，缺失时本地估算并保留 Gemini 计费语义）
 	usage := buildUsageFromGeminiResponse(c, info, &geminiResponse)
 	if isSafetyBlock {
