@@ -210,4 +210,11 @@ func TestGetChannelApiAddresses(t *testing.T) {
 	assert.Equal(t, int64(3500), vipAddresses[0].UsedQuota)
 	assert.Equal(t, "https://api.other.com", vipAddresses[1].BaseURL)
 	assert.Equal(t, int64(100), vipAddresses[1].UsedQuota)
+
+	// Large time range (e.g. 30 days) - should not hang and return full addresses
+	largeRangeAddrs, err := GetChannelApiAddresses("", "", int64(1790870400), int64(1793462399))
+	require.NoError(t, err)
+	require.Len(t, largeRangeAddrs, 3)
+	assert.Equal(t, "https://api.example.com", largeRangeAddrs[0].BaseURL)
+	assert.Equal(t, int64(3500), largeRangeAddrs[0].UsedQuota)
 }

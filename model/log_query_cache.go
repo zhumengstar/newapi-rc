@@ -23,7 +23,7 @@ var logCountCache = struct {
 var logCountGroup singleflight.Group
 
 func logCountCacheTTL() time.Duration {
-	seconds := common.GetEnvOrDefault("LOG_COUNT_CACHE_TTL_SECONDS", 10)
+	seconds := common.GetEnvOrDefault("LOG_COUNT_CACHE_TTL_SECONDS", 60)
 	if seconds < 0 {
 		seconds = 0
 	}
