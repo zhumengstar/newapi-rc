@@ -1133,20 +1133,7 @@ var (
 	channelTodayIncomeDetailGroup     singleflight.Group
 )
 
-// GetCachedChannelTodayIncomeDetail 获取每个渠道及渠道在各个分组下的当天消耗，每 30 分钟缓存刷新一次
-func GetCachedChannelTodayIncomeDetail(force bool) (*ChannelTodayIncomeDetail, time.Time, error) {
-	now := time.Now()
-	if !force {
-		channelTodayIncomeDetailCacheLock.RLock()
-		if now.Before(channelTodayIncomeDetailCacheExp) && channelTodayIncomeDetailCache != nil {
-			res := channelTodayIncomeDetailCache
-			exp := channelTodayIncomeDetailCacheExp
-			channelTodayIncomeDetailCacheLock.RUnlock()
-			return res, exp, nil
-		}
-		channelTodayIncomeDetailCacheLock.RUnlock()
-	}
-
+func refreshChannelTodayIncomeDetail(force bool) (*ChannelTodayIncomeDetail, time.Time, error) {
 	val, err, _ := channelTodayIncomeDetailGroup.Do("channel_today_income_detail", func() (any, error) {
 		now := time.Now()
 		if !force {
@@ -1171,7 +1158,10 @@ func GetCachedChannelTodayIncomeDetail(force bool) (*ChannelTodayIncomeDetail, t
 			TodayQuota int64  `gorm:"column:today_quota"`
 		}
 		var rows []channelGroupQuotaRow
-		err := quotaDB.Table("logs").
+		ctx, cancel := context.WithTimeout(context.Background(), 3500*time.Millisecond)
+		defer cancel()
+
+		err := quotaDB.WithContext(ctx).Table("logs").
 			Select("channel_id, COALESCE(\"group\", 'default') AS \"group\", COALESCE(SUM(quota), 0) AS today_quota").
 			Where("type = ? AND created_at >= ? AND channel_id > 0", LogTypeConsume, todayStart).
 			Group("channel_id, \"group\"").
@@ -1202,16 +1192,75 @@ func GetCachedChannelTodayIncomeDetail(force bool) (*ChannelTodayIncomeDetail, t
 
 		channelTodayIncomeDetailCacheLock.Lock()
 		channelTodayIncomeDetailCache = detail
-		channelTodayIncomeDetailCacheExp = now.Add(30 * time.Minute) // 严格遵循每半小时更新一次
+		channelTodayIncomeDetailCacheExp = time.Now().Add(30 * time.Minute) // 严格遵循每半小时更新一次
 		channelTodayIncomeDetailCacheLock.Unlock()
 
 		return detail, nil
 	})
-
 	if err != nil {
 		return nil, time.Time{}, err
 	}
-	return val.(*ChannelTodayIncomeDetail), channelTodayIncomeDetailCacheExp, nil
+	channelTodayIncomeDetailCacheLock.RLock()
+	exp := channelTodayIncomeDetailCacheExp
+	channelTodayIncomeDetailCacheLock.RUnlock()
+	return val.(*ChannelTodayIncomeDetail), exp, nil
+}
+
+// GetCachedChannelTodayIncomeDetail 获取每个渠道及渠道在各个分组下的当天消耗，每 30 分钟缓存刷新一次
+func GetCachedChannelTodayIncomeDetail(force bool) (*ChannelTodayIncomeDetail, time.Time, error) {
+	now := time.Now()
+	if !force {
+		channelTodayIncomeDetailCacheLock.RLock()
+		cached := channelTodayIncomeDetailCache
+		exp := channelTodayIncomeDetailCacheExp
+		channelTodayIncomeDetailCacheLock.RUnlock()
+
+		if cached != nil {
+			if now.After(exp) {
+				// Stale-While-Revalidate: 立即返回已有缓存，后台异步刷新，绝不阻塞前端请求
+				go func() {
+					_, _, _ = refreshChannelTodayIncomeDetail(true)
+				}()
+			}
+			return cached, exp, nil
+		}
+	}
+
+	return refreshChannelTodayIncomeDetail(force)
+}
+
+// GetCachedChannelTodayIncomeDetailFast 非阻塞快速获取当天消耗详情：
+// 若缓存已存在则 0ms 立即返回；若冷启动首次尚无缓存，最多等待 maxWait，超时则转后台继续预热并立即返回空结构，确保接口秒开。
+func GetCachedChannelTodayIncomeDetailFast(maxWait time.Duration) *ChannelTodayIncomeDetail {
+	channelTodayIncomeDetailCacheLock.RLock()
+	cached := channelTodayIncomeDetailCache
+	exp := channelTodayIncomeDetailCacheExp
+	channelTodayIncomeDetailCacheLock.RUnlock()
+
+	if cached != nil {
+		if time.Now().After(exp) {
+			go func() {
+				_, _, _ = refreshChannelTodayIncomeDetail(true)
+			}()
+		}
+		return cached
+	}
+
+	type result struct {
+		detail *ChannelTodayIncomeDetail
+	}
+	ch := make(chan result, 1)
+	go func() {
+		d, _, _ := refreshChannelTodayIncomeDetail(false)
+		ch <- result{detail: d}
+	}()
+
+	select {
+	case res := <-ch:
+		return res.detail
+	case <-time.After(maxWait):
+		return nil
+	}
 }
 
 // GetCachedChannelTodayIncomeMap 获取每个渠道当天的消耗额度 (Quota)，兼容老函数

@@ -25,6 +25,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/i18n"
@@ -204,7 +205,7 @@ func GetChannelSources(c *gin.Context) {
 
 	customerGroupRatios := ratio_setting.GetGroupRatioCopy()
 	savedProfiles := loadUpstreamSourceCostProfiles()
-	incomeDetail, _, _ := model.GetCachedChannelTodayIncomeDetail(false)
+	incomeDetail := model.GetCachedChannelTodayIncomeDetailFast(500 * time.Millisecond)
 
 	sourceMap := make(map[string]*UpstreamSourceDTO)
 	groupSets := make(map[string]map[string]struct{})

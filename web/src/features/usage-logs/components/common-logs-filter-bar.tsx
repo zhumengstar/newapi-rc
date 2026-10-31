@@ -309,19 +309,21 @@ export function CommonLogsFilterBar<TData>(
     staleTime: 30 * 1000,
   })
 
-  const { data: channelSourcesData } = useQuery({
-    queryKey: ['channel-sources-list'],
-    queryFn: async () => {
-      try {
-        const res = await getChannelSources()
-        return res?.data ?? []
-      } catch {
-        return []
-      }
-    },
-    enabled: isAdmin,
-    staleTime: 30 * 1000,
-  })
+  const { data: channelSourcesData, isLoading: channelSourcesLoading } =
+    useQuery({
+      queryKey: ['channel-sources-list'],
+      queryFn: async () => {
+        try {
+          const res = await getChannelSources()
+          if (Array.isArray(res)) return res
+          return (res as unknown as { data?: UpstreamSourceDTO[] })?.data ?? []
+        } catch {
+          return []
+        }
+      },
+      enabled: isAdmin,
+      staleTime: 60 * 1000,
+    })
 
   const sourceByBaseUrl = useMemo(() => {
     const map = new Map<string, UpstreamSourceDTO>()
@@ -329,6 +331,14 @@ export function CommonLogsFilterBar<TData>(
       const norm = s.base_url.trim().toLowerCase().replace(/\/+$/, '')
       if (norm) map.set(norm, s)
       map.set(s.base_url, s)
+      if (s.display_base_url) {
+        map.set(s.display_base_url, s)
+        const dispNorm = s.display_base_url
+          .trim()
+          .toLowerCase()
+          .replace(/\/+$/, '')
+        if (dispNorm) map.set(dispNorm, s)
+      }
     }
     return map
   }, [channelSourcesData])
