@@ -173,9 +173,25 @@ func getImageToken(c *gin.Context, fileMeta *types.FileMeta, model string, strea
 	return tiles*tileTokens + baseTokens, nil
 }
 
+func isGroupRequiringTokenCount(info *relaycommon.RelayInfo) bool {
+	if info == nil {
+		return false
+	}
+	if strings.TrimSpace(info.UsingGroup) == "cc反重力按次" {
+		return true
+	}
+	if strings.TrimSpace(info.UsingGroup) == "" {
+		if strings.TrimSpace(info.TokenGroup) == "cc反重力按次" ||
+			strings.TrimSpace(info.UserGroup) == "cc反重力按次" {
+			return true
+		}
+	}
+	return false
+}
+
 func EstimateRequestToken(c *gin.Context, meta *types.TokenCountMeta, info *relaycommon.RelayInfo) (int, error) {
-	// 是否统计token
-	if !constant.CountToken {
+	// 是否统计token（特定按次限流分组强制统计）
+	if !constant.CountToken && !isGroupRequiringTokenCount(info) {
 		return 0, nil
 	}
 	return CountRequestToken(c, meta, info)
@@ -231,7 +247,7 @@ func CountRequestToken(c *gin.Context, meta *types.TokenCountMeta, info *relayco
 		tkm += CountTextToken(meta.CombineText, model)
 	}
 
-	if info.RelayFormat == types.RelayFormatOpenAI {
+	if info.RelayFormat == types.RelayFormatOpenAI || info.RelayFormat == types.RelayFormatClaude {
 		tkm += meta.ToolsCount * 8
 		tkm += meta.MessagesCount * 3 // 每条消息的格式化token数量
 		tkm += meta.NameCount * 3

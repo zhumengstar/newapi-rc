@@ -78,11 +78,13 @@ func EstimateToken(provider Provider, text string) int {
 		Number
 	)
 	currentWordType := None
+	currentRunLen := 0
 
 	for _, r := range text {
 		// 1. 处理空格和换行符
 		if unicode.IsSpace(r) {
 			currentWordType = None
+			currentRunLen = 0
 			// 换行符和制表符使用Newline权重
 			if r == '\n' || r == '\t' {
 				count += m.Newline
@@ -96,6 +98,7 @@ func EstimateToken(provider Provider, text string) int {
 		// 2. 处理 CJK (中日韩) - 按字符计费
 		if isCJK(r) {
 			currentWordType = None
+			currentRunLen = 0
 			count += m.CJK
 			continue
 		}
@@ -103,6 +106,7 @@ func EstimateToken(provider Provider, text string) int {
 		// 3. 处理Emoji - 使用专门的Emoji权重
 		if isEmoji(r) {
 			currentWordType = None
+			currentRunLen = 0
 			count += m.Emoji
 			continue
 		}
@@ -116,8 +120,7 @@ func EstimateToken(provider Provider, text string) int {
 			}
 
 			// 如果之前不在单词中，或者类型发生变化（字母<->数字），则视为新token
-			// 注意：对于OpenAI，通常"version 3.5"会切分，"abc123xyz"有时也会切分
-			// 这里简单起见，字母和数字切换时增加权重
+			// 注意：对于OpenAI/Claude，长标识符（camelCase/路径/Base64）或长数字串会被切分为多个subword token
 			if currentWordType == None || currentWordType != newType {
 				if newType == Number {
 					count += m.Number
@@ -125,13 +128,25 @@ func EstimateToken(provider Provider, text string) int {
 					count += m.Word
 				}
 				currentWordType = newType
+				currentRunLen = 1
+			} else {
+				currentRunLen++
+				if newType == Number {
+					if (currentRunLen-1)%4 == 0 {
+						count += m.Number
+					}
+				} else {
+					if (currentRunLen-1)%6 == 0 {
+						count += m.Word
+					}
+				}
 			}
-			// 单词中间的字符不额外计费
 			continue
 		}
 
 		// 5. 处理标点符号/特殊字符 - 按类型使用不同权重
 		currentWordType = None
+		currentRunLen = 0
 		if isMathSymbol(r) {
 			count += m.MathSymbol
 		} else if r == '@' {

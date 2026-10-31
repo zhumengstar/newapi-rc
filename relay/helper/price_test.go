@@ -811,3 +811,43 @@ func TestGetUserPerCallModelPriceCompatibilityAndMapping(t *testing.T) {
 	assert.Equal(t, 0.08, p3)
 }
 
+func TestModelPriceHelperRejectsOver200kInputForCCAntigravityPerCall(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"claude-opus-4-6-c":0.18}`))
+	require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"cc反重力按次":1,"cc反重力按量":0.3}`))
+
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+
+	// 1) cc反重力按次 <= 200,000 Tokens -> 允许通过
+	infoOk := &relaycommon.RelayInfo{
+		OriginModelName: "claude-opus-4-6-c",
+		UserGroup:       "cc反重力按次",
+		UsingGroup:      "cc反重力按次",
+	}
+	priceData, err := ModelPriceHelper(ctx, infoOk, 200000, &types.TokenCountMeta{})
+	require.NoError(t, err)
+	assert.True(t, priceData.UsePrice)
+	assert.Equal(t, 0.18, priceData.ModelPrice)
+
+	// 2) cc反重力按次 > 200,000 Tokens -> 拒绝请求
+	infoOver := &relaycommon.RelayInfo{
+		OriginModelName: "claude-opus-4-6-c",
+		UserGroup:       "cc反重力按次",
+		UsingGroup:      "cc反重力按次",
+	}
+	_, err = ModelPriceHelper(ctx, infoOver, 200001, &types.TokenCountMeta{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cc反重力按次")
+	assert.Contains(t, err.Error(), "200000")
+
+	// 3) 其他分组（如 cc反重力按量）> 200,000 Tokens -> 不受该按次分组限制
+	infoOtherGroup := &relaycommon.RelayInfo{
+		OriginModelName: "claude-opus-4-6-c",
+		UserGroup:       "cc反重力按量",
+		UsingGroup:      "cc反重力按量",
+	}
+	_, err = ModelPriceHelper(ctx, infoOtherGroup, 265000, &types.TokenCountMeta{})
+	require.NoError(t, err)
+}
+
+

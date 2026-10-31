@@ -154,6 +154,42 @@ func HandleGroupRatio(ctx *gin.Context, relayInfo *relaycommon.RelayInfo) hostty
 	return groupRatioInfo
 }
 
+const (
+	GroupCCAntigravityPerCall          = "cc反重力按次"
+	CCAntigravityPerCallMaxInputTokens = 200000
+)
+
+func IsCCAntigravityPerCallGroup(info *relaycommon.RelayInfo) bool {
+	if info == nil {
+		return false
+	}
+	if strings.TrimSpace(info.UsingGroup) == GroupCCAntigravityPerCall {
+		return true
+	}
+	if strings.TrimSpace(info.UsingGroup) == "" {
+		if strings.TrimSpace(info.TokenGroup) == GroupCCAntigravityPerCall ||
+			strings.TrimSpace(info.UserGroup) == GroupCCAntigravityPerCall {
+			return true
+		}
+	}
+	return false
+}
+
+func ValidateGroupInputTokenLimit(info *relaycommon.RelayInfo, promptTokens int) error {
+	if !IsCCAntigravityPerCallGroup(info) {
+		return nil
+	}
+	tokens := promptTokens
+	if info != nil && info.GetEstimatePromptTokens() > tokens {
+		tokens = info.GetEstimatePromptTokens()
+	}
+	if tokens > CCAntigravityPerCallMaxInputTokens {
+		return fmt.Errorf("分组 %s 限制单次请求输入不超过 %d Tokens（当前输入约 %d Tokens），请压缩上下文或切换至按量分组",
+			GroupCCAntigravityPerCall, CCAntigravityPerCallMaxInputTokens, tokens)
+	}
+	return nil
+}
+
 func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens int, meta *types.TokenCountMeta) (hosttypes.PriceData, error) {
 	if info != nil {
 		if matched := resolveBillingModelName(info.GetOriginModelName()); matched != "" && matched != info.OriginModelName {
@@ -164,6 +200,9 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 	modelPrice, usePrice := ratio_setting.GetModelPrice(billingModelName, false)
 
 	groupRatioInfo := HandleGroupRatio(c, info)
+	if err := ValidateGroupInputTokenLimit(info, promptTokens); err != nil {
+		return hosttypes.PriceData{}, err
+	}
 
 	if userModelPrice, ok := getUserPerCallModelPrice(info); ok {
 		modelPrice = userModelPrice

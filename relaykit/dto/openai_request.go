@@ -203,6 +203,28 @@ func (r *GeneralOpenAIRequest) GetTokenCountMeta() *types.TokenCountMeta {
 				dynamicTools = append(dynamicTools, messageTools...)
 			}
 		}
+		if len(message.ToolCalls) > 0 {
+			for _, tc := range message.ParseToolCalls() {
+				if tc.ID != "" {
+					texts = append(texts, tc.ID)
+				}
+				if tc.Function.Name != "" {
+					texts = append(texts, tc.Function.Name)
+				}
+				if tc.Function.Arguments != "" {
+					texts = append(texts, tc.Function.Arguments)
+				}
+				if len(tc.Custom) > 0 {
+					texts = append(texts, string(tc.Custom))
+				}
+			}
+		}
+		if message.ToolCallId != "" {
+			texts = append(texts, message.ToolCallId)
+		}
+		if rc := message.GetReasoningContent(); rc != "" {
+			texts = append(texts, rc)
+		}
 		if message.Content != nil {
 			if message.Name != nil {
 				tokenCountMeta.NameCount++
