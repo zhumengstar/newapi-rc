@@ -193,11 +193,12 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	}()
 
 	retryParam := &service.RetryParam{
-		Ctx:         c,
-		TokenGroup:  relayInfo.TokenGroup,
-		ModelName:   relayInfo.OriginModelName,
-		RequestPath: c.Request.URL.Path,
-		Retry:       common.GetPointer(0),
+		Ctx:            c,
+		TokenGroup:     relayInfo.TokenGroup,
+		ModelName:      relayInfo.OriginModelName,
+		RequestPath:    c.Request.URL.Path,
+		Retry:          common.GetPointer(0),
+		AllowMultiPass: true,
 	}
 	relayInfo.RetryIndex = 0
 	relayInfo.LastError = nil
@@ -301,11 +302,6 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			break
 		}
 		retryParam.MarkChannelTried(channel.Id)
-		if isHostLevelFailure(newAPIError) && channel.GetBaseURL() != "" {
-			for _, peerId := range model.GetChannelIdsWithBaseURL(channel.GetBaseURL()) {
-				retryParam.MarkChannelTried(peerId)
-			}
-		}
 		if !waitBeforeChannelRetry(c, newAPIError, retryParam.GetRetry()) {
 			service.SettleInterruptedRequestIfNeeded(c, relayInfo, nil, newAPIError)
 			break
@@ -1067,11 +1063,12 @@ func executeTaskSubmissionWith(
 	}
 
 	retryParam := &service.RetryParam{
-		Ctx:         c,
-		TokenGroup:  relayInfo.TokenGroup,
-		ModelName:   relayInfo.OriginModelName,
-		RequestPath: c.Request.URL.Path,
-		Retry:       common.GetPointer(0),
+		Ctx:            c,
+		TokenGroup:     relayInfo.TokenGroup,
+		ModelName:      relayInfo.OriginModelName,
+		RequestPath:    c.Request.URL.Path,
+		Retry:          common.GetPointer(0),
+		AllowMultiPass: true,
 	}
 
 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {

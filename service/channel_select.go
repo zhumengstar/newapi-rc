@@ -39,12 +39,15 @@ func AppendTaskPluginIdentityFilter(c *gin.Context, pluginKey string) {
 }
 
 type RetryParam struct {
-	Ctx             *gin.Context
-	TokenGroup      string
-	ModelName       string
-	RequestPath     string
-	Retry           *int
-	TriedChannelIds map[int]bool
+	Ctx                *gin.Context
+	TokenGroup         string
+	ModelName          string
+	RequestPath        string
+	Retry              *int
+	TriedChannelIds    map[int]bool
+	TriedChannelCounts map[int]int
+	LastTriedChannelId int
+	AllowMultiPass     bool
 }
 
 func (p *RetryParam) GetRetry() int {
@@ -66,13 +69,18 @@ func (p *RetryParam) MarkChannelTried(channelId int) {
 		p.TriedChannelIds = make(map[int]bool)
 	}
 	p.TriedChannelIds[channelId] = true
+	if p.TriedChannelCounts == nil {
+		p.TriedChannelCounts = make(map[int]int)
+	}
+	p.TriedChannelCounts[channelId]++
+	p.LastTriedChannelId = channelId
 }
 
-func getRandomSatisfiedChannel(group string, param *RetryParam, priorityRetry int, filters []dto.ChannelFilter) (*model.Channel, error) {
-	if len(param.TriedChannelIds) > 0 {
+func getRandomSatisfiedChannelWithWrap(group string, param *RetryParam, priorityRetry int, filters []dto.ChannelFilter, allowFullWrap bool) (*model.Channel, error) {
+	if len(param.TriedChannelIds) > 0 || len(param.TriedChannelCounts) > 0 {
 		priorityRetry = 0
 	}
-	excludedChannels := param.TriedChannelIds
+	var hardExcluded map[int]bool
 	var userId int
 	if param.Ctx != nil {
 		userId = param.Ctx.GetInt("id")
@@ -84,7 +92,7 @@ func getRandomSatisfiedChannel(group string, param *RetryParam, priorityRetry in
 				}
 				// 复制或者合并排除列表：不在 allowedSet 里的全部排除
 				mergedExcluded := make(map[int]bool)
-				for id, v := range excludedChannels {
+				for id, v := range hardExcluded {
 					if v {
 						mergedExcluded[id] = true
 					}
@@ -96,15 +104,15 @@ func getRandomSatisfiedChannel(group string, param *RetryParam, priorityRetry in
 						mergedExcluded[cid] = true
 					}
 				}
-				excludedChannels = mergedExcluded
+				hardExcluded = mergedExcluded
 			}
 		}
 
 		if userId > 0 && model.IsUserRestrictedInGroup(group, userId) {
 			allowedSet := model.GetUserAllowedChannelsInGroup(group, userId)
 			candidates := model.GetGroupChannelIds(group)
-			mergedExcluded := make(map[int]bool, len(excludedChannels)+len(candidates))
-			for id, v := range excludedChannels {
+			mergedExcluded := make(map[int]bool, len(hardExcluded)+len(candidates))
+			for id, v := range hardExcluded {
 				if v {
 					mergedExcluded[id] = true
 				}
@@ -114,10 +122,42 @@ func getRandomSatisfiedChannel(group string, param *RetryParam, priorityRetry in
 					mergedExcluded[cid] = true
 				}
 			}
-			excludedChannels = mergedExcluded
+			hardExcluded = mergedExcluded
 		}
 	}
+
+	var triedCounts map[int]int
+	if len(param.TriedChannelCounts) > 0 || len(param.TriedChannelIds) > 0 {
+		triedCounts = make(map[int]int, len(param.TriedChannelCounts)+len(param.TriedChannelIds))
+		for id, cnt := range param.TriedChannelCounts {
+			if cnt > 0 {
+				triedCounts[id] = cnt
+			}
+		}
+		for id, v := range param.TriedChannelIds {
+			if v && triedCounts[id] == 0 {
+				triedCounts[id] = 1
+			}
+		}
+	}
+
+	excludedChannels := model.BuildEffectiveRetryExcludedChannelIds(
+		group,
+		param.ModelName,
+		userId,
+		filters,
+		hardExcluded,
+		triedCounts,
+		param.LastTriedChannelId,
+		param.AllowMultiPass,
+		allowFullWrap,
+	)
 	return model.GetRandomSatisfiedChannelForUserExcluding(group, param.ModelName, userId, priorityRetry, filters, excludedChannels)
+}
+
+func getRandomSatisfiedChannel(group string, param *RetryParam, priorityRetry int, filters []dto.ChannelFilter) (*model.Channel, error) {
+	allowFullWrap := param.TokenGroup != "auto"
+	return getRandomSatisfiedChannelWithWrap(group, param, priorityRetry, filters, allowFullWrap)
 }
 
 // CacheGetRandomSatisfiedChannel tries to get a random channel that satisfies the requirements.
@@ -182,6 +222,30 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 			common.SetContextKey(param.Ctx, constant.ContextKeyAutoGroupIndex, i)
 			common.SetContextKey(param.Ctx, constant.ContextKeyAutoGroupRetryIndex, priorityRetry+1)
 			break
+		}
+
+		if channel == nil && param.AllowMultiPass {
+			endIdx := len(autoGroups)
+			if !crossGroupRetry {
+				endIdx = startGroupIndex + 1
+				if endIdx > len(autoGroups) {
+					endIdx = len(autoGroups)
+				}
+			}
+			startIdx := 0
+			if !crossGroupRetry {
+				startIdx = startGroupIndex
+			}
+			for i := startIdx; i < endIdx; i++ {
+				autoGroup := autoGroups[i]
+				channel, _ = getRandomSatisfiedChannelWithWrap(autoGroup, param, 0, filters, true)
+				if channel != nil {
+					common.SetContextKey(param.Ctx, constant.ContextKeyAutoGroup, autoGroup)
+					common.SetContextKey(param.Ctx, constant.ContextKeyAutoGroupIndex, i)
+					selectGroup = autoGroup
+					break
+				}
+			}
 		}
 	} else {
 		priorityRetry := param.GetRetry()

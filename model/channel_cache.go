@@ -420,6 +420,207 @@ func filterChannelsByExcludedChannelIds(channelIds []int, excludedChannelIds map
 	return filtered
 }
 
+// BuildEffectiveRetryExcludedChannelIds 根据渠道已尝试次数与优先级计算当前重试应排除的渠道集合：
+// 1. 同优先级存在多个不同渠道（len >= 2）时，在降级到下一优先级前支持同优先级多轮交替重试（每周期 2 轮）；
+// 2. 所有优先级完成一轮尝试后，若仍未达到最大重试次数（allowFullWrap=true），自动开启下一周期从最高优先级继续轮询重试；
+// 3. 同一优先级存在多个候选时，自动规避刚失败的 lastTriedId，防止连续两次打到同一渠道。
+func BuildEffectiveRetryExcludedChannelIds(
+	group string,
+	modelName string,
+	userId int,
+	filters []dto.ChannelFilter,
+	hardExcluded map[int]bool,
+	triedCounts map[int]int,
+	lastTriedId int,
+	allowMultiPass bool,
+	allowFullWrap bool,
+) map[int]bool {
+	mergeAllTried := func() map[int]bool {
+		if len(hardExcluded) == 0 && len(triedCounts) == 0 {
+			return nil
+		}
+		res := make(map[int]bool, len(hardExcluded)+len(triedCounts))
+		for id, v := range hardExcluded {
+			if v {
+				res[id] = true
+			}
+		}
+		for id, cnt := range triedCounts {
+			if cnt > 0 {
+				res[id] = true
+			}
+		}
+		return res
+	}
+
+	if len(triedCounts) == 0 {
+		return hardExcluded
+	}
+	if !allowMultiPass {
+		return mergeAllTried()
+	}
+
+	type candidateMeta struct {
+		id       int
+		priority int64
+		enabled  bool
+	}
+
+	var candidates []candidateMeta
+	if common.MemoryCacheEnabled {
+		channelSyncLock.RLock()
+		var candidatePool []int
+		isRestricted := userId > 0 && group2userRestricted != nil && group2userRestricted[group] != nil && group2userRestricted[group][userId]
+		if isRestricted {
+			if group2userModel2channels != nil && group2userModel2channels[group] != nil && group2userModel2channels[group][userId] != nil {
+				candidatePool = group2userModel2channels[group][userId][modelName]
+				if len(candidatePool) == 0 {
+					normalizedModel := ratio_setting.RoutingMatchModelName(modelName)
+					if normalizedModel != "" && normalizedModel != modelName {
+						candidatePool = group2userModel2channels[group][userId][normalizedModel]
+					}
+				}
+			}
+		} else {
+			if group2model2channels != nil && group2model2channels[group] != nil {
+				candidatePool = group2model2channels[group][modelName]
+				if len(candidatePool) == 0 {
+					normalizedModel := ratio_setting.RoutingMatchModelName(modelName)
+					if normalizedModel != "" && normalizedModel != modelName {
+						candidatePool = group2model2channels[group][normalizedModel]
+					}
+				}
+			}
+		}
+		filteredIDs, _ := filterCandidateIDs(candidatePool, modelName, filters)
+		filteredIDs = filterChannelsByExcludedChannelIds(filteredIDs, hardExcluded)
+		for _, cid := range filteredIDs {
+			if ch, ok := channelsIDM[cid]; ok && ch != nil {
+				candidates = append(candidates, candidateMeta{
+					id:       cid,
+					priority: ch.GetRoutingPriority(),
+					enabled:  ch.Status == common.ChannelStatusEnabled,
+				})
+			}
+		}
+		channelSyncLock.RUnlock()
+	} else {
+		var abilities []Ability
+		if err := DB.Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, modelName, true).Order("priority DESC, weight DESC").Find(&abilities).Error; err == nil {
+			abilities = filterAbilitiesByConstraints(abilities, modelName, filters)
+			abilities = applyChannelRoutingPriorities(abilities)
+			for _, ab := range abilities {
+				if hardExcluded != nil && hardExcluded[ab.ChannelId] {
+					continue
+				}
+				prio := int64(0)
+				if ab.Priority != nil {
+					prio = *ab.Priority
+				}
+				candidates = append(candidates, candidateMeta{
+					id:       ab.ChannelId,
+					priority: prio,
+					enabled:  ab.Enabled,
+				})
+			}
+		}
+	}
+
+	// 过滤掉已禁用且已尝试过的渠道（禁用渠道不允许二次重试）
+	validCandidates := make([]candidateMeta, 0, len(candidates))
+	for _, c := range candidates {
+		if !c.enabled && triedCounts[c.id] > 0 {
+			continue
+		}
+		validCandidates = append(validCandidates, c)
+	}
+	if len(validCandidates) == 0 {
+		return mergeAllTried()
+	}
+
+	prioMap := make(map[int64][]int)
+	var sortedPriorities []int64
+	for _, c := range validCandidates {
+		if _, exists := prioMap[c.priority]; !exists {
+			sortedPriorities = append(sortedPriorities, c.priority)
+		}
+		prioMap[c.priority] = append(prioMap[c.priority], c.id)
+	}
+	sort.Slice(sortedPriorities, func(i, j int) bool {
+		return sortedPriorities[i] > sortedPriorities[j]
+	})
+
+	maxCycles := 1
+	if allowFullWrap {
+		maxCycles = 64
+	}
+
+	for cycle := 1; cycle <= maxCycles; cycle++ {
+		for _, prio := range sortedPriorities {
+			tierIds := prioMap[prio]
+			baseRounds := 1
+			if len(tierIds) >= 2 {
+				// 同优先级有多个不同渠道时，支持在同优先级内多轮重试（2轮）后再降级
+				baseRounds = 2
+			}
+			maxTries := cycle * baseRounds
+
+			minTries := int(^uint(0) >> 1)
+			for _, cid := range tierIds {
+				t := triedCounts[cid]
+				if t < minTries {
+					minTries = t
+				}
+			}
+
+			if minTries < maxTries {
+				eligible := make([]int, 0, len(tierIds))
+				for _, cid := range tierIds {
+					if triedCounts[cid] == minTries {
+						eligible = append(eligible, cid)
+					}
+				}
+				if len(eligible) > 1 && lastTriedId > 0 {
+					withoutLast := make([]int, 0, len(eligible))
+					for _, cid := range eligible {
+						if cid != lastTriedId {
+							withoutLast = append(withoutLast, cid)
+						}
+					}
+					if len(withoutLast) > 0 {
+						eligible = withoutLast
+					}
+				}
+
+				eligibleSet := make(map[int]bool, len(eligible))
+				for _, cid := range eligible {
+					eligibleSet[cid] = true
+				}
+
+				effectiveExcluded := make(map[int]bool, len(hardExcluded)+len(validCandidates)+len(triedCounts))
+				for id, v := range hardExcluded {
+					if v {
+						effectiveExcluded[id] = true
+					}
+				}
+				for _, c := range validCandidates {
+					if !eligibleSet[c.id] {
+						effectiveExcluded[c.id] = true
+					}
+				}
+				for id, cnt := range triedCounts {
+					if cnt > 0 && !eligibleSet[id] {
+						effectiveExcluded[id] = true
+					}
+				}
+				return effectiveExcluded
+			}
+		}
+	}
+
+	return mergeAllTried()
+}
+
 func CacheGetChannel(id int) (*Channel, error) {
 	if !common.MemoryCacheEnabled {
 		return GetChannelById(id, true)
