@@ -76,9 +76,14 @@ export function ComboboxInput({
   const [highlightedIndex, setHighlightedIndex] = React.useState(-1)
   const [hoverSide, setHoverSide] = React.useState<'left' | 'right'>('left')
   const containerRef = React.useRef<HTMLDivElement>(null)
+  const hoverPanelRef = React.useRef<HTMLDivElement>(null)
   const inputRef = React.useRef<HTMLInputElement>(null)
   const listRef = React.useRef<HTMLUListElement>(null)
   const pointerFocusRef = React.useRef(false)
+  const pointerDownInsideRef = React.useRef(false)
+  const isHoveringPanelRef = React.useRef(false)
+  const hoverIntentTimerRef = React.useRef<number | null>(null)
+  const highlightedValueRef = React.useRef<string | null>(null)
   const selectedOption = React.useMemo(
     () => (value ? options.find((option) => option.value === value) : undefined),
     [options, value]
@@ -95,10 +100,29 @@ export function ComboboxInput({
     )
   }, [options, searchValue, searchChanged])
 
-  // Reset highlight when filtered options change
+  // Preserve highlighted option across background options refreshes; only reset on search text change
   React.useEffect(() => {
     setHighlightedIndex(-1)
-  }, [filteredOptions])
+    highlightedValueRef.current = null
+  }, [searchValue])
+
+  React.useEffect(() => {
+    if (highlightedValueRef.current == null) return
+    const nextIdx = filteredOptions.findIndex(
+      (opt) => opt.value === highlightedValueRef.current
+    )
+    if (nextIdx >= 0 && nextIdx !== highlightedIndex) {
+      setHighlightedIndex(nextIdx)
+    }
+  }, [filteredOptions, highlightedIndex])
+
+  React.useEffect(() => {
+    return () => {
+      if (hoverIntentTimerRef.current !== null) {
+        window.clearTimeout(hoverIntentTimerRef.current)
+      }
+    }
+  }, [])
 
   React.useEffect(() => {
     if (!open || !renderOptionHoverPanel || !containerRef.current) return
@@ -193,7 +217,19 @@ export function ComboboxInput({
     (filteredOptions.length > 0 || (allowCustomValue && searchValue.trim()))
 
   return (
-    <div ref={containerRef} className='relative'>
+    <div
+      ref={containerRef}
+      className='relative'
+      onMouseDownCapture={() => {
+        pointerDownInsideRef.current = true
+        const resetPointerDown = () => {
+          window.setTimeout(() => {
+            pointerDownInsideRef.current = false
+          }, 50)
+        }
+        window.addEventListener('mouseup', resetPointerDown, { once: true })
+      }}
+    >
       <Input
         ref={inputRef}
         id={id}
@@ -242,6 +278,9 @@ export function ComboboxInput({
           pointerFocusRef.current = false
         }}
         onBlur={(e) => {
+          if (pointerDownInsideRef.current || isHoveringPanelRef.current) {
+            return
+          }
           if (
             e.relatedTarget &&
             containerRef.current?.contains(e.relatedTarget as Node)
@@ -284,7 +323,45 @@ export function ComboboxInput({
                         'bg-accent/70 text-accent-foreground',
                       isSelected && 'font-medium'
                     )}
-                    onMouseEnter={() => setHighlightedIndex(index)}
+                    onMouseEnter={() => {
+                      if (hoverIntentTimerRef.current !== null) {
+                        window.clearTimeout(hoverIntentTimerRef.current)
+                        hoverIntentTimerRef.current = null
+                      }
+                      const hasActiveHoverPanel =
+                        Boolean(renderOptionHoverPanel) &&
+                        highlightedIndex >= 0 &&
+                        Boolean(filteredOptions[highlightedIndex]?.value)
+                      const isPanelFocusedOrSelected =
+                        Boolean(
+                          hoverPanelRef.current &&
+                            document.activeElement &&
+                            hoverPanelRef.current.contains(document.activeElement)
+                        ) ||
+                        Boolean(
+                          hoverPanelRef.current &&
+                            window.getSelection()?.anchorNode &&
+                            hoverPanelRef.current.contains(
+                              window.getSelection()!.anchorNode
+                            ) &&
+                            window.getSelection()?.toString()
+                        )
+                      if (isPanelFocusedOrSelected) {
+                        return
+                      }
+                      if (hasActiveHoverPanel && index !== highlightedIndex) {
+                        hoverIntentTimerRef.current = window.setTimeout(() => {
+                          if (!isHoveringPanelRef.current) {
+                            highlightedValueRef.current = option.value
+                            setHighlightedIndex(index)
+                          }
+                          hoverIntentTimerRef.current = null
+                        }, 180)
+                      } else {
+                        highlightedValueRef.current = option.value
+                        setHighlightedIndex(index)
+                      }
+                    }}
                     onMouseDown={(e) => {
                       e.preventDefault() // Prevent blur
                       handleSelect(option.value)
@@ -364,13 +441,27 @@ export function ComboboxInput({
               if (!panel) return null
               return (
                 <div
+                  ref={hoverPanelRef}
                   className={cn(
-                    'bg-popover text-popover-foreground absolute top-0 z-110 w-[456px] max-w-[92vw] rounded-xl border shadow-xl',
+                    "bg-popover text-popover-foreground select-text absolute top-0 z-110 w-[456px] max-w-[92vw] rounded-xl border shadow-xl before:content-[''] before:absolute before:inset-y-0 before:w-3",
                     hoverSide === 'right'
-                      ? 'left-full ml-1.5'
-                      : 'right-full mr-1.5'
+                      ? 'left-full ml-1.5 before:-left-3'
+                      : 'right-full mr-1.5 before:-right-3'
                   )}
+                  onMouseEnter={() => {
+                    isHoveringPanelRef.current = true
+                    if (hoverIntentTimerRef.current !== null) {
+                      window.clearTimeout(hoverIntentTimerRef.current)
+                      hoverIntentTimerRef.current = null
+                    }
+                  }}
+                  onMouseLeave={() => {
+                    isHoveringPanelRef.current = false
+                  }}
                   onMouseDown={(e) => {
+                    e.stopPropagation()
+                  }}
+                  onClick={(e) => {
                     e.stopPropagation()
                   }}
                 >

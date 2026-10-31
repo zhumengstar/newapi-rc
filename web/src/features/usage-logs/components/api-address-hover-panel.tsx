@@ -1,7 +1,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Check,
-  Coins,
+  Copy,
   DollarSign,
   Globe,
   Layers,
@@ -9,7 +9,6 @@ import {
   MessageSquare,
   Plus,
   Settings2,
-  Sparkles,
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { toast } from 'sonner'
@@ -21,6 +20,7 @@ import { Input } from '@/components/ui/input'
 import { updateChannelSource } from '@/features/exclusive-channels/api'
 import type { UpstreamSourceDTO } from '@/features/exclusive-channels/types'
 import { inferGroupFamily } from '@/features/users/lib'
+import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
 import { formatLogQuota } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
@@ -36,15 +36,24 @@ export function ApiAddressHoverPanel({
   onOpenFullConfig,
 }: ApiAddressHoverPanelProps) {
   const queryClient = useQueryClient()
+  const { copyToClipboard } = useCopyToClipboard()
   const [draftRatios, setDraftRatios] = useState<Record<string, string>>({})
   const [isDirty, setIsDirty] = useState(false)
+
+  const lastBaseUrlRef = useState<{ url: string }>({ url: '' })[0]
 
   useEffect(() => {
     if (!source) {
       setDraftRatios({})
       setIsDirty(false)
+      lastBaseUrlRef.url = ''
       return
     }
+    const isSameUrl = lastBaseUrlRef.url === source.base_url
+    if (isSameUrl && isDirty) {
+      return
+    }
+    lastBaseUrlRef.url = source.base_url
     const init: Record<string, string> = {}
     if (source.group_cost_ratios) {
       for (const [g, r] of Object.entries(source.group_cost_ratios)) {
@@ -55,7 +64,7 @@ export function ApiAddressHoverPanel({
     }
     setDraftRatios(init)
     setIsDirty(false)
-  }, [source])
+  }, [source, isDirty, lastBaseUrlRef])
 
   const sortedGroups = useMemo(() => {
     if (!source) return []
@@ -102,10 +111,18 @@ export function ApiAddressHoverPanel({
 
   if (!source) {
     return (
-      <div className='p-3.5 text-xs text-muted-foreground space-y-1.5'>
-        <div className='flex items-center gap-1.5 font-mono font-medium text-foreground'>
-          <Globe className='size-3.5 text-primary' />
-          <span className='truncate'>{baseUrl}</span>
+      <div className='p-3.5 text-xs text-muted-foreground space-y-1.5 select-text'>
+        <div
+          className='flex items-center gap-1.5 font-mono font-medium text-foreground cursor-copy hover:text-primary transition-colors'
+          title={`点击复制: ${baseUrl}`}
+          onClick={() => {
+            if (window.getSelection()?.toString()) return
+            copyToClipboard(baseUrl)
+          }}
+        >
+          <Globe className='size-3.5 text-primary shrink-0' />
+          <span className='truncate select-text'>{baseUrl}</span>
+          <Copy className='size-3 opacity-60 shrink-0' />
         </div>
         <div>正在加载该地址下的分组与成本配置...</div>
       </div>
@@ -115,18 +132,23 @@ export function ApiAddressHoverPanel({
   const rules = source.model_cost_rules || []
 
   return (
-    <div className='p-3 space-y-3 text-xs'>
+    <div className='p-3 space-y-3 text-xs select-text'>
       {/* 1. 顶部地址信息与完整配置按钮 */}
       <div className='flex items-center justify-between gap-2 border-b border-border/60 pb-2.5'>
         <div className='min-w-0 flex-1 space-y-1'>
-          <div className='flex items-center gap-1.5 min-w-0'>
+          <div
+            className='group/url inline-flex max-w-full items-center gap-1.5 min-w-0 cursor-copy hover:text-primary transition-colors'
+            title={`点击复制或拖选: ${source.display_base_url}`}
+            onClick={() => {
+              if (window.getSelection()?.toString()) return
+              copyToClipboard(source.display_base_url)
+            }}
+          >
             <Globe className='size-3.5 text-primary shrink-0' />
-            <span
-              className='font-mono font-semibold text-foreground truncate'
-              title={source.display_base_url}
-            >
+            <span className='font-mono font-semibold text-foreground group-hover/url:text-primary truncate select-text'>
               {source.display_base_url}
             </span>
+            <Copy className='size-3 text-muted-foreground opacity-60 group-hover/url:opacity-100 group-hover/url:text-primary shrink-0 transition-opacity' />
           </div>
           <div className='flex items-center gap-1.5 whitespace-nowrap overflow-hidden text-[11px] text-muted-foreground'>
             <span className='shrink-0'>
@@ -236,8 +258,8 @@ export function ApiAddressHoverPanel({
                     <div className='min-w-0 flex-1 overflow-hidden'>
                       <GroupBadge
                         group={grp}
-                        copyable={false}
-                        className='max-w-full truncate text-[11px] font-medium'
+                        copyable={true}
+                        className='max-w-full truncate text-[11px] font-medium select-text'
                       />
                     </div>
                   </div>

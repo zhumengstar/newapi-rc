@@ -162,7 +162,9 @@ export function StatusBadge({
   const handleClick = (e: React.MouseEvent<HTMLSpanElement>) => {
     if (copyable) {
       e.stopPropagation()
-      copyToClipboard(copyText || label || '')
+      if (typeof window === 'undefined' || !window.getSelection()?.toString()) {
+        copyToClipboard(copyText || label || '')
+      }
     }
     onClick?.(e)
   }
