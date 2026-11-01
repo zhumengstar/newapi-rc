@@ -49,11 +49,17 @@ func ShouldDisableChannel(err *types.NewAPIError) bool {
 	if err == nil {
 		return false
 	}
+	if err.IsLocalUserQuotaError() {
+		return false
+	}
 	if types.IsChannelError(err) {
 		return true
 	}
 	if types.IsSkipRetryError(err) {
 		return false
+	}
+	if err.GetErrorCode() == types.ErrorCodeInsufficientUserQuota || types.IsChannelBalanceExhaustedMessage(err.Error()) {
+		return true
 	}
 	if operation_setting.ShouldDisableByStatusCode(err.StatusCode) {
 		return true
@@ -70,10 +76,10 @@ func IsFastCircuitError(err *types.NewAPIError) bool {
 	if err == nil {
 		return false
 	}
-	if err.GetErrorCode() == types.ErrorCodeInsufficientUserQuota || err.GetErrorCode() == types.ErrorCodePreConsumeTokenQuotaFailed {
+	if err.IsLocalUserQuotaError() {
 		return false
 	}
-	if err.GetErrorCode() == types.ErrorCodeChannelInvalidKey || err.StatusCode == 401 || err.StatusCode == 402 {
+	if err.GetErrorCode() == types.ErrorCodeChannelInvalidKey || err.GetErrorCode() == types.ErrorCodeInsufficientUserQuota || err.StatusCode == 401 || err.StatusCode == 402 {
 		return true
 	}
 	if types.IsChannelBalanceExhaustedMessage(err.Error()) {

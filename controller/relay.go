@@ -94,12 +94,12 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	defer func() {
 		if newAPIError != nil {
 			logger.LogError(c, fmt.Sprintf("relay error: %s", common.LocalLogPreview(newAPIError.Error())))
-			if !common.GetContextKeyBool(c, constant.ContextKeyErrorLogRecorded) {
-				recordChannelErrorLog(c, 0, newAPIError, nil)
-			}
 			if isChannelBalanceExhaustedError(newAPIError) {
 				newAPIError.StatusCode = http.StatusServiceUnavailable
 				newAPIError.SetMessage(types.ChannelBalanceExhaustedMaskedMessage)
+			}
+			if !common.GetContextKeyBool(c, constant.ContextKeyErrorLogRecorded) {
+				recordChannelErrorLog(c, 0, newAPIError, nil)
 			}
 			newAPIError.SetMessage(common.MessageWithRequestId(newAPIError.Error(), requestId))
 			if !c.Writer.Written() {
@@ -584,6 +584,9 @@ func isNonRetryableClientError(err *types.NewAPIError) bool {
 	if isUpstreamChannelUnavailableError(err) {
 		return false
 	}
+	if err.IsLocalUserQuotaError() {
+		return true
+	}
 	switch err.GetErrorCode() {
 	case types.ErrorCodeInvalidRequest,
 		types.ErrorCodeSensitiveWordsDetected,
@@ -591,8 +594,6 @@ func isNonRetryableClientError(err *types.NewAPIError) bool {
 		types.ErrorCodeConvertRequestFailed,
 		types.ErrorCodeAccessDenied,
 		types.ErrorCodeBadRequestBody,
-		types.ErrorCodeInsufficientUserQuota,
-		types.ErrorCodePreConsumeTokenQuotaFailed,
 		types.ErrorCodePromptBlocked,
 		types.ErrorCodeModelNotFound:
 		return true
@@ -724,10 +725,10 @@ func isEmptyResponsesOutputError(err *types.NewAPIError) bool {
 }
 
 func isChannelBalanceExhaustedError(err *types.NewAPIError) bool {
-	if err == nil || err.GetErrorCode() == types.ErrorCodeInsufficientUserQuota || err.GetErrorCode() == types.ErrorCodePreConsumeTokenQuotaFailed {
+	if err == nil || err.IsLocalUserQuotaError() {
 		return false
 	}
-	if err.StatusCode == http.StatusPaymentRequired {
+	if err.StatusCode == http.StatusPaymentRequired || err.GetErrorCode() == types.ErrorCodeInsufficientUserQuota {
 		return true
 	}
 	return types.IsChannelBalanceExhaustedMessage(err.Error())

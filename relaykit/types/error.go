@@ -182,6 +182,24 @@ func (e *NewAPIError) MaskSensitiveErrorWithStatusCode() string {
 
 func (e *NewAPIError) SetMessage(message string) {
 	e.Err = errors.New(message)
+	switch relayErr := e.RelayError.(type) {
+	case OpenAIError:
+		relayErr.Message = message
+		e.RelayError = relayErr
+	case ClaudeError:
+		relayErr.Message = message
+		e.RelayError = relayErr
+	}
+}
+
+func (e *NewAPIError) IsLocalUserQuotaError() bool {
+	if e == nil {
+		return false
+	}
+	if e.errorType != ErrorTypeNewAPIError || !e.skipRetry {
+		return false
+	}
+	return e.errorCode == ErrorCodeInsufficientUserQuota || e.errorCode == ErrorCodePreConsumeTokenQuotaFailed
 }
 
 func (e *NewAPIError) ToOpenAIError() OpenAIError {
@@ -209,9 +227,12 @@ func (e *NewAPIError) ToOpenAIError() OpenAIError {
 		}
 	}
 	if e.errorCode != ErrorCodeCountTokenFailed {
-		if e.errorCode != ErrorCodeInsufficientUserQuota && e.errorCode != ErrorCodePreConsumeTokenQuotaFailed {
-			if e.StatusCode == http.StatusPaymentRequired || IsChannelBalanceExhaustedMessage(result.Message) {
+		if !e.IsLocalUserQuotaError() {
+			if e.StatusCode == http.StatusPaymentRequired || e.errorCode == ErrorCodeInsufficientUserQuota || IsChannelBalanceExhaustedMessage(result.Message) {
 				result.Message = MaskChannelBalanceInString(result.Message)
+				if result.Code == ErrorCodeInsufficientUserQuota || result.Code == string(ErrorCodeInsufficientUserQuota) {
+					result.Code = "service_unavailable"
+				}
 			}
 		}
 		result.Message = kitutil.MaskSensitiveInfo(result.Message)
@@ -243,9 +264,12 @@ func (e *NewAPIError) ToClaudeError() ClaudeError {
 		}
 	}
 	if e.errorCode != ErrorCodeCountTokenFailed {
-		if e.errorCode != ErrorCodeInsufficientUserQuota && e.errorCode != ErrorCodePreConsumeTokenQuotaFailed {
-			if e.StatusCode == http.StatusPaymentRequired || IsChannelBalanceExhaustedMessage(result.Message) {
+		if !e.IsLocalUserQuotaError() {
+			if e.StatusCode == http.StatusPaymentRequired || e.errorCode == ErrorCodeInsufficientUserQuota || IsChannelBalanceExhaustedMessage(result.Message) {
 				result.Message = MaskChannelBalanceInString(result.Message)
+				if result.Type == string(ErrorCodeInsufficientUserQuota) {
+					result.Type = "api_error"
+				}
 			}
 		}
 		result.Message = kitutil.MaskSensitiveInfo(result.Message)
@@ -480,9 +504,6 @@ func IsChannelBalanceExhaustedMessage(msg string) bool {
 	}
 	for _, m := range chineseMarkers {
 		if strings.Contains(lower, m) {
-			if strings.Contains(lower, "用户额度") || strings.Contains(lower, "用户余额") {
-				return false
-			}
 			return true
 		}
 	}
@@ -496,6 +517,7 @@ func IsChannelBalanceExhaustedMessage(msg string) bool {
 		"insufficient credits",
 		"insufficient quota",
 		"insufficient_quota",
+		"insufficient_user_quota",
 		"insufficient_balance",
 		"credit balance is too low",
 		"credit balance",
@@ -505,6 +527,10 @@ func IsChannelBalanceExhaustedMessage(msg string) bool {
 		"billing hard limit",
 		"balance is not enough",
 		"not enough balance",
+		"quota is not enough",
+		"user quota is not enough",
+		"not enough quota",
+		"quota not enough",
 		"you exceeded your current quota",
 		"exceeded your current quota",
 		"quota reached. please upgrade",
@@ -512,19 +538,14 @@ func IsChannelBalanceExhaustedMessage(msg string) bool {
 	}
 	for _, m := range englishMarkers {
 		if strings.Contains(lower, m) {
-			if strings.Contains(lower, "user quota") || strings.Contains(lower, "user balance") {
-				return false
-			}
 			return true
 		}
 	}
 
-	hasInsufficient := strings.Contains(lower, "insufficient") || strings.Contains(lower, "exceeded") || strings.Contains(lower, "exhausted") || strings.Contains(lower, "out of")
+	hasInsufficient := strings.Contains(lower, "insufficient") || strings.Contains(lower, "exceeded") || strings.Contains(lower, "exhausted") || strings.Contains(lower, "out of") || strings.Contains(lower, "not enough")
 	hasBalanceOrQuota := strings.Contains(lower, "balance") || strings.Contains(lower, "quota") || strings.Contains(lower, "credit") || strings.Contains(lower, "funds")
 	if hasInsufficient && hasBalanceOrQuota {
-		if !strings.Contains(lower, "user quota") && !strings.Contains(lower, "user balance") && !strings.Contains(lower, "用户额度") && !strings.Contains(lower, "用户余额") {
-			return true
-		}
+		return true
 	}
 
 	return false
