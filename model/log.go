@@ -130,14 +130,15 @@ func truncateLoggedLogListString(value string, limit int) string {
 
 // don't use iota, avoid change log type value
 const (
-	LogTypeUnknown = 0
-	LogTypeTopup   = 1
-	LogTypeConsume = 2
-	LogTypeManage  = 3
-	LogTypeSystem  = 4
-	LogTypeError   = 5
-	LogTypeRefund  = 6
-	LogTypeLogin   = 7
+	LogTypeUnknown       = 0
+	LogTypeTopup         = 1
+	LogTypeConsume       = 2
+	LogTypeManage        = 3
+	LogTypeSystem        = 4
+	LogTypeError         = 5
+	LogTypeRefund        = 6
+	LogTypeLogin         = 7
+	LogTypeEmptyResponse = 8 // 虚拟筛选类型：空回请求 (type=2 且 completion_tokens=0)
 )
 
 func ensureLogRequestId(log *Log) {
@@ -604,6 +605,8 @@ func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName
 	var tx *gorm.DB
 	if logType == LogTypeUnknown {
 		tx = LOG_DB
+	} else if logType == LogTypeEmptyResponse {
+		tx = LOG_DB.Where("logs.type = ? AND logs.completion_tokens = 0", LogTypeConsume)
 	} else {
 		tx = LOG_DB.Where("logs.type = ?", logType)
 	}
@@ -759,6 +762,8 @@ func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int
 	var tx *gorm.DB
 	if logType == LogTypeUnknown {
 		tx = LOG_DB.Where("logs.user_id = ?", userId)
+	} else if logType == LogTypeEmptyResponse {
+		tx = LOG_DB.Where("logs.user_id = ? and logs.type = ? and logs.completion_tokens = 0", userId, LogTypeConsume)
 	} else {
 		tx = LOG_DB.Where("logs.user_id = ? and logs.type = ?", userId, logType)
 	}
@@ -956,6 +961,10 @@ func sumUsedQuotaFromDB(logType int, startTimestamp int64, endTimestamp int64, m
 
 	tx = tx.Where("type = ?", LogTypeConsume)
 	rpmTpmQuery = rpmTpmQuery.Where("type = ?", LogTypeConsume)
+	if logType == LogTypeEmptyResponse {
+		tx = tx.Where("completion_tokens = 0")
+		rpmTpmQuery = rpmTpmQuery.Where("completion_tokens = 0")
+	}
 
 	// 只统计最近60秒的rpm、tpm和mpm
 	rpmTpmQuery = rpmTpmQuery.Where("created_at >= ?", time.Now().Add(-60*time.Second).Unix())
@@ -1020,6 +1029,9 @@ func SumUsedToken(logType int, startTimestamp int64, endTimestamp int64, modelNa
 	}
 	if modelName != "" {
 		tx = tx.Where("model_name = ?", modelName)
+	}
+	if logType == LogTypeEmptyResponse {
+		tx = tx.Where("completion_tokens = 0")
 	}
 	tx.Where("type = ?", LogTypeConsume).Scan(&token)
 	return token

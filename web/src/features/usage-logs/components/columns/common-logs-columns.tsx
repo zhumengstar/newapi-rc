@@ -51,7 +51,7 @@ import { formatBillingCurrencyFromUSD } from '@/lib/currency'
 import { formatLogQuota, formatTimestampToDate } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
-import { LOG_TYPE_ALL_VALUE } from '../../constants'
+import { LOG_TYPE_ALL_VALUE, LOG_TYPE_ENUM } from '../../constants'
 import type { UsageLog } from '../../data/schema'
 import {
   formatModelName,
@@ -356,6 +356,12 @@ export function useCommonLogsColumns(
       filterFn: (row, _id, value) => {
         if (!Array.isArray(value) || value.length === 0) return true
         if (value.includes(LOG_TYPE_ALL_VALUE)) return true
+        if (value.includes(String(LOG_TYPE_ENUM.EMPTY_RESPONSE))) {
+          return (
+            row.original.type === LOG_TYPE_ENUM.CONSUME &&
+            (row.original.completion_tokens ?? 0) === 0
+          )
+        }
         return value.includes(String(row.original.type))
       },
       enableHiding: false,

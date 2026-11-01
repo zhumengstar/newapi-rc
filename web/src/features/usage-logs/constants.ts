@@ -61,6 +61,7 @@ export const LOG_TYPE_ENUM = {
   ERROR: 5,
   REFUND: 6,
   LOGIN: 7,
+  EMPTY_RESPONSE: 8,
 } as const
 
 /**
@@ -108,6 +109,11 @@ export const LOG_TYPES = [
  */
 export const LOG_TYPE_FILTERS = [
   { label: 'All Types', value: LOG_TYPE_ALL_VALUE, deprecated: false },
+  {
+    label: 'Empty Response',
+    value: String(LOG_TYPE_ENUM.EMPTY_RESPONSE),
+    deprecated: false,
+  },
   ...LOG_TYPES.filter((type) => type.value !== LOG_TYPE_ENUM.UNKNOWN).map(
     (type) => ({
       label: type.label,

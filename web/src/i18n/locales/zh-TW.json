@@ -1954,6 +1954,7 @@
     "Email, summarisation, knowledge work": "郵件、摘要與知識工作",
     "Embeddings": "嵌入",
     "Empty": "空",
+    "Empty Response": "空回",
     "Empty value will be saved as {}.": "空值將儲存為 {}。",
     "Enable": "啟用",
     "Enable {{parameter}}": "啟用 {{parameter}}",

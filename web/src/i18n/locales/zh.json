@@ -1967,6 +1967,7 @@
     "Email, summarisation, knowledge work": "邮件、摘要与知识工作",
     "Embeddings": "嵌入",
     "Empty": "空",
+    "Empty Response": "空回",
     "Empty value will be saved as {}.": "空值将保存为 {}。",
     "Enable": "启用",
     "Enable {{parameter}}": "启用 {{parameter}}",
