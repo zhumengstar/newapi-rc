@@ -120,3 +120,70 @@ func TestGetRandomSatisfiedChannelUsesCostTierBeforeLegacyPriority(t *testing.T)
 	require.NotNil(t, selected)
 	require.Equal(t, 2, selected.Id)
 }
+
+func TestBuildEffectiveRetryExcludedChannelIdsNeverRepeatsTriedChannelAndFollowsPriorityAndWeight(t *testing.T) {
+	previousMemoryCache := common.MemoryCacheEnabled
+	channelSyncLock.Lock()
+	previousGroups := group2model2channels
+	previousChannels := channelsIDM
+	prio199 := int64(199)
+	prio180 := int64(180)
+	w100 := uint(100)
+	w60 := uint(60)
+	w20 := uint(20)
+	w90 := uint(90)
+	w30 := uint(30)
+	group2model2channels = map[string]map[string][]int{
+		"Gemini组": {
+			"gemini-4-argon": {438},
+			"gemini-3-flash": {10, 11, 12, 20, 21},
+		},
+	}
+	channelsIDM = map[int]*Channel{
+		438: {Id: 438, Status: common.ChannelStatusEnabled, Priority: &prio199, Weight: &w100},
+		10:  {Id: 10, Status: common.ChannelStatusEnabled, Priority: &prio199, Weight: &w60},
+		11:  {Id: 11, Status: common.ChannelStatusEnabled, Priority: &prio199, Weight: &w100},
+		12:  {Id: 12, Status: common.ChannelStatusEnabled, Priority: &prio199, Weight: &w20},
+		20:  {Id: 20, Status: common.ChannelStatusEnabled, Priority: &prio180, Weight: &w30},
+		21:  {Id: 21, Status: common.ChannelStatusEnabled, Priority: &prio180, Weight: &w90},
+	}
+	channelSyncLock.Unlock()
+	common.MemoryCacheEnabled = true
+	t.Cleanup(func() {
+		common.MemoryCacheEnabled = previousMemoryCache
+		channelSyncLock.Lock()
+		group2model2channels = previousGroups
+		channelsIDM = previousChannels
+		channelSyncLock.Unlock()
+	})
+
+	// 1. Single-channel scenario (#438): once #438 is tried once, retry must NOT select #438 again.
+	excludedSingle := BuildEffectiveRetryExcludedChannelIds("Gemini组", "gemini-4-argon", 0, nil, nil, map[int]int{438: 1}, 438, true, true)
+	require.True(t, excludedSingle[438], "tried channel #438 must be excluded on retry")
+	chSingle, err := GetRandomSatisfiedChannelForUserExcluding("Gemini组", "gemini-4-argon", 0, 0, nil, excludedSingle)
+	require.NoError(t, err)
+	require.Nil(t, chSingle, "single-channel model must return nil on retry instead of repeating #438")
+
+	// 2. Multi-channel scenario: suppose initial request picked #10 (prio 199, weight 60) and failed.
+	// Remaining untried channels must be selected strictly by (priority DESC, weight DESC):
+	// 11 (199, w100) -> 12 (199, w20) -> 21 (180, w90) -> 20 (180, w30) -> nil
+	triedCounts := map[int]int{10: 1}
+	lastTried := 10
+	expectedOrder := []int{11, 12, 21, 20}
+	for _, expectedId := range expectedOrder {
+		excluded := BuildEffectiveRetryExcludedChannelIds("Gemini组", "gemini-3-flash", 0, nil, nil, triedCounts, lastTried, true, true)
+		ch, err := GetRandomSatisfiedChannelForUserExcluding("Gemini组", "gemini-3-flash", 0, 0, nil, excluded)
+		require.NoError(t, err)
+		require.NotNil(t, ch)
+		require.Equal(t, expectedId, ch.Id)
+		triedCounts[ch.Id]++
+		lastTried = ch.Id
+	}
+
+	// After all 5 channels have been tried once, the next retry must return nil.
+	excludedAll := BuildEffectiveRetryExcludedChannelIds("Gemini组", "gemini-3-flash", 0, nil, nil, triedCounts, lastTried, true, true)
+	chAfterAll, err := GetRandomSatisfiedChannelForUserExcluding("Gemini组", "gemini-3-flash", 0, 0, nil, excludedAll)
+	require.NoError(t, err)
+	require.Nil(t, chAfterAll, "must stop retrying once all candidate channels have been tried once")
+}
+

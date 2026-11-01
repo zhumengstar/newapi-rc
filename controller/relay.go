@@ -198,7 +198,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		ModelName:      relayInfo.OriginModelName,
 		RequestPath:    c.Request.URL.Path,
 		Retry:          common.GetPointer(0),
-		AllowMultiPass: true,
+		AllowMultiPass: false,
 	}
 	relayInfo.RetryIndex = 0
 	relayInfo.LastError = nil
@@ -412,7 +412,7 @@ func fastTokenCountMetaForPricing(request dto.Request) *types.TokenCountMeta {
 }
 
 func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service.RetryParam) (*model.Channel, *types.NewAPIError) {
-	if info.ChannelMeta == nil {
+	if info.ChannelMeta == nil && retryParam.GetRetry() == 0 && len(retryParam.TriedChannelIds) == 0 && len(retryParam.TriedChannelCounts) == 0 {
 		autoBan := c.GetBool("auto_ban")
 		autoBanInt := 1
 		if !autoBan {
@@ -1073,7 +1073,7 @@ func executeTaskSubmissionWith(
 		ModelName:      relayInfo.OriginModelName,
 		RequestPath:    c.Request.URL.Path,
 		Retry:          common.GetPointer(0),
-		AllowMultiPass: true,
+		AllowMultiPass: false,
 	}
 
 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {

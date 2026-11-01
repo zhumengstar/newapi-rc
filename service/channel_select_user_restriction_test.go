@@ -186,7 +186,7 @@ func TestCacheGetRandomSatisfiedChannelRestrictedDisabledChannelRouting(t *testi
 	require.NoError(t, db.Create(ch428).Error)
 	model.InitChannelCache()
 
-	// 普通客户 435 请求该分组该模型，能够正常命中启用的渠道 428，绝不会报错无可用渠道
+	// 普通客户 435 请求该分组该模型，绝不能命中未给自己绑定的专属渠道 428
 	w3 := httptest.NewRecorder()
 	ctx3, _ := gin.CreateTestContext(w3)
 	ctx3.Set("id", 435)
@@ -200,8 +200,7 @@ func TestCacheGetRandomSatisfiedChannelRestrictedDisabledChannelRouting(t *testi
 	}
 	selectedCh3, _, err3 := CacheGetRandomSatisfiedChannel(param3)
 	require.NoError(t, err3)
-	require.NotNil(t, selectedCh3)
-	assert.Equal(t, 428, selectedCh3.Id, "普通客户在无其他公共渠道时依然能正常访问启用的渠道，绝不断流")
+	assert.Nil(t, selectedCh3, "普通客户不能访问专属客户渠道 428")
 
 	// 受限客户 382 请求时，也正常且只能走渠道 428
 	w4 := httptest.NewRecorder()
@@ -274,11 +273,11 @@ func TestSamePriorityMultiChannelAndMultiPassRetries(t *testing.T) {
 		ModelName:      "gemini-4-argon",
 		RequestPath:    "/v1/chat/completions",
 		Retry:          &retry,
-		AllowMultiPass: true,
+		AllowMultiPass: false,
 	}
 
 	var sequence []int
-	for attempt := 0; attempt <= 8; attempt++ {
+	for attempt := 0; attempt <= 2; attempt++ {
 		param.Retry = &attempt
 		ch, _, err := CacheGetRandomSatisfiedChannel(param)
 		require.NoError(t, err)
@@ -287,16 +286,17 @@ func TestSamePriorityMultiChannelAndMultiPassRetries(t *testing.T) {
 		param.MarkChannelTried(ch.Id)
 	}
 
-	// First 4 attempts must stay in Priority 777 alternating between 501 and 502 (2 full rounds):
+	// First 2 attempts must exhaust Priority 777 (501 and 502) without repeating:
 	assert.Contains(t, []int{501, 502}, sequence[0])
 	assert.Contains(t, []int{501, 502}, sequence[1])
 	assert.NotEqual(t, sequence[0], sequence[1], "must switch to the other channel in the same priority")
-	assert.Equal(t, sequence[0], sequence[2], "round 2 in same priority must alternate")
-	assert.Equal(t, sequence[1], sequence[3], "round 2 in same priority must complete second channel")
-	// 5th attempt (index 4) drops to Priority 666 (channel 503):
-	assert.Equal(t, 503, sequence[4], "after 2 rounds in priority 777, must fall through to priority 666")
-	// 6th..9th attempts (indices 5..8) start Cycle 2 back at Priority 777:
-	assert.Contains(t, []int{501, 502}, sequence[5])
-	assert.Contains(t, []int{501, 502}, sequence[6])
-	assert.NotEqual(t, sequence[5], sequence[6])
+	// 3rd attempt (index 2) drops to Priority 666 (channel 503):
+	assert.Equal(t, 503, sequence[2], "after priority 777 is exhausted, must fall through to priority 666")
+
+	// 4th attempt (index 3) must return nil since all channels have been tried once:
+	attempt3 := 3
+	param.Retry = &attempt3
+	chAfterAll, _, err := CacheGetRandomSatisfiedChannel(param)
+	require.NoError(t, err)
+	assert.Nil(t, chAfterAll, "must not repeat already-tried channels")
 }

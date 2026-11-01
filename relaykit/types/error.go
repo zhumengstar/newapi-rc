@@ -196,7 +196,7 @@ func (e *NewAPIError) IsLocalUserQuotaError() bool {
 	if e == nil {
 		return false
 	}
-	if e.errorType != ErrorTypeNewAPIError || !e.skipRetry {
+	if e.errorType != ErrorTypeNewAPIError {
 		return false
 	}
 	return e.errorCode == ErrorCodeInsufficientUserQuota || e.errorCode == ErrorCodePreConsumeTokenQuotaFailed
