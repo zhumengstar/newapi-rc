@@ -69,6 +69,14 @@ func FormatGeminiBlockRefusalText(reason string, finishMessage *string) string {
 	return fmt.Sprintf("抱歉，由于触发了 Google Gemini 内容安全审查策略 (%s)，请求已被拦截，无法生成回答。请调整您的提示词后重试。", reason)
 }
 
+func IsSyntheticGeminiBlockRefusalText(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return true
+	}
+	return strings.HasPrefix(trimmed, "抱歉，由于触发了 Google")
+}
+
 func DetectGeminiBlockReasonFromText(text string) (string, bool) {
 	upper := strings.ToUpper(text)
 	switch {

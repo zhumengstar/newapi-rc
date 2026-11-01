@@ -472,7 +472,11 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 
 	adminRejectReason := common.GetContextKeyString(ctx, constant.ContextKeyAdminRejectReason)
 	if strings.Contains(adminRejectReason, "gemini_block_reason=") {
-		extraContent = append(extraContent, "触发安全审查拦截，仅结算输入 Token")
+		if billingUsage != nil && billingUsage.CompletionTokens > 0 {
+			extraContent = append(extraContent, "生成中途触发安全审查截断，按实际输入+已输出 Token 结算")
+		} else {
+			extraContent = append(extraContent, "触发安全审查拦截，仅结算输入 Token")
+		}
 	}
 	if common.GetContextKeyBool(ctx, "context_pruned") || (ctx != nil && ctx.GetBool("context_pruned")) {
 		extraContent = append(extraContent, "历史上下文超限，已自动滑动裁剪早期对话")

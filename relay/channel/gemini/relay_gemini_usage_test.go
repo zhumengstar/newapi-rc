@@ -898,5 +898,32 @@ func TestGeminiSafetyBlockBillsPromptTokensAcrossHandlers(t *testing.T) {
 		require.Contains(t, w.Body.String(), "User prompt or response flagged")
 		require.Equal(t, "gemini_block_reason=PROHIBITED_CONTENT", common.GetContextKeyString(c, constant.ContextKeyAdminRejectReason))
 	})
+
+	t.Run("native_generateContent_mid_generation_safety_preserves_completion_tokens", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-4-argon:generateContent", nil)
+
+		info := &relaycommon.RelayInfo{
+			OriginModelName: "gemini-4-argon",
+			ChannelMeta: &relaycommon.ChannelMeta{
+				UpstreamModelName: "gemini-4-argon",
+			},
+		}
+
+		respBody := `{"candidates":[{"content":{"role":"model","parts":[{"text":"已经生成的长篇正文内容..."}]},"finishReason":"SAFETY"}],"usageMetadata":{"promptTokenCount":22744,"candidatesTokenCount":1369,"totalTokenCount":24113}}`
+		resp := &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewReader([]byte(respBody))),
+		}
+
+		usage, newApiErr := GeminiTextGenerationHandler(c, info, resp)
+		require.Nil(t, newApiErr)
+		require.NotNil(t, usage)
+		require.Equal(t, 22744, usage.PromptTokens)
+		require.Equal(t, 1369, usage.CompletionTokens)
+		require.Equal(t, 24113, usage.TotalTokens)
+		require.Equal(t, "gemini_block_reason=SAFETY", common.GetContextKeyString(c, constant.ContextKeyAdminRejectReason))
+	})
 }
 

@@ -64,6 +64,34 @@ func zeroBillingUsageCompletion(usage *dto.Usage) {
 	}
 }
 
+func hasRealGeminiCandidateOutput(response *dto.GeminiChatResponse) bool {
+	if response == nil {
+		return false
+	}
+	for i := range response.Candidates {
+		cand := &response.Candidates[i]
+		for j := range cand.Content.Parts {
+			part := &cand.Content.Parts[j]
+			if part.Thought {
+				continue
+			}
+			if part.InlineData != nil && part.InlineData.MimeType != "" && part.InlineData.Data != "" {
+				return true
+			}
+			if part.FunctionCall != nil && part.FunctionCall.FunctionName != "" {
+				return true
+			}
+			if part.ExecutableCode != nil && part.ExecutableCode.Code != "" {
+				return true
+			}
+			if part.Text != "" && !IsSyntheticGeminiBlockRefusalText(part.Text) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // patchGeminiZeroCompletionUsage estimates completion tokens locally when upstream
 // usageMetadata was billable but reported zero completion tokens even though output
 // content was actually received. Typical case: the client aborts a stream before the
@@ -392,6 +420,7 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 	var imageCount int
 	var imageBaseTokens int
 	var hasBillableUsageMetadata bool
+	var hasRealStreamOutput bool
 	var streamErr error
 	var accumulatedUsageMetadata *dto.GeminiUsageMetadata
 	var debugRawFrames []string
@@ -484,6 +513,9 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 
 		markGeminiGoogleSearchCall(c, &geminiResponse)
 		countGeminiBillableFunctionCalls(info, &geminiResponse)
+		if hasRealGeminiCandidateOutput(&geminiResponse) {
+			hasRealStreamOutput = true
+		}
 
 		if !strings.Contains(common.GetContextKeyString(c, constant.ContextKeyAdminRejectReason), "gemini_block_reason=") {
 			for i := range geminiResponse.Candidates {
@@ -599,7 +631,7 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 			common.GetContextKeyString(c, constant.ContextKeyAdminRejectReason), lastErrStr, debugRawFrames))
 	}
 
-	if strings.Contains(common.GetContextKeyString(c, constant.ContextKeyAdminRejectReason), "gemini_block_reason=") {
+	if strings.Contains(common.GetContextKeyString(c, constant.ContextKeyAdminRejectReason), "gemini_block_reason=") && !hasRealStreamOutput && imageCount == 0 {
 		zeroBillingUsageCompletion(usage)
 	}
 
@@ -766,6 +798,7 @@ func GeminiChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.R
 	}
 	markGeminiGoogleSearchCall(c, &geminiResponse)
 	countGeminiBillableFunctionCalls(info, &geminiResponse)
+	hasRealOutput := hasRealGeminiCandidateOutput(&geminiResponse)
 	if len(geminiResponse.Candidates) == 0 {
 		if geminiResponse.PromptFeedback != nil && geminiResponse.PromptFeedback.BlockReason != nil {
 			blockReason := *geminiResponse.PromptFeedback.BlockReason
@@ -814,7 +847,7 @@ func GeminiChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.R
 	fullTextResponse := responseGeminiChat2OpenAI(c, &geminiResponse)
 	fullTextResponse.Model = info.UpstreamModelName
 	usage := buildUsageFromGeminiResponse(c, info, &geminiResponse)
-	if strings.Contains(common.GetContextKeyString(c, constant.ContextKeyAdminRejectReason), "gemini_block_reason=") {
+	if strings.Contains(common.GetContextKeyString(c, constant.ContextKeyAdminRejectReason), "gemini_block_reason=") && !hasRealOutput {
 		zeroBillingUsageCompletion(&usage)
 	}
 

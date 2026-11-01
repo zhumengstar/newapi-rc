@@ -39,6 +39,7 @@ func GeminiTextGenerationHandler(c *gin.Context, info *relaycommon.RelayInfo, re
 	isSafetyBlock := false
 	var blockReason string
 	var finishMsg *string
+	hasRealOutput := hasRealGeminiCandidateOutput(&geminiResponse)
 
 	if geminiResponse.PromptFeedback != nil && geminiResponse.PromptFeedback.BlockReason != nil && IsGeminiBlockReason(*geminiResponse.PromptFeedback.BlockReason) {
 		isSafetyBlock = true
@@ -115,7 +116,7 @@ func GeminiTextGenerationHandler(c *gin.Context, info *relaycommon.RelayInfo, re
 
 	// 计算使用量（优先上游 UsageMetadata，缺失时本地估算并保留 Gemini 计费语义）
 	usage := buildUsageFromGeminiResponse(c, info, &geminiResponse)
-	if isSafetyBlock {
+	if isSafetyBlock && !hasRealOutput {
 		zeroBillingUsageCompletion(&usage)
 	}
 

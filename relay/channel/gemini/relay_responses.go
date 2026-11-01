@@ -34,6 +34,7 @@ func GeminiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *h
 	}
 	markGeminiGoogleSearchCall(c, &geminiResponse)
 	countGeminiBillableFunctionCalls(info, &geminiResponse)
+	hasRealOutput := hasRealGeminiCandidateOutput(&geminiResponse)
 	if len(geminiResponse.Candidates) == 0 {
 		usage := buildUsageFromGeminiResponse(c, info, &geminiResponse)
 		if geminiResponse.PromptFeedback != nil && geminiResponse.PromptFeedback.BlockReason != nil {
@@ -80,7 +81,7 @@ func GeminiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *h
 	}
 
 	usage := buildUsageFromGeminiResponse(c, info, &geminiResponse)
-	if strings.Contains(common.GetContextKeyString(c, constant.ContextKeyAdminRejectReason), "gemini_block_reason=") {
+	if strings.Contains(common.GetContextKeyString(c, constant.ContextKeyAdminRejectReason), "gemini_block_reason=") && !hasRealOutput {
 		zeroBillingUsageCompletion(&usage)
 	}
 
