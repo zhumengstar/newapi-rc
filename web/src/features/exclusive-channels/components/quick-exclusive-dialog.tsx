@@ -327,12 +327,12 @@ export function QuickExclusiveDialog({
             <div className='border-border/60 bg-muted/20 flex items-center justify-between rounded-lg border px-3 py-2'>
               <div className='space-y-0.5 pr-3'>
                 <div className='text-xs font-medium'>
-                  {t('Allow Other Users', '支持其他用户请求')}
+                  {t('Allow Other Users', '允许这些客户同时请求其他渠道（按优先级调度）')}
                 </div>
                 <div className='text-muted-foreground text-[11px]'>
                   {allowOtherUsers
-                    ? '已开启：除专属客户锁定本渠道外，同分组其他普通用户也可请求此渠道'
-                    : '已关闭：配置专属客户后，仅允许被选中的客户请求此渠道（专属独享）'}
+                    ? '已开启：本渠道仅限下方指定客户使用；指定客户优先走高优先级渠道，高优先级不可用时自动顺延请求本渠道'
+                    : '已关闭：下方指定客户将仅锁定请求本专属渠道（不走同分组其他公共渠道）'}
                 </div>
               </div>
               <Switch

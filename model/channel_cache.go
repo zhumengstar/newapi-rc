@@ -65,25 +65,27 @@ func InitChannelCache() {
 	newGroup2userAllowedChannels := make(map[string]map[int]map[int]bool)
 	newGroup2userModel2channels := make(map[string]map[int]map[string][]int)
 	newGroupRestrictedChannels := make(map[string]map[int]bool)
+	newGroup2userAllowPublic := make(map[string]map[int]bool)
 	for group := range groups {
 		newGroup2model2channels[group] = make(map[string][]int)
 		newGroup2userRestricted[group] = make(map[int]bool)
 		newGroup2userAllowedChannels[group] = make(map[int]map[int]bool)
 		newGroup2userModel2channels[group] = make(map[int]map[string][]int)
 		newGroupRestrictedChannels[group] = make(map[int]bool)
+		newGroup2userAllowPublic[group] = make(map[int]bool)
 	}
 	for _, channel := range channels {
 		otherSettings := channel.GetOtherSettings()
 		allowedUsers := otherSettings.AllowedUserIds
-		allowOtherUsers := otherSettings.AllowOtherUsers
+		allowOtherChannels := otherSettings.AllowOtherUsers
 		groups := strings.SplitSeq(channel.Group, ",")
 		for group := range groups {
 			group = strings.TrimSpace(group)
 			if group == "" {
 				continue
 			}
-			// 1. 公共渠道池：启用状态的渠道，且（未配置专属客户 或 开启了“支持其他用户请求”）时，进入公共池供普通客户正常使用
-			if channel.Status == common.ChannelStatusEnabled && (len(allowedUsers) == 0 || allowOtherUsers) {
+			// 1. 公共渠道池：仅未配置专属客户的启用状态渠道进入公共池（配置了专属客户的渠道仅对指定客户开放，不向其他普通客户开放）
+			if channel.Status == common.ChannelStatusEnabled && len(allowedUsers) == 0 {
 				if newGroup2model2channels[group] == nil {
 					newGroup2model2channels[group] = make(map[string][]int)
 				}
@@ -96,7 +98,7 @@ func InitChannelCache() {
 				}
 			}
 
-			// 2. 指定受限用户池：配置了专属指定用户的渠道，无论是否启用，均建立受限映射与专属池
+			// 2. 指定受限用户池：配置了专属指定用户的渠道
 			if len(allowedUsers) > 0 {
 				if newGroup2userRestricted[group] == nil {
 					newGroup2userRestricted[group] = make(map[int]bool)
@@ -104,24 +106,61 @@ func InitChannelCache() {
 					newGroup2userModel2channels[group] = make(map[int]map[string][]int)
 					newGroupRestrictedChannels[group] = make(map[int]bool)
 				}
-				if !allowOtherUsers {
-					newGroupRestrictedChannels[group][channel.Id] = true
+				if newGroup2userAllowPublic[group] == nil {
+					newGroup2userAllowPublic[group] = make(map[int]bool)
 				}
+				newGroupRestrictedChannels[group][channel.Id] = true
 				models := channel.GetModels()
 				for _, uid := range allowedUsers {
 					if uid > 0 {
 						newGroup2userRestricted[group][uid] = true
+						if allowOtherChannels {
+							newGroup2userAllowPublic[group][uid] = true
+						}
 						if newGroup2userAllowedChannels[group][uid] == nil {
 							newGroup2userAllowedChannels[group][uid] = make(map[int]bool)
 							newGroup2userModel2channels[group][uid] = make(map[string][]int)
 						}
-						newGroup2userAllowedChannels[group][uid][channel.Id] = true
-
-						// 指定后，无论是否禁用，都只能走指定的渠道
-						// 将该专属渠道的模型加入到该受限用户的专属渠道池中
-						for _, model := range models {
-							newGroup2userModel2channels[group][uid][model] = append(newGroup2userModel2channels[group][uid][model], channel.Id)
+						// 若开启了 allowOtherChannels（允许同时请求其他公共渠道并按优先级调度），则仅当本渠道启用时才加入候选；
+						// 若关闭了 allowOtherChannels（仅锁死本专属渠道），则无论是否禁用均加入候选
+						if !allowOtherChannels || channel.Status == common.ChannelStatusEnabled {
+							newGroup2userAllowedChannels[group][uid][channel.Id] = true
+							for _, model := range models {
+								newGroup2userModel2channels[group][uid][model] = append(newGroup2userModel2channels[group][uid][model], channel.Id)
+							}
 						}
+					}
+				}
+			}
+		}
+	}
+
+	// 若专属客户开启了 allowOtherChannels，则将该分组下所有启用的公共渠道合并进其候选池，后续统一按优先级从高到低排序
+	for group, userAllowPublicMap := range newGroup2userAllowPublic {
+		publicModel2Channels := newGroup2model2channels[group]
+		if len(publicModel2Channels) == 0 {
+			continue
+		}
+		for uid, allowPublic := range userAllowPublicMap {
+			if !allowPublic {
+				continue
+			}
+			if newGroup2userAllowedChannels[group][uid] == nil {
+				newGroup2userAllowedChannels[group][uid] = make(map[int]bool)
+			}
+			if newGroup2userModel2channels[group][uid] == nil {
+				newGroup2userModel2channels[group][uid] = make(map[string][]int)
+			}
+			for model, pubChIDs := range publicModel2Channels {
+				existing := make(map[int]bool, len(newGroup2userModel2channels[group][uid][model]))
+				for _, cid := range newGroup2userModel2channels[group][uid][model] {
+					existing[cid] = true
+				}
+				for _, pubCid := range pubChIDs {
+					newGroup2userAllowedChannels[group][uid][pubCid] = true
+					if !existing[pubCid] {
+						newGroup2userModel2channels[group][uid][model] = append(newGroup2userModel2channels[group][uid][model], pubCid)
+						existing[pubCid] = true
 					}
 				}
 			}
