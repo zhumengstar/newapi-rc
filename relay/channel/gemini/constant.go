@@ -1,6 +1,7 @@
 package gemini
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -66,4 +67,75 @@ func FormatGeminiBlockRefusalText(reason string, finishMessage *string) string {
 		return fmt.Sprintf("抱歉，由于触发了 Google 内容安全审查策略 (%s)，模型未生成回答：%s", reason, msg)
 	}
 	return fmt.Sprintf("抱歉，由于触发了 Google Gemini 内容安全审查策略 (%s)，请求已被拦截，无法生成回答。请调整您的提示词后重试。", reason)
+}
+
+func DetectGeminiBlockReasonFromText(text string) (string, bool) {
+	upper := strings.ToUpper(text)
+	switch {
+	case strings.Contains(upper, "PROHIBITED_CONTENT"):
+		return "PROHIBITED_CONTENT", true
+	case strings.Contains(upper, "RECITATION"):
+		return "RECITATION", true
+	case strings.Contains(upper, "BLOCKLIST"):
+		return "BLOCKLIST", true
+	case strings.Contains(upper, "SPII"):
+		return "SPII", true
+	case strings.Contains(upper, "SENSITIVE_WORDS_DETECTED") ||
+		strings.Contains(upper, "SENSITIVE WORDS") ||
+		strings.Contains(upper, "CONTENT POLICY BLOCKED") ||
+		strings.Contains(upper, "PROHIBITED USE POLICY"):
+		return "PROHIBITED_CONTENT", true
+	case strings.Contains(upper, "SAFETY"):
+		return "SAFETY", true
+	default:
+		return "", false
+	}
+}
+
+func ExtractGeminiStreamError(raw string) (string, string, bool) {
+	if !strings.Contains(raw, `"error"`) {
+		return "", "", false
+	}
+	type streamErrDetail struct {
+		Code    any    `json:"code"`
+		Message string `json:"message"`
+		Status  string `json:"status"`
+		Type    string `json:"type"`
+	}
+	var wrapper struct {
+		Error json.RawMessage `json:"error"`
+	}
+	trimmed := strings.TrimSpace(raw)
+	if strings.HasPrefix(trimmed, "[") {
+		var arr []struct {
+			Error json.RawMessage `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(trimmed), &arr); err == nil && len(arr) > 0 {
+			wrapper.Error = arr[0].Error
+		}
+	} else {
+		_ = json.Unmarshal([]byte(trimmed), &wrapper)
+	}
+	if len(wrapper.Error) == 0 || string(wrapper.Error) == "null" {
+		return "", "", false
+	}
+	var detail streamErrDetail
+	if err := json.Unmarshal(wrapper.Error, &detail); err == nil {
+		msg := strings.TrimSpace(detail.Message)
+		status := strings.TrimSpace(detail.Status)
+		if status == "" {
+			status = strings.TrimSpace(detail.Type)
+		}
+		if msg != "" || status != "" {
+			if msg == "" {
+				msg = status
+			}
+			return msg, status, true
+		}
+	}
+	var strErr string
+	if err := json.Unmarshal(wrapper.Error, &strErr); err == nil && strings.TrimSpace(strErr) != "" {
+		return strings.TrimSpace(strErr), "", true
+	}
+	return "", "", false
 }

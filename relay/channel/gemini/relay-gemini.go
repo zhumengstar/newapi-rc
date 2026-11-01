@@ -394,9 +394,53 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 	var hasBillableUsageMetadata bool
 	var streamErr error
 	var accumulatedUsageMetadata *dto.GeminiUsageMetadata
+	var debugRawFrames []string
 	responseText := strings.Builder{}
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
+		if len(debugRawFrames) < 3 {
+			frameSample := data
+			if len(frameSample) > 1024 {
+				frameSample = frameSample[:1024] + "...(truncated)"
+			}
+			debugRawFrames = append(debugRawFrames, frameSample)
+		}
+
+		if errMsg, errStatus, hasInlineErr := ExtractGeminiStreamError(data); hasInlineErr {
+			if blockReason, isSafety := DetectGeminiBlockReasonFromText(errMsg + " " + errStatus); isSafety {
+				common.SetContextKey(c, constant.ContextKeyAdminRejectReason, fmt.Sprintf("gemini_block_reason=%s (%s)", blockReason, errMsg))
+				refusalText := FormatGeminiBlockRefusalText(blockReason, &errMsg)
+				safetyReason := blockReason
+				syntheticResp := &dto.GeminiChatResponse{
+					Candidates: []dto.GeminiChatCandidate{
+						{
+							Content: dto.GeminiChatContent{
+								Role: "model",
+								Parts: []dto.GeminiPart{
+									{Text: refusalText},
+								},
+							},
+							FinishReason:  &safetyReason,
+							FinishMessage: &errMsg,
+						},
+					},
+				}
+				synthData := data
+				if synthBytes, mErr := common.Marshal(syntheticResp); mErr == nil {
+					synthData = string(synthBytes)
+				}
+				callback(synthData, syntheticResp)
+				sr.Stop(nil)
+				return
+			}
+			common.SetContextKey(c, constant.ContextKeyAdminRejectReason, fmt.Sprintf("gemini_stream_error=%s", errMsg))
+			if responseText.Len() == 0 && imageCount == 0 {
+				streamErr = fmt.Errorf("upstream gemini stream error: %s", errMsg)
+				sr.Stop(streamErr)
+				return
+			}
+		}
+
 		var geminiResponse dto.GeminiChatResponse
 		if err := common.UnmarshalJsonStr(data, &geminiResponse); err != nil {
 			streamErr = fmt.Errorf("unmarshal Gemini stream response: %w", err)
@@ -429,7 +473,11 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 				},
 				PromptFeedback: geminiResponse.PromptFeedback,
 			}
-			callback(data, syntheticResp)
+			synthData := data
+			if synthBytes, mErr := common.Marshal(syntheticResp); mErr == nil {
+				synthData = string(synthBytes)
+			}
+			callback(synthData, syntheticResp)
 			sr.Stop(nil)
 			return
 		}
@@ -447,6 +495,9 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 						candidate.Content.Role = "model"
 						candidate.Content.Parts = []dto.GeminiPart{
 							{Text: FormatGeminiBlockRefusalText(reason, candidate.FinishMessage)},
+						}
+						if synthBytes, mErr := common.Marshal(&geminiResponse); mErr == nil {
+							data = string(synthBytes)
 						}
 					}
 					break
@@ -526,6 +577,26 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 			}
 		}
 		patchGeminiZeroCompletionUsage(c, info, usage, responseText.String(), imageCount)
+	}
+
+	if usage.CompletionTokens == 0 && responseText.Len() == 0 && imageCount == 0 {
+		lastErrStr := ""
+		if info != nil && info.LastError != nil {
+			lastErrStr = info.LastError.Error()
+		}
+		if info.ReceivedResponseCount > 0 && common.GetContextKeyString(c, constant.ContextKeyAdminRejectReason) == "" && !isGeminiDownstreamStop(c, info) && streamErr == nil {
+			if blockReason, isSafety := DetectGeminiBlockReasonFromText(lastErrStr); isSafety {
+				common.SetContextKey(c, constant.ContextKeyAdminRejectReason, fmt.Sprintf("gemini_block_reason=%s (upstream_empty_stream_after: %s)", blockReason, lastErrStr))
+			} else if lastErrStr != "" {
+				common.SetContextKey(c, constant.ContextKeyAdminRejectReason, fmt.Sprintf("gemini_block_reason=PROHIBITED_CONTENT (upstream_empty_stream_after: %s)", lastErrStr))
+			} else {
+				common.SetContextKey(c, constant.ContextKeyAdminRejectReason, "gemini_block_reason=PROHIBITED_CONTENT (upstream_empty_stream)")
+			}
+		}
+		logger.LogWarn(c, fmt.Sprintf("GEMINI_STREAM_ZERO_TOKEN_DEBUG: req_id=%s, model=%s, recv_count=%d, has_usage=%v, prompt_tok=%d, cand_tok=%d, reject_reason=%s, last_err=%s, raw_frames=%v",
+			c.GetString(common.RequestIdKey), info.UpstreamModelName, info.ReceivedResponseCount,
+			hasBillableUsageMetadata, usage.PromptTokens, usage.CompletionTokens,
+			common.GetContextKeyString(c, constant.ContextKeyAdminRejectReason), lastErrStr, debugRawFrames))
 	}
 
 	if strings.Contains(common.GetContextKeyString(c, constant.ContextKeyAdminRejectReason), "gemini_block_reason=") {
