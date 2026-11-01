@@ -576,75 +576,142 @@ export function ApiAddressHoverPanel({
       </div>
 
       {/* 3. 模型成本单价配置概览与入口 */}
-      <div className='space-y-1.5 pt-0.5'>
-        <div className='flex items-center justify-between'>
-          <span className='text-[11px] font-semibold text-foreground flex items-center gap-1'>
-            <DollarSign className='size-3 text-emerald-600' />
-            模型成本单价 ({rules.length})
-          </span>
-          <button
-            type='button'
-            onClick={() => onOpenFullConfig(source)}
-            className='text-[11px] font-medium text-primary hover:underline flex items-center gap-0.5 cursor-pointer'
-          >
-            <Plus className='size-3' />
-            设置模型成本单价
-          </button>
-        </div>
+      {(() => {
+        // 将规则展开为按单个模型维度的展示项，并自动推导 group='*' 在当前地址下实际归属的分组
+        const resolveGroupsForModel = (ruleGroup: string, modelName: string): string[] => {
+          if (ruleGroup && ruleGroup !== '*') {
+            return [ruleGroup]
+          }
+          if (!source.group_models) return []
+          const matched: string[] = []
+          for (const g of sortedGroups) {
+            const gModels = source.group_models[g] || []
+            if (gModels.includes(modelName)) {
+              matched.push(g)
+            }
+          }
+          return matched
+        }
 
-        {rules.length === 0 ? (
-          <div
-            onClick={() => onOpenFullConfig(source)}
-            className='rounded-lg border border-dashed border-border/80 bg-muted/15 px-3 py-2 text-center text-[11px] whitespace-nowrap text-muted-foreground hover:border-primary/50 hover:text-foreground cursor-pointer transition-colors'
-          >
-            暂未配置专属模型成本单价，点击配置按次($/次)、按量($/M)或模型倍率(x)
-          </div>
-        ) : (
-          <div className='space-y-1 max-h-28 overflow-y-auto'>
-            {rules.map((r, idx) => (
-              <div
-                key={idx}
+        const expandedItems = rules.flatMap((r, ruleIdx) => {
+          const models = r.models && r.models.length > 0 ? r.models : ['*']
+          return models.map((m) => ({
+            key: `${ruleIdx}-${m}`,
+            model: m,
+            rule: r,
+            matchedGroups: resolveGroupsForModel(r.group, m),
+          }))
+        })
+
+        return (
+          <div className='space-y-1.5 pt-0.5'>
+            <div className='flex items-center justify-between'>
+              <span className='text-[11px] font-semibold text-foreground flex items-center gap-1'>
+                <DollarSign className='size-3 text-emerald-600' />
+                模型成本单价 ({expandedItems.length})
+              </span>
+              <button
+                type='button'
                 onClick={() => onOpenFullConfig(source)}
-                className='flex items-center justify-between gap-2 rounded-md border border-amber-300/60 dark:border-amber-800/60 bg-amber-50/40 dark:bg-amber-950/20 px-2 py-1 text-[11px] cursor-pointer hover:bg-amber-50/80 transition-colors'
+                className='text-[11px] font-medium text-primary hover:underline flex items-center gap-0.5 cursor-pointer'
               >
-                <div className='flex items-center gap-1 min-w-0 flex-1'>
-                  <Badge
-                    variant='outline'
-                    className='h-3.5 px-1 text-[9px] font-mono shrink-0 bg-background/80'
-                  >
-                    {r.group === '*' ? '全部组' : r.group}
-                  </Badge>
-                  <span
-                    className='font-mono truncate text-foreground/90'
-                    title={(r.models || []).join(', ')}
-                  >
-                    {(r.models || []).length === 1
-                      ? r.models[0]
-                      : `${r.models?.[0] || '*'} 等${(r.models || []).length}个`}
-                  </span>
-                </div>
-                <span className='font-mono font-semibold text-amber-700 dark:text-amber-300 shrink-0 flex items-center gap-0.5'>
-                  {r.mode === 'per_token' ? (
-                    <>
-                      <Coins className='size-2.5' />入${r.input_price ?? 0}/出$
-                      {r.output_price ?? 0}/M
-                    </>
-                  ) : r.mode === 'ratio' ? (
-                    <>
-                      <Zap className='size-2.5' />
-                      {r.cost_ratio ?? 0}x
-                    </>
-                  ) : (
-                    <>
-                      <Sparkles className='size-2.5' />${r.price ?? 0}/次
-                    </>
-                  )}
-                </span>
+                <Plus className='size-3' />
+                设置模型成本单价
+              </button>
+            </div>
+
+            {expandedItems.length === 0 ? (
+              <div
+                onClick={() => onOpenFullConfig(source)}
+                className='rounded-lg border border-dashed border-border/80 bg-muted/15 px-3 py-2 text-center text-[11px] whitespace-nowrap text-muted-foreground hover:border-primary/50 hover:text-foreground cursor-pointer transition-colors'
+              >
+                暂未配置专属模型成本单价，点击配置按次($/次)、按量($/M)或模型倍率(x)
               </div>
-            ))}
+            ) : (
+              <div className='rounded-lg border border-border/70 bg-muted/20 p-1.5 space-y-1 max-h-36 overflow-y-auto'>
+                {expandedItems.map(({ key, model, rule: r, matchedGroups }) => {
+                  const primaryGroup = matchedGroups[0]
+                  const extraGroupCount =
+                    matchedGroups.length > 1 ? matchedGroups.length - 1 : 0
+                  const groupTooltip =
+                    r.group === '*'
+                      ? matchedGroups.length > 0
+                        ? `全局规则 (当前地址下匹配分组: ${matchedGroups.join(', ')})`
+                        : '全部关联分组通用'
+                      : `指定分组: ${r.group}`
+
+                  return (
+                    <div
+                      key={key}
+                      onClick={() => onOpenFullConfig(source)}
+                      title={`点击编辑 · ${groupTooltip} · 模型: ${model}`}
+                      className='flex items-center justify-between gap-1.5 rounded-md border border-border/50 bg-background/80 px-2 py-1 text-[11px] whitespace-nowrap cursor-pointer hover:bg-muted/40 transition-colors'
+                    >
+                      <div className='flex items-center gap-1.5 min-w-0 flex-1 overflow-hidden'>
+                        <div
+                          className='w-[98px] shrink-0 flex items-center gap-1 overflow-hidden'
+                          title={groupTooltip}
+                        >
+                          {primaryGroup ? (
+                            <>
+                              <GroupBadge
+                                group={primaryGroup}
+                                className='max-w-full truncate text-[10px] font-medium'
+                              />
+                              {extraGroupCount > 0 && (
+                                <span className='text-[9px] font-mono text-muted-foreground shrink-0'>
+                                  +{extraGroupCount}
+                                </span>
+                              )}
+                            </>
+                          ) : (
+                            <Badge
+                              variant='outline'
+                              className='h-4 px-1.5 text-[10px] font-medium shrink-0 bg-muted/50 text-muted-foreground border-border/60'
+                            >
+                              全部组
+                            </Badge>
+                          )}
+                        </div>
+                        <span className='font-mono text-[11px] font-medium truncate text-foreground/90'>
+                          {model}
+                        </span>
+                      </div>
+
+                      <span
+                        className={cn(
+                          'inline-flex shrink-0 items-center gap-0.5 rounded border px-1.5 py-0.5 font-mono text-[10px] font-semibold tabular-nums',
+                          r.mode === 'per_token'
+                            ? 'bg-sky-500/10 text-sky-700 dark:text-sky-300 border-sky-500/25'
+                            : r.mode === 'ratio'
+                              ? 'bg-violet-500/10 text-violet-700 dark:text-violet-300 border-violet-500/25'
+                              : 'bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/25'
+                        )}
+                      >
+                        {r.mode === 'per_token' ? (
+                          <>
+                            <Coins className='size-2.5' />入${r.input_price ?? 0}
+                            /出${r.output_price ?? 0}/M
+                          </>
+                        ) : r.mode === 'ratio' ? (
+                          <>
+                            <Zap className='size-2.5' />
+                            {r.cost_ratio ?? 0}x
+                          </>
+                        ) : (
+                          <>
+                            <Sparkles className='size-2.5' />${r.price ?? 0}/次
+                          </>
+                        )}
+                      </span>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
           </div>
-        )}
-      </div>
+        )
+      })()}
     </div>
   )
 }

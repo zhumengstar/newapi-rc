@@ -1535,6 +1535,13 @@ export function QuickSourceDialog({
                       ? rule.models
                       : rule.models.slice(0, maxShow)
                     const moreCount = rule.models.length - shownModels.length
+                    const matchedGroupsForWildcard =
+                      rule.group === '*' && source.group_models
+                        ? sourceGroups.filter((g) => {
+                            const gModels = source.group_models?.[g] || []
+                            return rule.models.some((m) => gModels.includes(m))
+                          })
+                        : []
 
                     return (
                       <div
@@ -1542,15 +1549,36 @@ export function QuickSourceDialog({
                         className='rounded-lg border border-border/70 bg-background p-2.5 space-y-2 text-xs'
                       >
                         <div className='flex items-center justify-between gap-2 flex-wrap'>
-                          <div className='flex items-center gap-1.5'>
-                            <Badge
-                              variant='outline'
-                              className='h-4 px-1.5 text-[10px] font-mono bg-muted/50'
-                            >
-                              {rule.group === '*'
-                                ? '🌐 全部分组'
-                                : rule.group}
-                            </Badge>
+                          <div className='flex items-center gap-1.5 flex-wrap'>
+                            {rule.group !== '*' ? (
+                              <GroupBadge
+                                group={rule.group}
+                                className='text-[10px] font-medium'
+                              />
+                            ) : matchedGroupsForWildcard.length > 0 ? (
+                              <>
+                                {matchedGroupsForWildcard.map((mg) => (
+                                  <GroupBadge
+                                    key={mg}
+                                    group={mg}
+                                    className='text-[10px] font-medium'
+                                  />
+                                ))}
+                                <Badge
+                                  variant='outline'
+                                  className='h-4 px-1 text-[9px] font-mono bg-muted/40 text-muted-foreground'
+                                >
+                                  全局适用
+                                </Badge>
+                              </>
+                            ) : (
+                              <Badge
+                                variant='outline'
+                                className='h-4 px-1.5 text-[10px] font-mono bg-muted/50'
+                              >
+                                🌐 全部分组
+                              </Badge>
+                            )}
                             <Badge
                               variant='outline'
                               className={cn(
