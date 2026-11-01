@@ -209,6 +209,7 @@ export interface GetChannelsResponse {
     model_family_counts?: Record<string, number>
     model_type_counts?: Record<string, number>
     billing_type_counts?: Record<string, number>
+    exclusive_counts?: Record<string, number>
   }
 }
 
@@ -222,6 +223,7 @@ export interface SearchChannelsResponse {
     model_family_counts?: Record<string, number>
     model_type_counts?: Record<string, number>
     billing_type_counts?: Record<string, number>
+    exclusive_counts?: Record<string, number>
   }
 }
 
@@ -344,6 +346,7 @@ export interface GetChannelsParams {
   model_family?: string
   model_type?: string
   billing_type?: string
+  exclusive?: string
 }
 
 export interface SearchChannelsParams {
@@ -360,6 +363,7 @@ export interface SearchChannelsParams {
   model_family?: string
   model_type?: string
   billing_type?: string
+  exclusive?: string
   p?: number
   page_size?: number
 }

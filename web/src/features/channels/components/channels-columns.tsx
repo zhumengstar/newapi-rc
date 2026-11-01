@@ -1211,6 +1211,24 @@ export function useChannelsColumns(
           const isPassThrough = settings.pass_through_body_enabled === true
           const hasParamOverride = Boolean(channel.param_override?.trim())
           const hostOrAddress = getChannelHostOrAddress(channel)
+          let boundUserCount = 0
+          let allowBindOtherChannels = false
+          let allowOtherUsers = false
+          if (channel.settings) {
+            try {
+              const parsedOther = JSON.parse(channel.settings)
+              if (Array.isArray(parsedOther.allowed_user_ids)) {
+                boundUserCount = parsedOther.allowed_user_ids.filter(
+                  (n: unknown) => Number.isFinite(Number(n)) && Number(n) > 0
+                ).length
+              }
+              allowBindOtherChannels =
+                parsedOther.allow_bind_users_other_channels === true
+              allowOtherUsers = parsedOther.allow_other_users === true
+            } catch {
+              // ignore
+            }
+          }
 
           return (
             <div className='flex max-w-full min-w-0 items-center gap-2'>
@@ -1220,6 +1238,28 @@ export function useChannelsColumns(
                     channel={channel}
                     sensitiveVisible={sensitiveVisible}
                   />
+                  {boundUserCount > 0 && (
+                    <TooltipProvider delay={100}>
+                      <Tooltip>
+                        <TooltipTrigger
+                          render={
+                            <span className='inline-flex shrink-0 items-center rounded border border-purple-500/30 bg-purple-500/10 px-1.5 py-0.5 text-[11px] font-medium text-purple-600 dark:text-purple-400'>
+                              专属({boundUserCount}人)
+                            </span>
+                          }
+                        />
+                        <TooltipContent side='top' className='max-w-xs text-xs'>
+                          <div>已绑定 {boundUserCount} 位专属客户</div>
+                          <div className='text-muted-foreground mt-0.5'>
+                            • 绑定客户请求其他公共渠道：{allowBindOtherChannels ? '已开启' : '已关闭（仅走本渠道）'}
+                          </div>
+                          <div className='text-muted-foreground'>
+                            • 其他用户请求本渠道：{allowOtherUsers ? '已开启' : '已关闭（仅绑定客户可用）'}
+                          </div>
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  )}
                   {channel.contact && (
                     <span
                       className='inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-mono font-medium bg-muted/80 text-muted-foreground border border-border/60 shrink-0 max-w-[140px] truncate'

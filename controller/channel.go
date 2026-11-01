@@ -195,7 +195,111 @@ const (
 
 	channelBillingTypePerRequest = "PerRequest"
 	channelBillingTypePerToken   = "PerToken"
+
+	channelExclusiveBound   = "bound"
+	channelExclusiveUnbound = "unbound"
 )
+
+func isChannelExclusiveBound(settingsStr string) bool {
+	if settingsStr == "" || !strings.Contains(settingsStr, "allowed_user_ids") {
+		return false
+	}
+	ch := model.Channel{OtherSettings: settingsStr}
+	return len(ch.GetOtherSettings().AllowedUserIds) > 0
+}
+
+func getExclusiveBoundChannelIDs() []int {
+	var rows []struct {
+		Id       int
+		Settings string
+	}
+	if err := model.DB.Model(&model.Channel{}).
+		Select("id, settings").
+		Where("settings LIKE ?", "%allowed_user_ids%").
+		Find(&rows).Error; err != nil {
+		return nil
+	}
+	ids := make([]int, 0, len(rows))
+	for _, r := range rows {
+		if isChannelExclusiveBound(r.Settings) {
+			ids = append(ids, r.Id)
+		}
+	}
+	return ids
+}
+
+func applyChannelExclusiveFilter(query *gorm.DB, exclusive string) *gorm.DB {
+	switch exclusive {
+	case channelExclusiveBound:
+		ids := getExclusiveBoundChannelIDs()
+		if len(ids) == 0 {
+			return query.Where("1 = 0")
+		}
+		return query.Where("id IN ?", ids)
+	case channelExclusiveUnbound:
+		ids := getExclusiveBoundChannelIDs()
+		if len(ids) == 0 {
+			return query
+		}
+		return query.Where("id NOT IN ?", ids)
+	default:
+		return query
+	}
+}
+
+func getChannelExclusiveCounts(query *gorm.DB) (map[string]int64, error) {
+	var rows []struct {
+		Settings string
+	}
+	if err := query.Select("settings").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	counts := map[string]int64{
+		"all":                   int64(len(rows)),
+		channelExclusiveBound:   0,
+		channelExclusiveUnbound: 0,
+	}
+	for _, row := range rows {
+		if isChannelExclusiveBound(row.Settings) {
+			counts[channelExclusiveBound]++
+		} else {
+			counts[channelExclusiveUnbound]++
+		}
+	}
+	return counts, nil
+}
+
+func countChannelExclusive(channels []*model.Channel) map[string]int64 {
+	counts := map[string]int64{
+		"all":                   int64(len(channels)),
+		channelExclusiveBound:   0,
+		channelExclusiveUnbound: 0,
+	}
+	for _, ch := range channels {
+		if isChannelExclusiveBound(ch.OtherSettings) {
+			counts[channelExclusiveBound]++
+		} else {
+			counts[channelExclusiveUnbound]++
+		}
+	}
+	return counts
+}
+
+func filterChannelsByExclusive(channels []*model.Channel, exclusive string) []*model.Channel {
+	if exclusive == "" || exclusive == "all" {
+		return channels
+	}
+	filtered := make([]*model.Channel, 0, len(channels))
+	for _, ch := range channels {
+		bound := isChannelExclusiveBound(ch.OtherSettings)
+		if exclusive == channelExclusiveBound && bound {
+			filtered = append(filtered, ch)
+		} else if exclusive == channelExclusiveUnbound && !bound {
+			filtered = append(filtered, ch)
+		}
+	}
+	return filtered
+}
 
 func getChannelModelType(modelName string) string {
 	name := strings.ToLower(strings.TrimSpace(modelName))
@@ -447,11 +551,13 @@ func GetAllChannels(c *gin.Context) {
 	modelFamily := c.DefaultQuery("model_family", "all")
 	modelType := c.DefaultQuery("model_type", "all")
 	billingType := c.DefaultQuery("billing_type", "all")
+	exclusive := c.DefaultQuery("exclusive", "all")
 	buildFilteredQuery := func(typeValue int) *gorm.DB {
 		query := buildChannelListQuery(groupFilter, statusFilter, typeValue)
 		query = applyChannelModelFamilyFilter(query, modelFamily)
 		query = applyChannelModelTypeFilter(query, modelType)
-		return applyChannelBillingTypeFilter(query, billingType)
+		query = applyChannelBillingTypeFilter(query, billingType)
+		return applyChannelExclusiveFilter(query, exclusive)
 	}
 
 	var total int64
@@ -511,6 +617,7 @@ func GetAllChannels(c *gin.Context) {
 	typeCountQuery := buildChannelListQuery(groupFilter, statusFilter, -1)
 	typeCountQuery = applyChannelModelTypeFilter(typeCountQuery, modelType)
 	typeCountQuery = applyChannelBillingTypeFilter(typeCountQuery, billingType)
+	typeCountQuery = applyChannelExclusiveFilter(typeCountQuery, exclusive)
 	var results []struct {
 		Type  int64
 		Count int64
@@ -527,6 +634,7 @@ func GetAllChannels(c *gin.Context) {
 	familyCountQuery := buildChannelListQuery(groupFilter, statusFilter, -1)
 	familyCountQuery = applyChannelModelTypeFilter(familyCountQuery, modelType)
 	familyCountQuery = applyChannelBillingTypeFilter(familyCountQuery, billingType)
+	familyCountQuery = applyChannelExclusiveFilter(familyCountQuery, exclusive)
 	familyCounts, err := getChannelModelFamilyCounts(familyCountQuery)
 	if err != nil {
 		common.SysError("failed to count channel model families: " + err.Error())
@@ -536,6 +644,7 @@ func GetAllChannels(c *gin.Context) {
 	modelTypeCountQuery := buildChannelListQuery(groupFilter, statusFilter, typeFilter)
 	modelTypeCountQuery = applyChannelModelFamilyFilter(modelTypeCountQuery, modelFamily)
 	modelTypeCountQuery = applyChannelBillingTypeFilter(modelTypeCountQuery, billingType)
+	modelTypeCountQuery = applyChannelExclusiveFilter(modelTypeCountQuery, exclusive)
 	modelTypeCounts, err := getChannelModelTypeCounts(modelTypeCountQuery)
 	if err != nil {
 		common.SysError("failed to count channel model types: " + err.Error())
@@ -545,10 +654,21 @@ func GetAllChannels(c *gin.Context) {
 	billingTypeCountQuery := buildChannelListQuery(groupFilter, statusFilter, typeFilter)
 	billingTypeCountQuery = applyChannelModelFamilyFilter(billingTypeCountQuery, modelFamily)
 	billingTypeCountQuery = applyChannelModelTypeFilter(billingTypeCountQuery, modelType)
+	billingTypeCountQuery = applyChannelExclusiveFilter(billingTypeCountQuery, exclusive)
 	billingTypeCounts, err := getChannelBillingTypeCounts(billingTypeCountQuery)
 	if err != nil {
 		common.SysError("failed to count channel billing types: " + err.Error())
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "获取计费类型统计失败，请稍后重试"})
+		return
+	}
+	exclusiveCountQuery := buildChannelListQuery(groupFilter, statusFilter, typeFilter)
+	exclusiveCountQuery = applyChannelModelFamilyFilter(exclusiveCountQuery, modelFamily)
+	exclusiveCountQuery = applyChannelModelTypeFilter(exclusiveCountQuery, modelType)
+	exclusiveCountQuery = applyChannelBillingTypeFilter(exclusiveCountQuery, billingType)
+	exclusiveCounts, err := getChannelExclusiveCounts(exclusiveCountQuery)
+	if err != nil {
+		common.SysError("failed to count channel exclusive bindings: " + err.Error())
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "获取专属绑定统计失败，请稍后重试"})
 		return
 	}
 	common.ApiSuccess(c, gin.H{
@@ -560,6 +680,7 @@ func GetAllChannels(c *gin.Context) {
 		"model_family_counts": familyCounts,
 		"model_type_counts":   modelTypeCounts,
 		"billing_type_counts": billingTypeCounts,
+		"exclusive_counts":    exclusiveCounts,
 	})
 	return
 }
@@ -707,36 +828,59 @@ func SearchChannels(c *gin.Context) {
 	modelFamily := c.DefaultQuery("model_family", "all")
 	modelType := c.DefaultQuery("model_type", "all")
 	billingType := c.DefaultQuery("billing_type", "all")
+	exclusive := c.DefaultQuery("exclusive", "all")
 	modelFamilyCounts := countChannelModelFamilies(
-		filterChannelsByBillingType(
-			filterChannelsByModelType(channelData, modelType),
-			billingType,
+		filterChannelsByExclusive(
+			filterChannelsByBillingType(
+				filterChannelsByModelType(channelData, modelType),
+				billingType,
+			),
+			exclusive,
 		),
 	)
 	// calculate type counts for search results
 	typeCounts := make(map[int64]int64)
-	baseChannelsForType := filterChannelsByBillingType(
-		filterChannelsByModelType(channelData, modelType),
-		billingType,
+	baseChannelsForType := filterChannelsByExclusive(
+		filterChannelsByBillingType(
+			filterChannelsByModelType(channelData, modelType),
+			billingType,
+		),
+		exclusive,
 	)
 	for _, channel := range baseChannelsForType {
 		typeCounts[int64(channel.Type)]++
 	}
 	modelTypeCounts := countChannelModelTypes(
-		filterChannelsByBillingType(
-			filterChannelsByModelFamily(channelData, modelFamily),
-			billingType,
+		filterChannelsByExclusive(
+			filterChannelsByBillingType(
+				filterChannelsByModelFamily(channelData, modelFamily),
+				billingType,
+			),
+			exclusive,
 		),
 	)
 	billingTypeCounts := countChannelBillingTypes(
-		filterChannelsByModelType(
-			filterChannelsByModelFamily(channelData, modelFamily),
-			modelType,
+		filterChannelsByExclusive(
+			filterChannelsByModelType(
+				filterChannelsByModelFamily(channelData, modelFamily),
+				modelType,
+			),
+			exclusive,
+		),
+	)
+	exclusiveCounts := countChannelExclusive(
+		filterChannelsByBillingType(
+			filterChannelsByModelType(
+				filterChannelsByModelFamily(channelData, modelFamily),
+				modelType,
+			),
+			billingType,
 		),
 	)
 	channelData = filterChannelsByModelFamily(channelData, modelFamily)
 	channelData = filterChannelsByModelType(channelData, modelType)
 	channelData = filterChannelsByBillingType(channelData, billingType)
+	channelData = filterChannelsByExclusive(channelData, exclusive)
 
 	typeParam := c.Query("type")
 	typeFilter := -1
@@ -786,6 +930,7 @@ func SearchChannels(c *gin.Context) {
 			"model_family_counts": modelFamilyCounts,
 			"model_type_counts":   modelTypeCounts,
 			"billing_type_counts": billingTypeCounts,
+			"exclusive_counts":    exclusiveCounts,
 		},
 	})
 	return

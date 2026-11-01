@@ -96,6 +96,7 @@ const CHANNELS_GROUP_ORDER_STORAGE_KEY = 'channel-group-order:v2'
 const CHANNELS_MODEL_FAMILY_FILTER_STORAGE_KEY = 'channel-model-family-filter'
 const CHANNELS_MODEL_TYPE_FILTER_STORAGE_KEY = 'channel-model-type-filter'
 const CHANNELS_BILLING_TYPE_FILTER_STORAGE_KEY = 'channel-billing-type-filter'
+const CHANNELS_EXCLUSIVE_FILTER_STORAGE_KEY = 'channel-exclusive-filter'
 
 function getStoredChannelArrayFilter(key: string): string[] | undefined {
   try {
@@ -293,6 +294,17 @@ export function ChannelsTable() {
                 CHANNELS_BILLING_TYPE_FILTER_STORAGE_KEY
               ),
       },
+      {
+        columnId: 'exclusive',
+        searchKey: 'exclusive',
+        type: 'array',
+        deserialize: (value) =>
+          value !== undefined
+            ? value
+            : getStoredChannelArrayFilter(
+                CHANNELS_EXCLUSIVE_FILTER_STORAGE_KEY
+              ),
+      },
       { columnId: 'model', searchKey: 'model', type: 'string' },
     ],
   })
@@ -338,6 +350,13 @@ export function ChannelsTable() {
           ? billingType.filter((value): value is string => typeof value === 'string')
           : []
       )
+      const exclusive = next.find((f) => f.id === 'exclusive')?.value
+      setStoredChannelArrayFilter(
+        CHANNELS_EXCLUSIVE_FILTER_STORAGE_KEY,
+        Array.isArray(exclusive)
+          ? exclusive.filter((value): value is string => typeof value === 'string')
+          : []
+      )
       return next
     })
   }
@@ -364,6 +383,12 @@ export function ChannelsTable() {
   const billingTypeFilter = useMemo(
     () =>
       (columnFilters.find((f) => f.id === 'billing_type')?.value as string[]) ||
+      [],
+    [columnFilters]
+  )
+  const exclusiveFilter = useMemo(
+    () =>
+      (columnFilters.find((f) => f.id === 'exclusive')?.value as string[]) ||
       [],
     [columnFilters]
   )
@@ -552,6 +577,10 @@ export function ChannelsTable() {
         billingTypeFilter.length > 0 && !billingTypeFilter.includes('all')
           ? billingTypeFilter[0]
           : undefined,
+      exclusive:
+        exclusiveFilter.length > 0 && !exclusiveFilter.includes('all')
+          ? exclusiveFilter[0]
+          : undefined,
       tag_mode: enableTagMode,
       id_sort: groupSort || groupOrderSort ? false : idSort,
       ...(groupSort ? { sort_by: 'priority' as const, sort_order: 'desc' as const } : {}),
@@ -581,6 +610,10 @@ export function ChannelsTable() {
               billingTypeFilter.length > 0 && !billingTypeFilter.includes('all')
                 ? billingTypeFilter[0]
                 : undefined,
+            exclusive:
+              exclusiveFilter.length > 0 && !exclusiveFilter.includes('all')
+                ? exclusiveFilter[0]
+                : undefined,
             tag_mode: enableTagMode,
             id_sort: groupSort || groupOrderSort ? false : idSort,
             ...(groupSort ? { sort_by: 'priority' as const, sort_order: 'desc' as const } : {}),
@@ -607,6 +640,10 @@ export function ChannelsTable() {
             billing_type:
               billingTypeFilter.length > 0 && !billingTypeFilter.includes('all')
                 ? billingTypeFilter[0]
+                : undefined,
+            exclusive:
+              exclusiveFilter.length > 0 && !exclusiveFilter.includes('all')
+                ? exclusiveFilter[0]
                 : undefined,
             tag_mode: enableTagMode,
             id_sort: groupSort || groupOrderSort ? false : idSort,
@@ -644,6 +681,7 @@ export function ChannelsTable() {
   const modelFamilyCounts = data?.data?.model_family_counts
   const modelTypeCounts = data?.data?.model_type_counts
   const billingTypeCounts = data?.data?.billing_type_counts
+  const exclusiveCounts = data?.data?.exclusive_counts
 
   // Columns configuration
   const columns = useChannelsColumns({ enableSelection: batchMode })
@@ -860,6 +898,32 @@ export function ChannelsTable() {
       },
     ]
   }, [billingTypeCounts, t])
+
+  const exclusiveFilterOptions = useMemo(() => {
+    const counts = exclusiveCounts || {}
+    const totalExclusive =
+      typeof counts.all === 'number'
+        ? counts.all
+        : (Number(counts.bound) || 0) + (Number(counts.unbound) || 0)
+
+    return [
+      {
+        label: t('All Channels', '全部渠道'),
+        value: 'all',
+        count: totalExclusive,
+      },
+      {
+        label: t('Exclusive Bound', '已设置专属绑定'),
+        value: 'bound',
+        count: Number(counts.bound) || 0,
+      },
+      {
+        label: t('Public Unbound', '未设置专属绑定'),
+        value: 'unbound',
+        count: Number(counts.unbound) || 0,
+      },
+    ]
+  }, [exclusiveCounts, t])
 
   const sortedGroupNames = groupOrder
 
@@ -1089,6 +1153,7 @@ export function ChannelsTable() {
           clearStoredChannelFilter(CHANNELS_MODEL_FAMILY_FILTER_STORAGE_KEY)
           clearStoredChannelFilter(CHANNELS_MODEL_TYPE_FILTER_STORAGE_KEY)
           clearStoredChannelFilter(CHANNELS_BILLING_TYPE_FILTER_STORAGE_KEY)
+          clearStoredChannelFilter(CHANNELS_EXCLUSIVE_FILTER_STORAGE_KEY)
         },
         additionalSearch: (
           <Input
@@ -1215,6 +1280,14 @@ export function ChannelsTable() {
               clearStoredChannelFilter(
                 CHANNELS_BILLING_TYPE_FILTER_STORAGE_KEY
               ),
+          },
+          {
+            columnId: 'exclusive',
+            title: t('Exclusive Binding', '专属绑定'),
+            options: exclusiveFilterOptions,
+            singleSelect: true,
+            onClear: () =>
+              clearStoredChannelFilter(CHANNELS_EXCLUSIVE_FILTER_STORAGE_KEY),
           },
         ],
         preActions: (
