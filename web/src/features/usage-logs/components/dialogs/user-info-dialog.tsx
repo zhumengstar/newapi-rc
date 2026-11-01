@@ -16,24 +16,30 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
+  Check,
   Coins,
   Gift,
   Layers,
   Loader2,
   MessageSquareText,
+  Plus,
   Sparkles,
   User as UserIcon,
+  X,
 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { type ReactNode, useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { toast } from 'sonner'
 
 import { Dialog } from '@/components/dialog'
 import { GroupBadge } from '@/components/group-badge'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { getGroupDetails } from '@/features/users/api'
+import { adjustUserQuota, getGroupDetails } from '@/features/users/api'
 import {
   inferGroupFamily,
   sortGroupsByFamilyAndRatio,
@@ -44,8 +50,17 @@ import {
   parseUserGroupRatios,
   parseUserModelPriceRules,
 } from '@/features/users/lib/user-form'
-import { formatQuotaWithCurrency } from '@/lib/currency'
-import { formatQuota, formatCompactNumber } from '@/lib/format'
+import type { QuotaAdjustMode } from '@/features/users/types'
+import {
+  formatQuotaWithCurrency,
+  getCurrencyDisplay,
+  getCurrencyLabel,
+} from '@/lib/currency'
+import {
+  formatQuota,
+  formatCompactNumber,
+  parseQuotaFromDollars,
+} from '@/lib/format'
 import { handleServerError } from '@/lib/handle-server-error'
 import { requireServerSuccess } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
@@ -59,21 +74,28 @@ interface UserInfoDialogProps {
   onOpenChange: (open: boolean) => void
 }
 
+const QUICK_TOPUP_PRESETS = [5, 10, 20, 50, 100, 500] as const
+
 function StatCard({
   label,
   value,
   subValue,
   highlight = false,
+  action,
 }: {
   label: string
   value: string | number
   subValue?: string
   highlight?: boolean
+  action?: ReactNode
 }) {
   return (
     <div className='rounded-xl border border-border/60 bg-muted/25 px-3.5 py-2.5 space-y-1'>
-      <div className='text-muted-foreground text-[11px] font-medium'>
-        {label}
+      <div className='flex items-center justify-between gap-1.5'>
+        <div className='text-muted-foreground text-[11px] font-medium'>
+          {label}
+        </div>
+        {action}
       </div>
       <div
         className={cn(
@@ -98,11 +120,22 @@ export function UserInfoDialog({
   onOpenChange,
 }: UserInfoDialogProps) {
   const { t } = useTranslation()
+  const queryClient = useQueryClient()
   const [userInfo, setUserInfo] = useState<UserInfo | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [expandedRuleKeys, setExpandedRuleKeys] = useState<
     Record<string, boolean>
   >({})
+
+  // Balance adjustment state
+  const [quotaEditorOpen, setQuotaEditorOpen] = useState(false)
+  const [quotaMode, setQuotaMode] = useState<QuotaAdjustMode>('add')
+  const [quotaAmount, setQuotaAmount] = useState('')
+  const [isAdjustingQuota, setIsAdjustingQuota] = useState(false)
+
+  const { meta: currencyMeta } = getCurrencyDisplay()
+  const currencyLabel = getCurrencyLabel()
+  const tokensOnly = currencyMeta.kind === 'tokens'
 
   const { data: groupDetailsData } = useQuery({
     queryKey: ['group-details'],
@@ -138,9 +171,52 @@ export function UserInfoDialog({
   useEffect(() => {
     if (open && userId) {
       setExpandedRuleKeys({})
+      setQuotaEditorOpen(false)
+      setQuotaMode('add')
+      setQuotaAmount('')
       fetchUserInfo(userId)
     }
   }, [open, userId, fetchUserInfo])
+
+  const amountNum = Number.parseFloat(quotaAmount) || 0
+  const parsedQuotaDelta = parseQuotaFromDollars(Math.abs(amountNum))
+
+  const handleConfirmQuotaAdjust = async () => {
+    if (!userInfo) return
+    if (!quotaAmount && quotaMode !== 'override') return
+    if (parsedQuotaDelta <= 0 && quotaMode !== 'override') return
+
+    setIsAdjustingQuota(true)
+    try {
+      const value =
+        quotaMode === 'override'
+          ? parseQuotaFromDollars(amountNum)
+          : Math.abs(parsedQuotaDelta)
+      const result = await adjustUserQuota({
+        id: userInfo.id,
+        action: 'add_quota',
+        mode: quotaMode,
+        value,
+      })
+      if (result.success) {
+        toast.success(t('Quota adjusted successfully'))
+        setQuotaAmount('')
+        setQuotaMode('add')
+        setQuotaEditorOpen(false)
+        await fetchUserInfo(userInfo.id)
+        void queryClient.invalidateQueries({ queryKey: ['users'] })
+        void queryClient.invalidateQueries({
+          queryKey: ['today-consumption-users'],
+        })
+      } else {
+        handleServerError(result, t('Failed to adjust quota'))
+      }
+    } catch (error) {
+      handleServerError(error, t('Failed to adjust quota'))
+    } finally {
+      setIsAdjustingQuota(false)
+    }
+  }
 
   const parsedGroupData = useMemo(() => {
     if (!userInfo) {
@@ -293,6 +369,30 @@ export function UserInfoDialog({
               label={t('Balance')}
               value={formatQuota(userInfo.quota)}
               highlight
+              action={
+                <button
+                  type='button'
+                  onClick={() => setQuotaEditorOpen((prev) => !prev)}
+                  className={cn(
+                    'inline-flex items-center gap-0.5 rounded-md border px-1.5 py-0.5 text-[10px] font-medium transition-colors cursor-pointer',
+                    quotaEditorOpen
+                      ? 'border-muted-foreground/30 bg-muted text-muted-foreground hover:text-foreground'
+                      : 'border-emerald-500/35 bg-emerald-500/10 text-emerald-700 hover:bg-emerald-500/20 dark:text-emerald-300'
+                  )}
+                >
+                  {quotaEditorOpen ? (
+                    <>
+                      <X className='size-2.5' />
+                      <span>收起</span>
+                    </>
+                  ) : (
+                    <>
+                      <Plus className='size-2.5' />
+                      <span>添加余额</span>
+                    </>
+                  )}
+                </button>
+              }
             />
             <StatCard
               label={t('Used Quota')}
@@ -308,6 +408,118 @@ export function UserInfoDialog({
               }
             />
           </div>
+
+          {/* 2.5 Inline Balance Adjustment Panel */}
+          {quotaEditorOpen && (
+            <div className='rounded-xl border border-emerald-500/30 bg-emerald-500/[0.04] dark:bg-emerald-950/20 p-3 space-y-2.5'>
+              <div className='flex flex-wrap items-center justify-between gap-2'>
+                <div className='flex items-center gap-1'>
+                  {(['add', 'subtract', 'override'] as const).map((m) => (
+                    <button
+                      key={m}
+                      type='button'
+                      onClick={() => {
+                        setQuotaMode(m)
+                        setQuotaAmount('')
+                      }}
+                      className={cn(
+                        'px-2 py-0.5 rounded-md text-xs font-medium transition-colors cursor-pointer border',
+                        quotaMode === m
+                          ? 'bg-primary text-primary-foreground border-primary'
+                          : 'bg-background/80 text-muted-foreground border-border/70 hover:text-foreground'
+                      )}
+                    >
+                      {m === 'add' && `+ ${t('Add', '添加余额')}`}
+                      {m === 'subtract' && `- ${t('Subtract', '扣减余额')}`}
+                      {m === 'override' && t('Override', '直接覆盖')}
+                    </button>
+                  ))}
+                </div>
+
+                <div className='text-[11px] font-mono text-muted-foreground tabular-nums'>
+                  {quotaMode === 'add' &&
+                    `${formatQuota(userInfo.quota)} + ${formatQuota(parsedQuotaDelta)} = `}
+                  {quotaMode === 'subtract' &&
+                    `${formatQuota(userInfo.quota)} - ${formatQuota(parsedQuotaDelta)} = `}
+                  {quotaMode === 'override' && `${formatQuota(userInfo.quota)} → `}
+                  <span className='font-semibold text-emerald-600 dark:text-emerald-400'>
+                    {quotaMode === 'add' &&
+                      formatQuota(userInfo.quota + parsedQuotaDelta)}
+                    {quotaMode === 'subtract' &&
+                      formatQuota(userInfo.quota - parsedQuotaDelta)}
+                    {quotaMode === 'override' &&
+                      formatQuota(parseQuotaFromDollars(amountNum))}
+                  </span>
+                </div>
+              </div>
+
+              {!tokensOnly && quotaMode !== 'override' && (
+                <div className='flex flex-wrap items-center gap-1.5'>
+                  <span className='text-[11px] text-muted-foreground mr-0.5'>
+                    快捷金额:
+                  </span>
+                  {QUICK_TOPUP_PRESETS.map((preset) => (
+                    <button
+                      key={preset}
+                      type='button'
+                      onClick={() => setQuotaAmount(String(preset))}
+                      className={cn(
+                        'px-2 py-0.5 rounded-md text-[11px] font-mono font-medium border transition-colors cursor-pointer',
+                        Number(quotaAmount) === preset
+                          ? 'border-emerald-500 bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                          : 'border-border/70 bg-background/80 text-foreground/80 hover:border-emerald-500/40 hover:text-emerald-700 dark:hover:text-emerald-300'
+                      )}
+                    >
+                      {quotaMode === 'subtract' ? '-' : '+'}${preset}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              <div className='flex items-center gap-2'>
+                <div className='relative flex-1'>
+                  <Input
+                    type='number'
+                    step={tokensOnly ? 1 : 0.01}
+                    min={quotaMode === 'override' ? undefined : 0}
+                    placeholder={
+                      tokensOnly
+                        ? t('Enter amount in tokens')
+                        : `输入金额 (${currencyLabel})，回车立即生效...`
+                    }
+                    value={quotaAmount}
+                    onChange={(e) => setQuotaAmount(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault()
+                        void handleConfirmQuotaAdjust()
+                      }
+                    }}
+                    className='h-8 text-xs font-mono bg-background'
+                    autoFocus
+                  />
+                </div>
+                <Button
+                  type='button'
+                  size='sm'
+                  className='h-8 px-3 text-xs gap-1'
+                  disabled={
+                    isAdjustingQuota ||
+                    (!quotaAmount && quotaMode !== 'override') ||
+                    (parsedQuotaDelta <= 0 && quotaMode !== 'override')
+                  }
+                  onClick={() => void handleConfirmQuotaAdjust()}
+                >
+                  {isAdjustingQuota ? (
+                    <Loader2 className='size-3.5 animate-spin' />
+                  ) : (
+                    <Check className='size-3.5' />
+                  )}
+                  <span>{t('Confirm', '确认')}</span>
+                </Button>
+              </div>
+            </div>
+          )}
 
           {/* 3. Model Groups, Ratios & Per-Call Pricing Section */}
           {parsedGroupData.groups.length > 0 && (
