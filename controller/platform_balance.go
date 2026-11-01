@@ -32,6 +32,16 @@ func platformRequest(channel *model.Channel, method, path string, headers http.H
 	if base == "" {
 		return platformBalanceResponse{}, errors.New("balance base URL is empty")
 	}
+	cleanKey, displayURL := normalizeSourceURL(base)
+	savedProfiles := loadUpstreamSourceCostProfiles()
+	dashboardURL := ""
+	if p, ok := savedProfiles[cleanKey]; ok && p.DashboardURL != "" {
+		dashboardURL = p.DashboardURL
+	}
+	resolvedConsole := resolveDefaultDashboardURL(cleanKey, displayURL, dashboardURL)
+	if resolvedConsole != "" {
+		base = strings.TrimRight(resolvedConsole, "/")
+	}
 	var body io.Reader
 	if payload != nil {
 		encoded, err := common.Marshal(payload)
@@ -400,8 +410,18 @@ func updatePlatformChannelBalance(channel *model.Channel) (float64, error) {
 	channel.NormalizeBalanceSettings()
 	token, username, password, credentialErr := channel.GetBalanceCredentialsWithError()
 	if credentialErr != nil {
-		return 0, credentialErr
+		// Ignore decrypt error if UpstreamSourceCostConfig has valid plaintext credentials
+		token, username, password = "", "", ""
 	}
+
+	cleanKey, _ := normalizeSourceURL(channel.GetBaseURL())
+	savedProfiles := loadUpstreamSourceCostProfiles()
+	profile, hasProfile := savedProfiles[cleanKey]
+	if (username == "" || password == "") && hasProfile && profile.UpstreamUsername != "" && profile.UpstreamPassword != "" {
+		username = profile.UpstreamUsername
+		password = profile.UpstreamPassword
+	}
+
 	configuredToken := token
 	loginConfigured := username != "" && password != ""
 	if loginConfigured {
@@ -409,7 +429,9 @@ func updatePlatformChannelBalance(channel *model.Channel) (float64, error) {
 		token = ""
 	}
 	siteType := ""
-	if channel.SiteType != nil {
+	if hasProfile && (profile.UpstreamPlatform == "newapi" || profile.UpstreamPlatform == "sub2api") {
+		siteType = profile.UpstreamPlatform
+	} else if channel.SiteType != nil {
 		siteType = strings.ToLower(strings.TrimSpace(*channel.SiteType))
 	}
 	if siteType == "" || siteType == "unknown" {
@@ -423,8 +445,18 @@ func updatePlatformChannelBalance(channel *model.Channel) (float64, error) {
 	var err error
 	if siteType == "sub2api" {
 		balance, err = fetchSub2APIBalance(channel, token, username, password)
+		if err != nil && loginConfigured {
+			if altBal, altErr := fetchNewAPIBalance(channel, token, username, password); altErr == nil {
+				balance, err, siteType = altBal, nil, "newapi"
+			}
+		}
 	} else {
 		balance, err = fetchNewAPIBalance(channel, token, username, password)
+		if err != nil && loginConfigured {
+			if altBal, altErr := fetchSub2APIBalance(channel, token, username, password); altErr == nil {
+				balance, err, siteType = altBal, nil, "sub2api"
+			}
+		}
 	}
 	// Login is preferred when configured. The dedicated balance access token is
 	// retained as a CAPTCHA fallback; the inference channel key is deliberately
@@ -473,6 +505,17 @@ func updatePlatformChannelBalance(channel *model.Channel) (float64, error) {
 	}
 	if err == nil {
 		channel.UpdateBalance(balance)
+		nowTs := common.GetTimestamp()
+		if cleanKey != "" {
+			profile.BaseURL = cleanKey
+			profile.UpstreamBalance = &balance
+			profile.UpstreamUpdatedAt = nowTs
+			if siteType == "newapi" || siteType == "sub2api" {
+				profile.UpstreamPlatform = siteType
+			}
+			savedProfiles[cleanKey] = profile
+			saveUpstreamSourceCostProfiles(savedProfiles)
+		}
 	}
 	return balance, err
 }

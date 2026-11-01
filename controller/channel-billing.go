@@ -462,7 +462,17 @@ func supportsSiteBalance(channel *model.Channel) bool {
 	if channel.Type == constant.ChannelTypeAdvancedCustom || channel.Type == constant.ChannelTypeNewAPI || channel.Type == constant.ChannelTypeSub2API {
 		return true
 	}
-	return channel.SiteType != nil && (strings.EqualFold(*channel.SiteType, "newapi") || strings.EqualFold(*channel.SiteType, "sub2api"))
+	if channel.SiteType != nil && (strings.EqualFold(*channel.SiteType, "newapi") || strings.EqualFold(*channel.SiteType, "sub2api")) {
+		return true
+	}
+	cleanKey, _ := normalizeSourceURL(channel.GetBaseURL())
+	if cleanKey != "" {
+		savedProfiles := loadUpstreamSourceCostProfiles()
+		if p, ok := savedProfiles[cleanKey]; ok && p.UpstreamUsername != "" && p.UpstreamPassword != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func updateChannelSiteBalance(channel *model.Channel) (channelBalanceResult, error) {
@@ -739,6 +749,11 @@ func updateAllChannelsBalance(ctx context.Context, includeDisabled bool, report 
 	}
 	summary.Total = len(channels)
 	processed := 0
+	type sourceBalanceMemo struct {
+		result channelBalanceResult
+		err    error
+	}
+	memoBySource := make(map[string]sourceBalanceMemo)
 	for _, channel := range channels {
 		if err := ctx.Err(); err != nil {
 			return summary, err
@@ -776,11 +791,26 @@ func updateAllChannelsBalance(ctx context.Context, includeDisabled bool, report 
 			}
 			continue
 		}
-		// TODO: support Azure
-		//if channel.Type != common.ChannelTypeOpenAI && channel.Type != common.ChannelTypeCustom {
-		//	continue
-		//}
-		result, err := updateChannelSiteBalance(channel)
+
+		cleanKey, _ := normalizeSourceURL(channel.GetBaseURL())
+		var result channelBalanceResult
+		var err error
+		if cleanKey != "" {
+			if memo, ok := memoBySource[cleanKey]; ok {
+				result, err = memo.result, memo.err
+				if err == nil && result.RawResponse == "" {
+					channel.UpdateBalance(result.Balance)
+				}
+			} else {
+				result, err = updateChannelSiteBalance(channel)
+				memoBySource[cleanKey] = sourceBalanceMemo{result: result, err: err}
+				time.Sleep(common.RequestInterval)
+			}
+		} else {
+			result, err = updateChannelSiteBalance(channel)
+			time.Sleep(common.RequestInterval)
+		}
+
 		if err != nil {
 			summary.Failed++
 			common.SysLog(fmt.Sprintf("channel balance refresh failed: id=%d name=%q: %v", channel.Id, channel.Name, err))
@@ -799,7 +829,6 @@ func updateAllChannelsBalance(ctx context.Context, includeDisabled bool, report 
 		if report != nil {
 			report(processed, summary.Total)
 		}
-		time.Sleep(common.RequestInterval)
 	}
 	return summary, nil
 }

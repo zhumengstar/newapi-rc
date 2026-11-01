@@ -901,10 +901,30 @@ func UpdateChannelSource(c *gin.Context) {
 		if chRatio, ok := profile.ChannelCostRatios[ch.Id]; ok && chRatio > 0 {
 			chUpdates["channel_ratio"] = chRatio
 		}
-		// 若显式修改了该渠道的启停状态
+		// 若顯式修改了該渠道的啟停狀態
 		if req.ChannelStatuses != nil {
 			if nextStatus, ok := req.ChannelStatuses[ch.Id]; ok && (nextStatus == 1 || nextStatus == 2) {
 				chUpdates["status"] = nextStatus
+			}
+		}
+
+		// 同步上游余额、平台类型与加密登录凭据到 channels 表（打通渠道管理列表与定时余额刷新任务）
+		if profile.UpstreamBalance != nil {
+			chUpdates["balance"] = *profile.UpstreamBalance
+			if profile.UpstreamUpdatedAt > 0 {
+				chUpdates["balance_updated_time"] = profile.UpstreamUpdatedAt
+			} else {
+				chUpdates["balance_updated_time"] = common.GetTimestamp()
+			}
+		}
+		if profile.UpstreamPlatform == "newapi" || profile.UpstreamPlatform == "sub2api" {
+			chUpdates["site_type"] = profile.UpstreamPlatform
+		}
+		if profile.UpstreamUsername != "" && profile.UpstreamPassword != "" {
+			if err := ch.SetBalanceCredentials("", profile.UpstreamUsername, profile.UpstreamPassword); err == nil {
+				chUpdates["balance_username"] = ch.BalanceUsername
+				chUpdates["balance_password"] = ch.BalancePassword
+				chUpdates["balance_mode"] = "auto"
 			}
 		}
 
@@ -1247,6 +1267,44 @@ func ProbeUpstreamSource(c *gin.Context) {
 	}
 	savedProfiles[cleanKey] = profile
 	saveUpstreamSourceCostProfiles(savedProfiles)
+
+	// 同步探测到的余额与凭据至关联 channels 表，确保渠道管理列表同步更新
+	if allChs, err := model.GetAllChannels(0, 0, true, false); err == nil {
+		var matchedIds []int
+		var sampleCh model.Channel
+		hasCreds := username != "" && password != ""
+		if hasCreds {
+			_ = sampleCh.SetBalanceCredentials("", username, password)
+		}
+		for _, ch := range allChs {
+			if ch == nil {
+				continue
+			}
+			chClean, _ := normalizeSourceURL(ch.GetBaseURL())
+			if chClean == cleanKey {
+				matchedIds = append(matchedIds, ch.Id)
+			}
+		}
+		if len(matchedIds) > 0 {
+			chSync := make(map[string]any)
+			if detectedBalance != nil {
+				chSync["balance"] = *detectedBalance
+				chSync["balance_updated_time"] = profile.UpstreamUpdatedAt
+			}
+			if detectedPlatform == "newapi" || detectedPlatform == "sub2api" {
+				chSync["site_type"] = detectedPlatform
+			}
+			if hasCreds && sampleCh.BalancePassword != "" {
+				chSync["balance_username"] = sampleCh.BalanceUsername
+				chSync["balance_password"] = sampleCh.BalancePassword
+				chSync["balance_mode"] = "auto"
+			}
+			if len(chSync) > 0 {
+				_ = model.DB.Model(&model.Channel{}).Where("id IN ?", matchedIds).Updates(chSync).Error
+				model.InitChannelCache()
+			}
+		}
+	}
 
 	if loginMessage == "" {
 		if len(detectedGroupRatios) > 0 || len(detectedModelCallPrices) > 0 {
