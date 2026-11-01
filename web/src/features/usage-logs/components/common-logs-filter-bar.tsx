@@ -698,7 +698,7 @@ export function CommonLogsFilterBar<TData>(
       const totalQuota = item.used_quota || 0
       const todayText = todayQuota > 0 ? formatLogQuota(todayQuota) : '$0'
       const totalText = totalQuota > 0 ? formatLogQuota(totalQuota) : '$0'
-      const primaryGroup = src?.groups?.[0]?.group
+      const primaryGroup = src?.groups?.[0]
       const style = getFilterCardVisualStyle(item.base_url, primaryGroup)
       return {
         value: item.base_url,

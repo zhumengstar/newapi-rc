@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Check,
+  Coins,
   Copy,
   DollarSign,
   Globe,
@@ -9,6 +10,7 @@ import {
   MessageSquare,
   Plus,
   Settings2,
+  Sparkles,
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { toast } from 'sonner'
@@ -162,7 +164,7 @@ export function ApiAddressHoverPanel({
                   : 'bg-muted/60 text-muted-foreground'
               )}
             >
-              当天: {(source.today_quota || 0) > 0 ? formatLogQuota(source.today_quota) : '$0'}
+              当天: {(source.today_quota || 0) > 0 ? formatLogQuota(source.today_quota || 0) : '$0'}
             </span>
             {source.wechat_name && (
               <Badge
@@ -366,11 +368,11 @@ export function ApiAddressHoverPanel({
                   </Badge>
                   <span
                     className='font-mono truncate text-foreground/90'
-                    title={r.models.join(', ')}
+                    title={(r.models || []).join(', ')}
                   >
-                    {r.models.length === 1
+                    {(r.models || []).length === 1
                       ? r.models[0]
-                      : `${r.models[0]} 等${r.models.length}个`}
+                      : `${r.models?.[0] || '*'} 等${(r.models || []).length}个`}
                   </span>
                 </div>
                 <span className='font-mono font-semibold text-amber-700 dark:text-amber-300 shrink-0 flex items-center gap-0.5'>
