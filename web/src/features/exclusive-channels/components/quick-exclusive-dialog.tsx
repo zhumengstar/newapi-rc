@@ -71,6 +71,7 @@ export function QuickExclusiveDialog({
   const [selectedGroups, setSelectedGroups] = useState<string[]>([])
   const [customGroupInput, setCustomGroupInput] = useState('')
   const [allowedUserIds, setAllowedUserIds] = useState<number[]>([])
+  const [allowOtherUsers, setAllowOtherUsers] = useState<boolean>(false)
 
   // 用户搜索状态
   const [userSearchKeyword, setUserSearchKeyword] = useState('')
@@ -82,6 +83,7 @@ export function QuickExclusiveDialog({
       setStatus(channel.status)
       setSelectedGroups(channel.groupsList.length > 0 ? channel.groupsList : ['default'])
       setAllowedUserIds(channel.allowedUserIds || [])
+      setAllowOtherUsers(Boolean(channel.allowOtherUsers))
       setCustomGroupInput('')
       setUserSearchKeyword('')
     }
@@ -188,6 +190,7 @@ export function QuickExclusiveDialog({
       await updateChannelExclusive(channel.id, {
         group: groupStr,
         allowed_user_ids: allowedUserIds,
+        allow_other_users: allowedUserIds.length > 0 ? allowOtherUsers : false,
         status,
       })
     },
@@ -318,6 +321,24 @@ export function QuickExclusiveDialog({
                   ? t('Public to all users in group', '未配置用户时：全员共享（公共通道）')
                   : t('Exclusive: only specified users can access', '专属受限：仅指定客户可请求')}
               </span>
+            </div>
+
+            {/* 支持其他用户请求开关 */}
+            <div className='border-border/60 bg-muted/20 flex items-center justify-between rounded-lg border px-3 py-2'>
+              <div className='space-y-0.5 pr-3'>
+                <div className='text-xs font-medium'>
+                  {t('Allow Other Users', '支持其他用户请求')}
+                </div>
+                <div className='text-muted-foreground text-[11px]'>
+                  {allowOtherUsers
+                    ? '已开启：除专属客户锁定本渠道外，同分组其他普通用户也可请求此渠道'
+                    : '已关闭：配置专属客户后，仅允许被选中的客户请求此渠道（专属独享）'}
+                </div>
+              </div>
+              <Switch
+                checked={allowOtherUsers}
+                onCheckedChange={setAllowOtherUsers}
+              />
             </div>
 
             {/* 当前绑定的专属用户列表 */}

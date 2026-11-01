@@ -135,6 +135,7 @@ export function ExclusiveChannels() {
     if (!channelsRawData) return []
     return channelsRawData.map((c: Channel) => {
       let allowedUserIds: number[] = []
+      let allowOtherUsers = false
       if (c.settings) {
         try {
           const parsed = JSON.parse(c.settings)
@@ -143,6 +144,7 @@ export function ExclusiveChannels() {
               .map(Number)
               .filter((n: number) => Number.isFinite(n) && n > 0)
           }
+          allowOtherUsers = parsed.allow_other_users === true
         } catch {
           // ignore error
         }
@@ -156,6 +158,7 @@ export function ExclusiveChannels() {
       return {
         ...c,
         allowedUserIds,
+        allowOtherUsers,
         groupsList,
         isExclusive: allowedUserIds.length > 0,
       }

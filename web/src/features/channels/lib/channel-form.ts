@@ -210,6 +210,7 @@ export const channelFormSchema = z
     models: z.string().min(1, ERROR_MESSAGES.REQUIRED_MODELS),
     group: z.array(z.string()).min(1, ERROR_MESSAGES.REQUIRED_GROUP),
     allowed_user_ids: z.array(z.number()).optional(),
+    allow_other_users: z.boolean().optional(),
     model_mapping: z
       .string()
       .optional()
@@ -453,6 +454,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   models: '',
   group: ['default'],
   allowed_user_ids: [],
+  allow_other_users: false,
   model_mapping: '',
   priority: 0,
   weight: 0,
@@ -574,6 +576,7 @@ export function transformChannelToFormDefaults(
   let upstreamModelUpdateIgnoredModels = ''
   let advancedCustom = ''
   let allowedUserIds: number[] = []
+  let allowOtherUsers = false
 
   if (channel.settings) {
     try {
@@ -583,6 +586,7 @@ export function transformChannelToFormDefaults(
           .map(Number)
           .filter((n: number) => Number.isFinite(n) && n > 0)
       }
+      allowOtherUsers = parsed.allow_other_users === true
       vertexKeyType = parsed.vertex_key_type || 'json'
       azureResponsesVersion = parsed.azure_responses_version || ''
       isEnterpriseAccount = parsed.openrouter_enterprise === true
@@ -670,6 +674,7 @@ export function transformChannelToFormDefaults(
     upstream_model_update_ignored_models: upstreamModelUpdateIgnoredModels,
     advanced_custom: advancedCustom,
     allowed_user_ids: allowedUserIds,
+    allow_other_users: allowOtherUsers,
   }
 }
 
@@ -842,8 +847,10 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
 
   if (Array.isArray(formData.allowed_user_ids) && formData.allowed_user_ids.length > 0) {
     settingsObj.allowed_user_ids = formData.allowed_user_ids
+    settingsObj.allow_other_users = formData.allow_other_users === true
   } else {
     delete settingsObj.allowed_user_ids
+    delete settingsObj.allow_other_users
   }
 
   return JSON.stringify(settingsObj)

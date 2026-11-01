@@ -208,6 +208,9 @@ func Distribute() func(c *gin.Context) {
 					abortWithOpenAiMessage(c, http.StatusServiceUnavailable, noAvailableChannelMessage(c, usingGroup, modelRequest.Model), types.ErrorCodeModelNotFound)
 					return
 				}
+			} else if model.IsChannelRestrictedInGroup(usingGroup, channel.Id) && !model.IsUserAllowedChannelInGroup(usingGroup, userId, channel.Id) {
+				abortWithOpenAiMessage(c, http.StatusServiceUnavailable, noAvailableChannelMessage(c, usingGroup, modelRequest.Model), types.ErrorCodeModelNotFound)
+				return
 			}
 			if ok, kind := model.ChannelSatisfiesFilters(channel, modelRequest.Model, constraints.Filters); !ok {
 				if kind == taskdto.FilterTaskPluginIdentity {

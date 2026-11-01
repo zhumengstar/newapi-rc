@@ -3796,6 +3796,28 @@ export function ChannelMutateDrawer({
                       )}
                     </FormDescription>
                   </div>
+                  <FormField
+                    control={form.control}
+                    name='allow_other_users'
+                    render={({ field: allowOtherField }) => (
+                      <div className='border-border/60 bg-muted/20 flex items-center justify-between rounded-md border px-3 py-2'>
+                        <div className='space-y-0.5 pr-3'>
+                          <div className='text-xs font-medium'>
+                            {t('Allow Other Users', '支持其他用户请求')}
+                          </div>
+                          <div className='text-muted-foreground text-[11px]'>
+                            {allowOtherField.value
+                              ? '已开启：除专属客户锁定本渠道外，同分组其他普通用户也可请求此渠道'
+                              : '已关闭：配置专属客户后，仅允许被选中的客户请求此渠道（专属独享）'}
+                          </div>
+                        </div>
+                        <Switch
+                          checked={Boolean(allowOtherField.value)}
+                          onCheckedChange={allowOtherField.onChange}
+                        />
+                      </div>
+                    )}
+                  />
                   <FormControl>
                     {isLoadingUsers ? (
                       <Skeleton className='h-10 w-full' />

@@ -73,15 +73,17 @@ func InitChannelCache() {
 		newGroupRestrictedChannels[group] = make(map[int]bool)
 	}
 	for _, channel := range channels {
-		allowedUsers := channel.GetOtherSettings().AllowedUserIds
+		otherSettings := channel.GetOtherSettings()
+		allowedUsers := otherSettings.AllowedUserIds
+		allowOtherUsers := otherSettings.AllowOtherUsers
 		groups := strings.SplitSeq(channel.Group, ",")
 		for group := range groups {
 			group = strings.TrimSpace(group)
 			if group == "" {
 				continue
 			}
-			// 1. 公共渠道池：启用状态的渠道均进入公共池供普通客户正常使用
-			if channel.Status == common.ChannelStatusEnabled {
+			// 1. 公共渠道池：启用状态的渠道，且（未配置专属客户 或 开启了“支持其他用户请求”）时，进入公共池供普通客户正常使用
+			if channel.Status == common.ChannelStatusEnabled && (len(allowedUsers) == 0 || allowOtherUsers) {
 				if newGroup2model2channels[group] == nil {
 					newGroup2model2channels[group] = make(map[string][]int)
 				}
@@ -102,7 +104,9 @@ func InitChannelCache() {
 					newGroup2userModel2channels[group] = make(map[int]map[string][]int)
 					newGroupRestrictedChannels[group] = make(map[int]bool)
 				}
-				newGroupRestrictedChannels[group][channel.Id] = true
+				if !allowOtherUsers {
+					newGroupRestrictedChannels[group][channel.Id] = true
+				}
 				models := channel.GetModels()
 				for _, uid := range allowedUsers {
 					if uid > 0 {
