@@ -4,13 +4,20 @@ import {
   Coins,
   Copy,
   DollarSign,
+  ExternalLink,
   Globe,
+  KeyRound,
   Layers,
   Loader2,
+  LogIn,
   MessageSquare,
   Plus,
+  RefreshCw,
   Settings2,
   Sparkles,
+  TrendingUp,
+  UserCheck,
+  Zap,
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { toast } from 'sonner'
@@ -19,7 +26,14 @@ import { GroupBadge } from '@/components/group-badge'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { updateChannelSource } from '@/features/exclusive-channels/api'
+import {
+  probeUpstreamSource,
+  updateChannelSource,
+} from '@/features/exclusive-channels/api'
+import {
+  openUpstreamOneClickLogin,
+  resolveUpstreamConsoleUrl,
+} from '@/features/exclusive-channels/lib/one-click-login'
 import type { UpstreamSourceDTO } from '@/features/exclusive-channels/types'
 import { inferGroupFamily } from '@/features/users/lib'
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
@@ -111,20 +125,60 @@ export function ApiAddressHoverPanel({
     },
   })
 
+  const probeMutation = useMutation({
+    mutationFn: async () => {
+      if (!source) throw new Error('未找到来源信息')
+      return await probeUpstreamSource({
+        base_url: source.base_url,
+      })
+    },
+    onSuccess: (res) => {
+      const detected = res.data?.detected_group_ratios || {}
+      const detectedCount = Object.keys(detected).length
+      if (detectedCount > 0) {
+        setDraftRatios((prev) => {
+          const next = { ...prev }
+          for (const [g, r] of Object.entries(detected)) {
+            if (next[g] === undefined || next[g].trim() === '') {
+              next[g] = String(r)
+              setIsDirty(true)
+            }
+          }
+          return next
+        })
+      }
+      toast.success(res.message || '上游实时余额与扣费探测完成')
+      queryClient.invalidateQueries({ queryKey: ['channel-sources-list'] })
+    },
+    onError: (err: any) => {
+      toast.error(err?.message || '探测上游失败')
+    },
+  })
+
   if (!source) {
     return (
       <div className='p-3.5 text-xs text-muted-foreground space-y-1.5 select-text'>
-        <div
-          className='flex items-center gap-1.5 font-mono font-medium text-foreground cursor-copy hover:text-primary transition-colors'
-          title={`点击复制: ${baseUrl}`}
-          onClick={() => {
-            if (window.getSelection()?.toString()) return
-            copyToClipboard(baseUrl)
-          }}
-        >
-          <Globe className='size-3.5 text-primary shrink-0' />
-          <span className='truncate select-text'>{baseUrl}</span>
-          <Copy className='size-3 opacity-60 shrink-0' />
+        <div className='flex items-center justify-between gap-2'>
+          <button
+            type='button'
+            className='flex items-center gap-1.5 font-mono font-medium text-foreground hover:text-primary transition-colors cursor-pointer min-w-0'
+            title={`点击一键登录打开: ${baseUrl}`}
+            onClick={() => openUpstreamOneClickLogin(null, { rawBaseUrl: baseUrl })}
+          >
+            <Globe className='size-3.5 text-primary shrink-0' />
+            <span className='truncate underline-offset-2 hover:underline'>
+              {baseUrl}
+            </span>
+            <ExternalLink className='size-3 text-primary shrink-0' />
+          </button>
+          <button
+            type='button'
+            className='p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground shrink-0 cursor-pointer'
+            title='复制 API 地址'
+            onClick={() => copyToClipboard(baseUrl)}
+          >
+            <Copy className='size-3' />
+          </button>
         </div>
         <div>正在加载该地址下的分组与成本配置...</div>
       </div>
@@ -132,62 +186,226 @@ export function ApiAddressHoverPanel({
   }
 
   const rules = source.model_cost_rules || []
+  const consoleUrl = resolveUpstreamConsoleUrl(source)
+  const hasDiffConsole =
+    consoleUrl &&
+    consoleUrl.toLowerCase() !==
+      source.display_base_url.trim().toLowerCase().replace(/\/+$/, '')
 
   return (
-    <div className='p-3 space-y-3 text-xs select-text'>
-      {/* 1. 顶部地址信息与完整配置按钮 */}
-      <div className='flex items-center justify-between gap-2 border-b border-border/60 pb-2.5'>
-        <div className='min-w-0 flex-1 space-y-1'>
-          <div
-            className='group/url inline-flex max-w-full items-center gap-1.5 min-w-0 cursor-copy hover:text-primary transition-colors'
-            title={`点击复制或拖选: ${source.display_base_url}`}
-            onClick={() => {
-              if (window.getSelection()?.toString()) return
-              copyToClipboard(source.display_base_url)
-            }}
-          >
-            <Globe className='size-3.5 text-primary shrink-0' />
-            <span className='font-mono font-semibold text-foreground group-hover/url:text-primary truncate select-text'>
-              {source.display_base_url}
-            </span>
-            <Copy className='size-3 text-muted-foreground opacity-60 group-hover/url:opacity-100 group-hover/url:text-primary shrink-0 transition-opacity' />
-          </div>
-          <div className='flex items-center gap-1.5 whitespace-nowrap overflow-hidden text-[11px] text-muted-foreground'>
-            <span className='shrink-0'>
-              {source.channel_count} 个渠道 ({source.enabled_channel_count} 启用)
-            </span>
-            <span
-              className={cn(
-                'inline-flex shrink-0 items-center rounded px-1.5 py-0.5 font-mono text-[10px] tabular-nums',
-                (source.today_quota || 0) > 0
-                  ? 'bg-emerald-500/10 font-semibold text-emerald-600 dark:text-emerald-400 border border-emerald-500/20'
-                  : 'bg-muted/60 text-muted-foreground'
-              )}
+    <div className='p-3 space-y-2.5 text-xs select-text'>
+      {/* 1. 顶部地址信息（点击域名一键登录）与完整配置按钮 */}
+      <div className='space-y-1.5 border-b border-border/60 pb-2.5'>
+        <div className='flex items-center justify-between gap-2'>
+          <div className='flex items-center gap-1 min-w-0 flex-1'>
+            <button
+              type='button'
+              className='group/url inline-flex max-w-full items-center gap-1.5 min-w-0 cursor-pointer text-left hover:text-primary transition-colors'
+              title={
+                source.upstream_username
+                  ? `🚀 点击一键免密登录控制台: ${consoleUrl} (账号: ${source.upstream_username})`
+                  : `🌐 点击打开上游控制台: ${consoleUrl}`
+              }
+              onClick={() => openUpstreamOneClickLogin(source)}
             >
-              当天: {(source.today_quota || 0) > 0 ? formatLogQuota(source.today_quota || 0) : '$0'}
-            </span>
+              <Globe className='size-3.5 text-primary shrink-0' />
+              <span className='font-mono font-semibold text-foreground group-hover/url:text-primary group-hover/url:underline underline-offset-2 truncate select-text'>
+                {source.display_base_url}
+              </span>
+              <span className='inline-flex items-center gap-0.5 rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary shrink-0 group-hover/url:bg-primary group-hover/url:text-primary-foreground transition-colors'>
+                <LogIn className='size-2.5' />
+                <span>一键登录</span>
+              </span>
+            </button>
+
+            <button
+              type='button'
+              className='rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground shrink-0 cursor-pointer transition-colors'
+              title={`复制地址: ${source.display_base_url}`}
+              onClick={(e) => {
+                e.stopPropagation()
+                copyToClipboard(source.display_base_url)
+              }}
+            >
+              <Copy className='size-3' />
+            </button>
+          </div>
+
+          <div className='flex items-center gap-1 shrink-0'>
+            <Button
+              type='button'
+              size='sm'
+              variant='outline'
+              disabled={probeMutation.isPending}
+              className='h-7 px-2 text-[11px] gap-1'
+              title='实时探测上游账户余额与令牌真实扣费倍率'
+              onClick={() => probeMutation.mutate()}
+            >
+              <RefreshCw
+                className={cn(
+                  'size-3 text-emerald-600',
+                  probeMutation.isPending && 'animate-spin'
+                )}
+              />
+              <span>探测</span>
+            </Button>
+            <Button
+              type='button'
+              size='sm'
+              variant='default'
+              className='h-7 px-2.5 text-[11px] shrink-0 gap-1'
+              onClick={() => onOpenFullConfig(source)}
+            >
+              <Settings2 className='size-3' />
+              <span>成本与模型单价</span>
+            </Button>
+          </div>
+        </div>
+
+        {/* 第二行：渠道数 + 今日收入 + 预计成本 + 净毛利 + 上游实时余额 */}
+        <div className='flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground'>
+          <span className='shrink-0'>
+            {source.channel_count}渠({source.enabled_channel_count}启)
+          </span>
+
+          <span
+            className={cn(
+              'inline-flex shrink-0 items-center rounded px-1.5 py-0.5 font-mono text-[10px] tabular-nums',
+              (source.today_quota || 0) > 0
+                ? 'bg-emerald-500/10 font-semibold text-emerald-600 dark:text-emerald-400 border border-emerald-500/20'
+                : 'bg-muted/60 text-muted-foreground'
+            )}
+            title='今日对客消耗总收入'
+          >
+            当天:{' '}
+            {(source.today_quota || 0) > 0
+              ? formatLogQuota(source.today_quota || 0)
+              : '$0'}
+          </span>
+
+          {source.today_estimated_cost !== undefined &&
+            source.today_estimated_cost > 0 && (
+              <>
+                <span
+                  className='inline-flex shrink-0 items-center rounded px-1.5 py-0.5 font-mono text-[10px] tabular-nums bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 border border-indigo-500/20'
+                  title='按已配置分组成本倍率折算的今日预计上游采购成本'
+                >
+                  成本: ~${source.today_estimated_cost.toFixed(2)}
+                </span>
+                {source.today_gross_profit !== undefined && (
+                  <span
+                    className={cn(
+                      'inline-flex shrink-0 items-center gap-0.5 rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold tabular-nums border',
+                      source.today_gross_profit >= 0
+                        ? 'bg-emerald-500/12 text-emerald-700 dark:text-emerald-300 border-emerald-500/25'
+                        : 'bg-rose-500/15 text-rose-700 dark:text-rose-300 border-rose-500/35'
+                    )}
+                    title='今日预计净毛利 = 当天收入 - 预计采购成本'
+                  >
+                    <TrendingUp className='size-2.5' />
+                    {source.today_gross_profit >= 0
+                      ? `毛利 +$${source.today_gross_profit.toFixed(2)} (${source.today_gross_margin ?? 0}%)`
+                      : `倒挂 -$${Math.abs(source.today_gross_profit).toFixed(2)}`}
+                  </span>
+                )}
+              </>
+            )}
+
+          {source.upstream_balance !== undefined &&
+            source.upstream_balance !== null && (
+              <span
+                className={cn(
+                  'inline-flex shrink-0 items-center gap-0.5 rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold tabular-nums border',
+                  source.upstream_balance <= 0
+                    ? 'bg-rose-500/15 text-rose-700 dark:text-rose-300 border-rose-500/30'
+                    : source.upstream_balance < 20
+                      ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/30'
+                      : 'bg-sky-500/12 text-sky-700 dark:text-sky-300 border-sky-500/25'
+                )}
+                title={
+                  source.upstream_used_quota
+                    ? `上游账户当前余额: $${source.upstream_balance.toFixed(2)} | 历史已消耗: $${source.upstream_used_quota.toFixed(2)}`
+                    : `上游账户当前余额: $${source.upstream_balance.toFixed(2)}`
+                }
+              >
+                💰 余额 ${source.upstream_balance.toFixed(2)}
+              </span>
+            )}
+        </div>
+
+        {/* 第三行：控制台域名 / 登录账号密码快捷复制 / 虚拟刀折算 / 微信备注 */}
+        {(hasDiffConsole ||
+          source.upstream_username ||
+          (source.cost_discount_scale && source.cost_discount_scale !== 1) ||
+          source.wechat_name) && (
+          <div className='flex flex-wrap items-center gap-1.5 pt-0.5'>
+            {hasDiffConsole && (
+              <Badge
+                variant='outline'
+                onClick={() => openUpstreamOneClickLogin(source)}
+                className='h-4 px-1.5 text-[10px] font-mono cursor-pointer border-primary/30 text-primary bg-primary/5 hover:bg-primary/10'
+                title='转发域名与控制台域名不同，点击打开控制台域名'
+              >
+                后台: {consoleUrl.replace(/^https?:\/\//, '')}
+              </Badge>
+            )}
+
+            {source.upstream_username && (
+              <Badge
+                variant='outline'
+                onClick={() => {
+                  copyToClipboard(source.upstream_username || '')
+                }}
+                className='h-4 px-1.5 text-[10px] font-mono cursor-copy border-slate-300 dark:border-slate-700 flex items-center gap-1 hover:border-primary'
+                title='点击复制上游登录账号'
+              >
+                <UserCheck className='size-2.5 text-primary' />
+                <span className='truncate max-w-[130px]'>
+                  {source.upstream_username}
+                </span>
+              </Badge>
+            )}
+
+            {source.upstream_password && (
+              <Badge
+                variant='outline'
+                onClick={() => {
+                  copyToClipboard(source.upstream_password || '')
+                }}
+                className='h-4 px-1.5 text-[10px] cursor-copy border-amber-300 text-amber-700 bg-amber-50/70 dark:border-amber-800 dark:text-amber-300 dark:bg-amber-950/40 flex items-center gap-0.5 hover:bg-amber-100'
+                title='点击复制上游登录密码'
+              >
+                <KeyRound className='size-2.5' />
+                <span>复制密码</span>
+              </Badge>
+            )}
+
+            {source.cost_discount_scale !== undefined &&
+              source.cost_discount_scale > 0 &&
+              source.cost_discount_scale !== 1 && (
+                <Badge
+                  variant='outline'
+                  className='h-4 px-1.5 text-[10px] font-mono border-violet-300 text-violet-700 bg-violet-50 dark:border-violet-800 dark:text-violet-300 dark:bg-violet-950/40 flex items-center gap-0.5'
+                  title={`该站点充值存在虚拟刀/汇率折算系数 ×${source.cost_discount_scale}`}
+                >
+                  <Zap className='size-2.5' />
+                  <span>折算×{source.cost_discount_scale}</span>
+                </Badge>
+              )}
+
             {source.wechat_name && (
               <Badge
                 variant='outline'
                 className='h-4 px-1.5 text-[10px] shrink-0 border-emerald-300 text-emerald-700 bg-emerald-50 dark:border-emerald-800 dark:text-emerald-300 dark:bg-emerald-950/40 flex items-center gap-0.5'
               >
                 <MessageSquare className='size-2.5' />
-                <span className='truncate max-w-[90px]'>{source.wechat_name}</span>
+                <span className='truncate max-w-[100px]'>
+                  {source.wechat_name}
+                </span>
               </Badge>
             )}
           </div>
-        </div>
-
-        <Button
-          type='button'
-          size='sm'
-          variant='default'
-          className='h-7 px-2.5 text-[11px] shrink-0 gap-1'
-          onClick={() => onOpenFullConfig(source)}
-        >
-          <Settings2 className='size-3' />
-          <span>成本与模型单价</span>
-        </Button>
+        )}
       </div>
 
       {/* 2. 该地址下的分组列表与快捷分组成本倍率设置 */}
@@ -241,11 +459,26 @@ export function ApiAddressHoverPanel({
                     : 0
               const custRatio = source.group_customer_ratios?.[grp]
               const valStr = draftRatios[grp] ?? ''
+              const costNum =
+                valStr.trim() !== ''
+                  ? parseFloat(valStr)
+                  : source.default_cost_ratio || NaN
+              const isInverted =
+                !isNaN(costNum) &&
+                custRatio !== undefined &&
+                custRatio > 0 &&
+                !grp.includes('按次') &&
+                costNum > custRatio
 
               return (
                 <div
                   key={grp}
-                  className='flex items-center justify-between gap-1.5 rounded-md border border-border/50 bg-background/80 px-2 py-1 whitespace-nowrap hover:bg-muted/40 transition-colors'
+                  className={cn(
+                    'flex items-center justify-between gap-1.5 rounded-md border px-2 py-1 whitespace-nowrap transition-colors',
+                    isInverted
+                      ? 'border-rose-400/60 bg-rose-500/5 hover:bg-rose-500/10'
+                      : 'border-border/50 bg-background/80 hover:bg-muted/40'
+                  )}
                 >
                   <div className='flex items-center gap-1.5 min-w-0 flex-1 overflow-hidden'>
                     <Badge
@@ -269,21 +502,34 @@ export function ApiAddressHoverPanel({
                   <div className='flex items-center gap-1.5 shrink-0'>
                     <span
                       className={cn(
-                        'inline-flex w-[112px] shrink-0 items-center justify-between gap-1 rounded border px-1.5 py-0.5 font-mono text-[10px] tabular-nums whitespace-nowrap',
+                        'inline-flex w-[108px] shrink-0 items-center justify-between gap-1 rounded border px-1.5 py-0.5 font-mono text-[10px] tabular-nums whitespace-nowrap',
                         effectiveQuota > 0
                           ? 'bg-emerald-500/10 font-semibold text-emerald-600 dark:text-emerald-400 border-emerald-500/20'
                           : 'bg-muted/60 text-muted-foreground font-normal border-border/50'
                       )}
                       title='该分组在此地址下的当天消耗收入'
                     >
-                      <span className='font-sans text-[9px] opacity-80'>当天</span>
+                      <span className='font-sans text-[9px] opacity-80'>
+                        当天
+                      </span>
                       <span>
-                        {effectiveQuota > 0 ? formatLogQuota(effectiveQuota) : '$0'}
+                        {effectiveQuota > 0
+                          ? formatLogQuota(effectiveQuota)
+                          : '$0'}
                       </span>
                     </span>
                     <span
-                      className='inline-flex w-[48px] shrink-0 items-center justify-end text-[10px] text-muted-foreground font-mono tabular-nums whitespace-nowrap'
-                      title='平台对该分组的默认对客倍率'
+                      className={cn(
+                        'inline-flex w-[48px] shrink-0 items-center justify-end text-[10px] font-mono tabular-nums whitespace-nowrap',
+                        isInverted
+                          ? 'text-rose-600 font-bold'
+                          : 'text-muted-foreground'
+                      )}
+                      title={
+                        isInverted
+                          ? `⚠️ 成本倍率 (${costNum}x) 高于对客倍率 (${custRatio}x)，存在价格倒挂！`
+                          : '平台对该分组的默认对客倍率'
+                      }
                     >
                       {custRatio !== undefined ? `售${custRatio}x` : '—'}
                     </span>
@@ -311,8 +557,10 @@ export function ApiAddressHoverPanel({
                         }}
                         className={cn(
                           'h-5.5 pr-3.5 pl-1 text-[10px] md:text-[10px] placeholder:text-[10px] font-mono text-right bg-background rounded-md',
-                          valStr.trim() !== '' &&
-                            'border-indigo-400/70 font-semibold text-indigo-700 dark:text-indigo-300'
+                          isInverted
+                            ? 'border-rose-500 text-rose-700 dark:text-rose-300 font-bold'
+                            : valStr.trim() !== '' &&
+                                'border-indigo-400/70 font-semibold text-indigo-700 dark:text-indigo-300'
                         )}
                       />
                       <span className='absolute right-1 top-1/2 -translate-y-1/2 text-[9px] text-muted-foreground font-mono'>
@@ -349,7 +597,7 @@ export function ApiAddressHoverPanel({
             onClick={() => onOpenFullConfig(source)}
             className='rounded-lg border border-dashed border-border/80 bg-muted/15 px-3 py-2 text-center text-[11px] whitespace-nowrap text-muted-foreground hover:border-primary/50 hover:text-foreground cursor-pointer transition-colors'
           >
-            暂未配置专属模型成本单价，点击配置按次 ($/次) 或按量 ($/M) 成本
+            暂未配置专属模型成本单价，点击配置按次($/次)、按量($/M)或模型倍率(x)
           </div>
         ) : (
           <div className='space-y-1 max-h-28 overflow-y-auto'>
@@ -380,6 +628,11 @@ export function ApiAddressHoverPanel({
                     <>
                       <Coins className='size-2.5' />入${r.input_price ?? 0}/出$
                       {r.output_price ?? 0}/M
+                    </>
+                  ) : r.mode === 'ratio' ? (
+                    <>
+                      <Zap className='size-2.5' />
+                      {r.cost_ratio ?? 0}x
                     </>
                   ) : (
                     <>

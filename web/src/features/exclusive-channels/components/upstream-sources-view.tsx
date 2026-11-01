@@ -16,25 +16,26 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ArrowUpDown,
-  BadgeDollarSign,
-  Clock,
   Coins,
   Copy,
   DollarSign,
   ExternalLink,
-  Filter,
   Globe,
+  KeyRound,
   Layers,
   Loader2,
+  LogIn,
   MessageSquare,
   Plus,
   RefreshCw,
   Search,
   Settings2,
-  ShieldCheck,
+  TrendingUp,
+  UserCheck,
+  Zap,
 } from 'lucide-react'
 import { useState, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -42,7 +43,6 @@ import { toast } from 'sonner'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import {
   Select,
@@ -59,8 +59,13 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
+import { cn } from '@/lib/utils'
 
-import { getChannelSources } from '../api'
+import { getChannelSources, probeUpstreamSource } from '../api'
+import {
+  openUpstreamOneClickLogin,
+  resolveUpstreamConsoleUrl,
+} from '../lib/one-click-login'
 import type { UpstreamSourceDTO } from '../types'
 import { QuickSourceDialog } from './quick-source-dialog'
 
@@ -82,16 +87,23 @@ export function UpstreamSourcesView({
   onNavigateToChannelsWithFilter,
 }: UpstreamSourcesViewProps) {
   const { t } = useTranslation()
+  const queryClient = useQueryClient()
 
   // 筛选与排序状态
   const [searchKeyword, setSearchKeyword] = useState('')
-  const [wechatFilter, setWechatFilter] = useState<'all' | 'set' | 'unset'>('all')
+  const [wechatFilter, setWechatFilter] = useState<'all' | 'set' | 'unset'>(
+    'all'
+  )
   const [selectedGroupFilter, setSelectedGroupFilter] = useState('all')
-  const [sortBy, setSortBy] = useState<'income_desc' | 'channels_desc' | 'default'>('income_desc')
+  const [sortBy, setSortBy] = useState<
+    'income_desc' | 'profit_desc' | 'balance_desc' | 'channels_desc' | 'default'
+  >('income_desc')
   const [onlyWithIncome, setOnlyWithIncome] = useState(false)
+  const [probingUrl, setProbingUrl] = useState<string | null>(null)
 
   // 弹窗状态
-  const [selectedSource, setSelectedSource] = useState<UpstreamSourceDTO | null>(null)
+  const [selectedSource, setSelectedSource] =
+    useState<UpstreamSourceDTO | null>(null)
   const [dialogOpen, setDialogOpen] = useState(false)
 
   // 拉取来源数据
@@ -111,10 +123,27 @@ export function UpstreamSourcesView({
 
   const sources = sourcesData || []
 
-  // 复制地址
-  const handleCopy = (text: string) => {
+  const probeSingleMutation = useMutation({
+    mutationFn: async (baseUrl: string) => {
+      setProbingUrl(baseUrl)
+      return await probeUpstreamSource({ base_url: baseUrl })
+    },
+    onSuccess: (res) => {
+      toast.success(res.message || '已同步上游实时余额与扣费倍率')
+      queryClient.invalidateQueries({ queryKey: ['channel-sources-list'] })
+    },
+    onError: (err: any) => {
+      toast.error(err?.message || '探测上游失败')
+    },
+    onSettled: () => {
+      setProbingUrl(null)
+    },
+  })
+
+  // 复制文本
+  const handleCopy = (text: string, label = '已复制到剪贴板') => {
     navigator.clipboard.writeText(text)
-    toast.success(t('Copied to clipboard', '已复制地址到剪贴板'))
+    toast.success(label)
   }
 
   // 过滤与排序数据
@@ -122,17 +151,25 @@ export function UpstreamSourcesView({
     const list = sources.filter((s) => {
       if (searchKeyword.trim()) {
         const kw = searchKeyword.trim().toLowerCase()
-        const urlMatch = s.base_url.toLowerCase().includes(kw) || s.display_base_url.toLowerCase().includes(kw)
+        const urlMatch =
+          s.base_url.toLowerCase().includes(kw) ||
+          s.display_base_url.toLowerCase().includes(kw) ||
+          (s.dashboard_url || '').toLowerCase().includes(kw) ||
+          (s.upstream_username || '').toLowerCase().includes(kw)
         const wechatMatch = (s.wechat_name || '').toLowerCase().includes(kw)
         const groupMatch = s.groups.some((g) => g.toLowerCase().includes(kw))
         const modelMatch = s.models.some((m) => m.toLowerCase().includes(kw))
-        if (!urlMatch && !wechatMatch && !groupMatch && !modelMatch) return false
+        if (!urlMatch && !wechatMatch && !groupMatch && !modelMatch)
+          return false
       }
 
       if (wechatFilter === 'set' && !s.wechat_name) return false
       if (wechatFilter === 'unset' && s.wechat_name) return false
 
-      if (selectedGroupFilter !== 'all' && !s.groups.includes(selectedGroupFilter)) {
+      if (
+        selectedGroupFilter !== 'all' &&
+        !s.groups.includes(selectedGroupFilter)
+      ) {
         return false
       }
 
@@ -147,10 +184,20 @@ export function UpstreamSourcesView({
       if (sortBy === 'income_desc') {
         const incA = a.today_income || 0
         const incB = b.today_income || 0
-        if (incB !== incA) {
-          return incB - incA
-        }
-        return b.channel_count - a.channel_count
+        if (incB !== incA) return incB - incA
+        return (b.upstream_balance ?? -999) - (a.upstream_balance ?? -999)
+      }
+      if (sortBy === 'profit_desc') {
+        const profA = a.today_gross_profit || 0
+        const profB = b.today_gross_profit || 0
+        if (profB !== profA) return profB - profA
+        return (b.today_income || 0) - (a.today_income || 0)
+      }
+      if (sortBy === 'balance_desc') {
+        const balA = a.upstream_balance ?? -999999
+        const balB = b.upstream_balance ?? -999999
+        if (balB !== balA) return balB - balA
+        return (b.today_income || 0) - (a.today_income || 0)
       }
       if (sortBy === 'channels_desc') {
         return b.channel_count - a.channel_count
@@ -159,23 +206,14 @@ export function UpstreamSourcesView({
     })
 
     return list
-  }, [sources, searchKeyword, wechatFilter, selectedGroupFilter, onlyWithIncome, sortBy])
-
-  // KPI 统计
-  const totalSourcesCount = sources.length
-  const wechatConfiguredCount = sources.filter((s) => !!s.wechat_name).length
-  const totalAggregatedChannels = sources.reduce((sum, s) => sum + s.channel_count, 0)
-  const totalEnabledChannels = sources.reduce((sum, s) => sum + s.enabled_channel_count, 0)
-  const totalTodayIncome = sources.reduce((sum, s) => sum + (s.today_income || 0), 0)
-  const totalTodayQuota = sources.reduce((sum, s) => sum + (s.today_quota || 0), 0)
-
-  // 统计已设定单价的模型去重数
-  const pricedModelSet = new Set<string>()
-  for (const s of sources) {
-    for (const mName of Object.keys(s.model_prices || {})) {
-      pricedModelSet.add(mName)
-    }
-  }
+  }, [
+    sources,
+    searchKeyword,
+    wechatFilter,
+    selectedGroupFilter,
+    onlyWithIncome,
+    sortBy,
+  ])
 
   return (
     <div className='space-y-3'>
@@ -185,7 +223,10 @@ export function UpstreamSourcesView({
           <div className='relative w-full max-w-xs'>
             <Search className='absolute left-2.5 top-2.5 size-3.5 text-muted-foreground' />
             <Input
-              placeholder={t('Search address, WeChat name, group or model...', '搜索来源地址、微信名、分组或模型...')}
+              placeholder={t(
+                'Search address, WeChat name, group or model...',
+                '搜索来源地址、登录账号、微信名、分组或模型...'
+              )}
               value={searchKeyword}
               onChange={(e) => setSearchKeyword(e.target.value)}
               className='h-8 pl-8 text-xs'
@@ -232,7 +273,9 @@ export function UpstreamSourcesView({
             <SelectTrigger className='h-8 w-36 text-xs'>
               <Layers className='size-3 mr-1 text-muted-foreground' />
               <SelectValue>
-                {selectedGroupFilter === 'all' ? t('All Groups', '全部分组') : selectedGroupFilter}
+                {selectedGroupFilter === 'all'
+                  ? t('All Groups', '全部分组')
+                  : selectedGroupFilter}
               </SelectValue>
             </SelectTrigger>
             <SelectContent>
@@ -251,28 +294,55 @@ export function UpstreamSourcesView({
           <Select
             value={sortBy}
             onValueChange={(v) => {
-              if (v) setSortBy(v as 'income_desc' | 'channels_desc' | 'default')
+              if (v)
+                setSortBy(
+                  v as
+                    | 'income_desc'
+                    | 'profit_desc'
+                    | 'balance_desc'
+                    | 'channels_desc'
+                    | 'default'
+                )
             }}
           >
             <SelectTrigger className='h-8 w-44 text-xs'>
               <ArrowUpDown className='size-3 mr-1 text-muted-foreground' />
               <SelectValue>
                 {sortBy === 'income_desc'
-                  ? t('Today Revenue (High to Low)', '今日收入从高到低')
-                  : sortBy === 'channels_desc'
-                    ? t('Channel Count (Most)', '下属渠道数最多')
-                    : t('Default Order', '默认排序')}
+                  ? '今日收入从高到低'
+                  : sortBy === 'profit_desc'
+                    ? '今日净毛利从高到低'
+                    : sortBy === 'balance_desc'
+                      ? '上游余额从高到低'
+                      : sortBy === 'channels_desc'
+                        ? '下属渠道数最多'
+                        : '默认排序'}
               </SelectValue>
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value='income_desc' className='text-xs font-medium text-emerald-600 dark:text-emerald-400'>
-                {t('Today Revenue (High to Low)', '今日收入从高到低')}
+              <SelectItem
+                value='income_desc'
+                className='text-xs font-medium text-emerald-600 dark:text-emerald-400'
+              >
+                今日收入从高到低
+              </SelectItem>
+              <SelectItem
+                value='profit_desc'
+                className='text-xs font-medium text-indigo-600 dark:text-indigo-400'
+              >
+                今日净毛利从高到低
+              </SelectItem>
+              <SelectItem
+                value='balance_desc'
+                className='text-xs font-medium text-sky-600 dark:text-sky-400'
+              >
+                上游余额从高到低
               </SelectItem>
               <SelectItem value='channels_desc' className='text-xs'>
-                {t('Channel Count (Most)', '下属渠道数最多')}
+                下属渠道数最多
               </SelectItem>
               <SelectItem value='default' className='text-xs'>
-                {t('Default Order', '默认排序')}
+                默认排序
               </SelectItem>
             </SelectContent>
           </Select>
@@ -285,7 +355,9 @@ export function UpstreamSourcesView({
             className='h-8 text-xs'
           >
             <DollarSign className='size-3 mr-1' />
-            {onlyWithIncome ? t('Showing with Revenue', '已筛选有收入') : t('Only with Revenue', '仅看有收入')}
+            {onlyWithIncome
+              ? t('Showing with Revenue', '已筛选有收入')
+              : t('Only with Revenue', '仅看有收入')}
           </Button>
 
           <Button
@@ -295,17 +367,37 @@ export function UpstreamSourcesView({
             disabled={isLoading || isRefetching}
             className='h-8 text-xs'
           >
-            <RefreshCw className={`size-3.5 mr-1.5 ${isRefetching ? 'animate-spin' : ''}`} />
+            <RefreshCw
+              className={`size-3.5 mr-1.5 ${isRefetching ? 'animate-spin' : ''}`}
+            />
             {t('Refresh', '刷新')}
+          </Button>
+
+          <Button
+            variant='ghost'
+            size='sm'
+            onClick={() =>
+              window.open('/api/channel/sources/autologin.user.js', '_blank')
+            }
+            className='h-8 text-xs text-muted-foreground hover:text-primary gap-1'
+            title='安装油猴 (Tampermonkey) 免密自动登录脚本，点击任意上游域名即可全自动免密进入后台'
+          >
+            <Zap className='size-3.5 text-amber-500' />
+            <span>免密登录脚本</span>
           </Button>
         </div>
 
         <div className='flex items-center gap-2 text-xs text-muted-foreground'>
           <span>
-            {t('Found', '共筛选出')} <strong className='text-foreground'>{filteredSources.length}</strong>{' '}
+            {t('Found', '共筛选出')}{' '}
+            <strong className='text-foreground'>{filteredSources.length}</strong>{' '}
             {t('unique upstream sources', '个独立供应商来源地址')}
           </span>
-          {(searchKeyword || wechatFilter !== 'all' || selectedGroupFilter !== 'all' || onlyWithIncome || sortBy !== 'income_desc') && (
+          {(searchKeyword ||
+            wechatFilter !== 'all' ||
+            selectedGroupFilter !== 'all' ||
+            onlyWithIncome ||
+            sortBy !== 'income_desc') && (
             <Button
               variant='ghost'
               size='sm'
@@ -329,31 +421,39 @@ export function UpstreamSourcesView({
         <Table>
           <TableHeader>
             <TableRow className='bg-muted/40 text-xs hover:bg-muted/40'>
-              <TableHead className='min-w-[200px] font-semibold'>
-                {t('Unique Upstream Address (Base URL)', '唯一请求地址 (Base URL)')}
-              </TableHead>
-              <TableHead className='min-w-[140px] font-semibold'>
-                {t('Source WeChat Name', '来源微信名称')}
+              <TableHead className='min-w-[230px] font-semibold'>
+                {t(
+                  'Unique Upstream Address (Base URL)',
+                  '来源地址 & 一键登录 / 余额'
+                )}
               </TableHead>
               <TableHead className='min-w-[130px] font-semibold'>
+                {t('Source WeChat Name', '来源微信名称')}
+              </TableHead>
+              <TableHead className='min-w-[160px] font-semibold'>
                 <div className='flex items-center gap-1 text-emerald-700 dark:text-emerald-400'>
                   <DollarSign className='size-3.5' />
-                  <span>{t('Today Total Revenue', '今日总收入')}</span>
+                  <span>今日收入 / 成本 / 毛利</span>
                 </div>
               </TableHead>
               <TableHead className='min-w-[260px] font-semibold'>
                 <div className='flex items-center gap-1 text-blue-700 dark:text-blue-400'>
                   <Layers className='size-3.5' />
-                  <span>{t('Groups & Revenue Breakdown', '所属分组与今日收入对应')}</span>
+                  <span>
+                    {t(
+                      'Groups & Revenue Breakdown',
+                      '所属分组与今日收入对应'
+                    )}
+                  </span>
                 </div>
               </TableHead>
               <TableHead className='w-28 font-semibold'>
                 {t('Channel / Group Ratio', '分组/渠道倍率')}
               </TableHead>
               <TableHead className='min-w-[180px] font-semibold'>
-                {t('Model Per-Request Pricing', '模型单请求价格 (按次)')}
+                {t('Model Per-Request Pricing', '模型专属成本规则')}
               </TableHead>
-              <TableHead className='w-28 text-right font-semibold'>
+              <TableHead className='w-32 text-right font-semibold'>
                 {t('Actions', '操作')}
               </TableHead>
             </TableRow>
@@ -361,56 +461,173 @@ export function UpstreamSourcesView({
           <TableBody>
             {isLoading ? (
               <TableRow>
-                <TableCell colSpan={7} className='h-32 text-center text-xs text-muted-foreground'>
+                <TableCell
+                  colSpan={7}
+                  className='h-32 text-center text-xs text-muted-foreground'
+                >
                   <div className='flex flex-col items-center justify-center gap-1.5'>
                     <Loader2 className='size-6 animate-spin text-primary opacity-80' />
-                    <span>{t('Loading upstream sources...', '正在汇聚各来源地址数据...')}</span>
+                    <span>
+                      {t(
+                        'Loading upstream sources...',
+                        '正在汇聚各来源地址数据...'
+                      )}
+                    </span>
                   </div>
                 </TableCell>
               </TableRow>
             ) : filteredSources.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={7} className='h-32 text-center text-xs text-muted-foreground'>
+                <TableCell
+                  colSpan={7}
+                  className='h-32 text-center text-xs text-muted-foreground'
+                >
                   <div className='flex flex-col items-center justify-center gap-1.5'>
                     <Globe className='size-8 opacity-25' />
-                    <span>{t('No upstream sources found matching criteria', '未找到符合条件的来源地址')}</span>
+                    <span>
+                      {t(
+                        'No upstream sources found matching criteria',
+                        '未找到符合条件的来源地址'
+                      )}
+                    </span>
                   </div>
                 </TableCell>
               </TableRow>
             ) : (
               filteredSources.map((source) => {
-                const pricedModels = Object.entries(source.model_prices || {}).filter(
-                  ([_, p]) => typeof p === 'number' && p >= 0
-                )
+                const pricedModels = Object.entries(
+                  source.model_prices || {}
+                ).filter(([_, p]) => typeof p === 'number' && p >= 0)
+                const consoleUrl = resolveUpstreamConsoleUrl(source)
+                const isProbing = probingUrl === source.base_url
 
                 return (
-                  <TableRow key={source.base_url} className='hover:bg-muted/30 transition-colors'>
-                    {/* 唯一地址 Base URL */}
+                  <TableRow
+                    key={source.base_url}
+                    className='hover:bg-muted/30 transition-colors'
+                  >
+                    {/* 唯一地址 Base URL + 一键登录 + 余额 */}
                     <TableCell>
-                      <div className='space-y-1 min-w-0'>
+                      <div className='space-y-1.5 min-w-0'>
                         <div className='flex items-center gap-1.5'>
-                          <Globe className='size-3.5 text-blue-500 shrink-0' />
-                          <span
-                            className='font-mono text-xs font-semibold text-foreground truncate max-w-[280px]'
-                            title={source.display_base_url}
+                          <button
+                            type='button'
+                            onClick={() => openUpstreamOneClickLogin(source)}
+                            className='group/link inline-flex items-center gap-1.5 text-left cursor-pointer hover:text-primary transition-colors min-w-0'
+                            title={
+                              source.upstream_username
+                                ? `🚀 点击一键免密登录控制台: ${consoleUrl} (账号: ${source.upstream_username})`
+                                : `🌐 点击打开上游控制台: ${consoleUrl}`
+                            }
                           >
-                            {source.display_base_url}
-                          </span>
+                            <Globe className='size-3.5 text-blue-500 shrink-0' />
+                            <span className='font-mono text-xs font-semibold text-foreground group-hover/link:text-primary group-hover/link:underline underline-offset-2 truncate max-w-[230px]'>
+                              {source.display_base_url}
+                            </span>
+                            <span className='inline-flex items-center gap-0.5 rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary shrink-0 group-hover/link:bg-primary group-hover/link:text-primary-foreground transition-colors'>
+                              <LogIn className='size-2.5' />
+                              登录
+                            </span>
+                          </button>
+
                           {source.base_url !== 'default' && (
                             <button
                               type='button'
-                              onClick={() => handleCopy(source.display_base_url)}
-                              className='rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground'
+                              onClick={() =>
+                                handleCopy(
+                                  source.display_base_url,
+                                  '已复制地址到剪贴板'
+                                )
+                              }
+                              className='rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer'
                               title={t('Copy Address', '复制地址')}
                             >
                               <Copy className='size-3' />
                             </button>
                           )}
                         </div>
-                        <div className='flex items-center gap-1.5 text-[11px] text-muted-foreground'>
-                          <span>{source.models.length} {t('models supported', '个模型')}</span>
+
+                        {/* 余额 + 账号密码快捷复制 + 渠道模型统计 */}
+                        <div className='flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground'>
+                          {source.upstream_balance !== undefined &&
+                            source.upstream_balance !== null && (
+                              <Badge
+                                variant='outline'
+                                className={cn(
+                                  'h-4 px-1.5 text-[10px] font-mono font-semibold',
+                                  source.upstream_balance <= 0
+                                    ? 'border-rose-300 text-rose-700 bg-rose-50 dark:border-rose-800 dark:text-rose-300 dark:bg-rose-950/40'
+                                    : source.upstream_balance < 20
+                                      ? 'border-amber-300 text-amber-700 bg-amber-50 dark:border-amber-800 dark:text-amber-300 dark:bg-amber-950/40'
+                                      : 'border-sky-300 text-sky-700 bg-sky-50 dark:border-sky-800 dark:text-sky-300 dark:bg-sky-950/40'
+                                )}
+                                title={
+                                  source.upstream_used_quota
+                                    ? `上游账户当前余额: $${source.upstream_balance.toFixed(2)} | 历史已消耗: $${source.upstream_used_quota.toFixed(2)}`
+                                    : `上游账户当前余额: $${source.upstream_balance.toFixed(2)}`
+                                }
+                              >
+                                💰 ${source.upstream_balance.toFixed(2)}
+                              </Badge>
+                            )}
+
+                          {source.upstream_username && (
+                            <Badge
+                              variant='outline'
+                              onClick={() =>
+                                handleCopy(
+                                  source.upstream_username || '',
+                                  `已复制登录账号: ${source.upstream_username}`
+                                )
+                              }
+                              className='h-4 px-1.5 text-[10px] font-mono cursor-copy flex items-center gap-0.5 hover:border-primary'
+                              title='点击复制上游登录账号'
+                            >
+                              <UserCheck className='size-2.5 text-primary' />
+                              <span className='truncate max-w-[110px]'>
+                                {source.upstream_username}
+                              </span>
+                            </Badge>
+                          )}
+
+                          {source.upstream_password && (
+                            <Badge
+                              variant='outline'
+                              onClick={() =>
+                                handleCopy(
+                                  source.upstream_password || '',
+                                  '已复制上游登录密码'
+                                )
+                              }
+                              className='h-4 px-1 text-[10px] cursor-copy border-amber-300 text-amber-700 bg-amber-50/70 dark:border-amber-800 dark:text-amber-300 dark:bg-amber-950/40 flex items-center gap-0.5'
+                              title='点击复制上游登录密码'
+                            >
+                              <KeyRound className='size-2.5' />
+                              <span>密</span>
+                            </Badge>
+                          )}
+
+                          {source.cost_discount_scale !== undefined &&
+                            source.cost_discount_scale > 0 &&
+                            source.cost_discount_scale !== 1 && (
+                              <Badge
+                                variant='outline'
+                                className='h-4 px-1 text-[10px] font-mono border-violet-300 text-violet-700 bg-violet-50 dark:border-violet-800 dark:text-violet-300 dark:bg-violet-950/40'
+                                title='该站点充值存在虚拟刀/汇率折算系数'
+                              >
+                                ×{source.cost_discount_scale}
+                              </Badge>
+                            )}
+
+                          <span>
+                            {source.channel_count}渠({source.enabled_channel_count}启) ·{' '}
+                            {source.models.length}模型
+                          </span>
                           {source.cost_tier > 0 && (
-                            <Badge variant='outline' className='text-[9px] px-1 py-0 h-3.5'>
+                            <Badge
+                              variant='outline'
+                              className='text-[9px] px-1 py-0 h-3.5'
+                            >
                               Tier {source.cost_tier}
                             </Badge>
                           )}
@@ -427,10 +644,15 @@ export function UpstreamSourcesView({
                             setSelectedSource(source)
                             setDialogOpen(true)
                           }}
-                          title={t('Click to edit WeChat supplier name', '点击修改此来源微信名称')}
+                          title={t(
+                            'Click to edit WeChat supplier name',
+                            '点击修改此来源微信名称与登录信息'
+                          )}
                         >
                           <MessageSquare className='size-3 text-emerald-600' />
-                          <span className='truncate max-w-[140px]'>{source.wechat_name}</span>
+                          <span className='truncate max-w-[140px]'>
+                            {source.wechat_name}
+                          </span>
                         </div>
                       ) : (
                         <Button
@@ -448,24 +670,47 @@ export function UpstreamSourcesView({
                       )}
                     </TableCell>
 
-                    {/* 今日总收入 */}
+                    {/* 今日总收入 / 预计采购成本 / 净毛利 */}
                     <TableCell>
                       {source.today_income && source.today_income > 0 ? (
-                        <div className='flex flex-col gap-0.5'>
+                        <div className='flex flex-col gap-1'>
                           <div className='flex items-baseline gap-1'>
                             <span className='font-mono text-sm font-black text-emerald-600 dark:text-emerald-400'>
                               ${source.today_income.toFixed(2)}
                             </span>
                             <span className='text-[10px] text-muted-foreground font-mono'>
-                              ≈¥{(source.today_income * 7.3).toFixed(2)}
+                              ≈¥{(source.today_income * 7.3).toFixed(0)}
                             </span>
                           </div>
-                          <span className='text-[10px] text-muted-foreground font-mono'>
-                            总 {formatQuota(source.today_quota || 0)} quota
-                          </span>
+                          {source.today_estimated_cost !== undefined &&
+                            source.today_estimated_cost > 0 && (
+                              <div className='flex flex-wrap items-center gap-1'>
+                                <span className='text-[10px] font-mono text-indigo-600 dark:text-indigo-400'>
+                                  成本 ~${source.today_estimated_cost.toFixed(2)}
+                                </span>
+                                {source.today_gross_profit !== undefined && (
+                                  <Badge
+                                    variant='outline'
+                                    className={cn(
+                                      'h-4 px-1 text-[9px] font-mono gap-0.5',
+                                      source.today_gross_profit >= 0
+                                        ? 'border-emerald-300 text-emerald-700 bg-emerald-50/80 dark:border-emerald-800 dark:text-emerald-300 dark:bg-emerald-950/40'
+                                        : 'border-rose-300 text-rose-700 bg-rose-50/80 dark:border-rose-800 dark:text-rose-300 dark:bg-rose-950/40'
+                                    )}
+                                  >
+                                    <TrendingUp className='size-2.5' />
+                                    {source.today_gross_profit >= 0
+                                      ? `+$${source.today_gross_profit.toFixed(2)} (${source.today_gross_margin ?? 0}%)`
+                                      : `倒挂 -$${Math.abs(source.today_gross_profit).toFixed(2)}`}
+                                  </Badge>
+                                )}
+                              </div>
+                            )}
                         </div>
                       ) : (
-                        <span className='text-xs text-muted-foreground/60 font-mono'>$0.00</span>
+                        <span className='text-xs text-muted-foreground/60 font-mono'>
+                          $0.00
+                        </span>
                       )}
                     </TableCell>
 
@@ -473,64 +718,96 @@ export function UpstreamSourcesView({
                     <TableCell>
                       <div className='flex flex-col gap-1.5 py-1 min-w-[240px]'>
                         {(() => {
-                          const displayGroupSet = new Set<string>(source.groups || [])
+                          const displayGroupSet = new Set<string>(
+                            source.groups || []
+                          )
                           if (source.group_incomes) {
                             for (const g of Object.keys(source.group_incomes)) {
                               displayGroupSet.add(g)
                             }
                           }
-                          const groups = Array.from(displayGroupSet).sort((a, b) => {
-                            const incA = source.group_incomes?.[a]?.today_income || 0
-                            const incB = source.group_incomes?.[b]?.today_income || 0
-                            if (incB !== incA) return incB - incA
-                            return a.localeCompare(b)
-                          })
+                          const groups = Array.from(displayGroupSet).sort(
+                            (a, b) => {
+                              const incA =
+                                source.group_incomes?.[a]?.today_income || 0
+                              const incB =
+                                source.group_incomes?.[b]?.today_income || 0
+                              if (incB !== incA) return incB - incA
+                              return a.localeCompare(b)
+                            }
+                          )
 
                           if (groups.length === 0) {
                             return (
                               <div className='flex items-center justify-between gap-2 rounded border bg-muted/30 px-2 py-0.5 text-xs font-mono'>
-                                <span className='text-muted-foreground'>default</span>
-                                <span className='text-muted-foreground font-mono text-[11px]'>$0.00</span>
+                                <span className='text-muted-foreground'>
+                                  default
+                                </span>
+                                <span className='text-muted-foreground font-mono text-[11px]'>
+                                  $0.00
+                                </span>
                               </div>
                             )
                           }
 
                           return groups.map((g) => {
-                            const gIncome = source.group_incomes ? source.group_incomes[g] : null
+                            const gIncome = source.group_incomes
+                              ? source.group_incomes[g]
+                              : null
                             const income = gIncome ? gIncome.today_income : 0
                             const quota = gIncome ? gIncome.today_quota : 0
                             const hasIncome = income > 0
                             const grpCostRatio =
                               source.group_cost_ratios?.[g] ??
-                              (source.default_cost_ratio && source.default_cost_ratio > 0
+                              (source.default_cost_ratio &&
+                              source.default_cost_ratio > 0
                                 ? source.default_cost_ratio
                                 : undefined)
+                            const custRatio = source.group_customer_ratios?.[g]
+                            const isInverted =
+                              grpCostRatio !== undefined &&
+                              custRatio !== undefined &&
+                              custRatio > 0 &&
+                              !g.includes('按次') &&
+                              grpCostRatio > custRatio
 
                             return (
                               <div
                                 key={g}
                                 className={`flex items-center justify-between gap-2 rounded-md border px-2 py-1 text-xs transition-colors ${
-                                  hasIncome
-                                    ? 'bg-emerald-50/80 dark:bg-emerald-950/30 border-emerald-300/80 dark:border-emerald-800/60 shadow-2xs'
-                                    : 'bg-muted/30 border-border/60 text-muted-foreground'
+                                  isInverted
+                                    ? 'bg-rose-50/80 dark:bg-rose-950/30 border-rose-300/80 dark:border-rose-800/60'
+                                    : hasIncome
+                                      ? 'bg-emerald-50/80 dark:bg-emerald-950/30 border-emerald-300/80 dark:border-emerald-800/60 shadow-2xs'
+                                      : 'bg-muted/30 border-border/60 text-muted-foreground'
                                 }`}
                               >
                                 <div className='flex items-center gap-1.5 min-w-0'>
                                   <span
                                     className={`font-mono font-medium truncate max-w-[130px] cursor-pointer hover:underline ${
-                                      hasIncome ? 'text-emerald-900 dark:text-emerald-200 font-semibold' : ''
+                                      hasIncome
+                                        ? 'text-emerald-900 dark:text-emerald-200 font-semibold'
+                                        : ''
                                     }`}
                                     onClick={() => setSelectedGroupFilter(g)}
-                                    title={t('Filter this group', `点击按分组筛选: ${g}`)}
+                                    title={t(
+                                      'Filter this group',
+                                      `点击按分组筛选: ${g}`
+                                    )}
                                   >
                                     {g}
                                   </span>
                                   {grpCostRatio !== undefined && (
                                     <Badge
                                       variant='outline'
-                                      className='h-4 px-1 text-[10px] font-mono border-indigo-300/80 text-indigo-700 bg-indigo-50/80 dark:border-indigo-800 dark:text-indigo-300 dark:bg-indigo-950/40 shrink-0'
+                                      className={cn(
+                                        'h-4 px-1 text-[10px] font-mono shrink-0',
+                                        isInverted
+                                          ? 'border-rose-400 text-rose-700 bg-rose-100/80 dark:border-rose-800 dark:text-rose-300'
+                                          : 'border-indigo-300/80 text-indigo-700 bg-indigo-50/80 dark:border-indigo-800 dark:text-indigo-300 dark:bg-indigo-950/40'
+                                      )}
                                     >
-                                      成本 {grpCostRatio}x
+                                      {isInverted ? '⚠️' : '成本'} {grpCostRatio}x
                                     </Badge>
                                   )}
                                 </div>
@@ -574,7 +851,7 @@ export function UpstreamSourcesView({
                                 {groupRatioEntries.length} 个分组已设
                               </Badge>
                               {source.default_cost_ratio &&
-                                source.default_cost_ratio > 0 ? (
+                              source.default_cost_ratio > 0 ? (
                                 <span className='text-[10px] text-muted-foreground font-mono'>
                                   兜底 {source.default_cost_ratio}x
                                 </span>
@@ -622,11 +899,16 @@ export function UpstreamSourcesView({
                                   :{' '}
                                   {r.mode === 'per_token'
                                     ? `入$${r.input_price ?? 0}/出$${r.output_price ?? 0}/M`
-                                    : `$${r.price ?? 0}/次`}
+                                    : r.mode === 'ratio'
+                                      ? `${r.cost_ratio ?? 0}x`
+                                      : `$${r.price ?? 0}/次`}
                                 </Badge>
                               ))}
                               {rules.length > 3 && (
-                                <Badge variant='outline' className='text-[10px] w-fit'>
+                                <Badge
+                                  variant='outline'
+                                  className='text-[10px] w-fit'
+                                >
                                   +{rules.length - 3} 条规则
                                 </Badge>
                               )}
@@ -636,7 +918,10 @@ export function UpstreamSourcesView({
                         if (pricedModels.length === 0) {
                           return (
                             <span className='text-xs text-muted-foreground italic'>
-                              {t('By Group Cost Ratio', '按分组成本倍率计费')}
+                              {t(
+                                'By Group Cost Ratio',
+                                '按分组成本倍率计费'
+                              )}
                             </span>
                           )
                         }
@@ -663,7 +948,25 @@ export function UpstreamSourcesView({
 
                     {/* 快捷操作 */}
                     <TableCell className='text-right'>
-                      <div className='flex items-center justify-end gap-1.5'>
+                      <div className='flex items-center justify-end gap-1'>
+                        <Button
+                          variant='ghost'
+                          size='sm'
+                          disabled={isProbing}
+                          className='h-7 w-7 p-0 text-emerald-600 hover:bg-emerald-500/10'
+                          onClick={() =>
+                            probeSingleMutation.mutate(source.base_url)
+                          }
+                          title='实时探测上游余额与真实扣费倍率'
+                        >
+                          <RefreshCw
+                            className={cn(
+                              'size-3.5',
+                              isProbing && 'animate-spin'
+                            )}
+                          />
+                        </Button>
+
                         <Button
                           variant='outline'
                           size='sm'
@@ -674,7 +977,7 @@ export function UpstreamSourcesView({
                           }}
                         >
                           <Settings2 className='size-3.5 mr-1 text-primary' />
-                          {t('Cost & WeChat', '成本/微信')}
+                          {t('Cost & WeChat', '成本/登录')}
                         </Button>
 
                         {onNavigateToChannelsWithFilter && (
@@ -682,8 +985,15 @@ export function UpstreamSourcesView({
                             variant='ghost'
                             size='sm'
                             className='h-7 text-xs px-2 text-muted-foreground hover:text-foreground'
-                            onClick={() => onNavigateToChannelsWithFilter(source.display_base_url)}
-                            title={t('View related channels in channels page', '查看该地址下的所有底层渠道')}
+                            onClick={() =>
+                              onNavigateToChannelsWithFilter(
+                                source.display_base_url
+                              )
+                            }
+                            title={t(
+                              'View related channels in channels page',
+                              '查看该地址下的所有底层渠道'
+                            )}
                           >
                             <ExternalLink className='size-3.5' />
                           </Button>

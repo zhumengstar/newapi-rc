@@ -24,6 +24,8 @@ import type {
   ChannelExclusiveUpdateRequest,
   UpstreamSourceDTO,
   UpdateUpstreamSourceRequest,
+  ProbeUpstreamSourceRequest,
+  ProbeUpstreamSourceResponse,
   ChannelTodayIncomeResponse,
 } from './types'
 
@@ -58,6 +60,18 @@ export async function updateChannelSource(
     data: any
   }>('/api/channel/sources', data)
   return requireServerSuccess(response.data).data
+}
+
+export async function probeUpstreamSource(
+  data: ProbeUpstreamSourceRequest
+): Promise<{ message?: string; data: ProbeUpstreamSourceResponse }> {
+  const response = await api.post<{
+    success: boolean
+    message?: string
+    data: ProbeUpstreamSourceResponse
+  }>('/api/channel/sources/probe', data)
+  const res = requireServerSuccess(response.data)
+  return { message: res.message, data: res.data }
 }
 
 export async function updateChannelExclusive(

@@ -49,20 +49,44 @@ export interface GroupIncomeItem {
 export interface SourceModelCostRule {
   group: string // '*' for all groups under this source, or specific group name
   models: string[]
-  mode: 'per_call' | 'per_token'
+  mode: 'per_call' | 'per_token' | 'ratio'
   price?: number // used when mode === 'per_call' ($/call)
   input_price?: number // used when mode === 'per_token' ($/1M input tokens)
   output_price?: number // used when mode === 'per_token' ($/1M output tokens)
+  cost_ratio?: number // used when mode === 'ratio' (model independent ratio x)
+  cache_read_ratio?: number // optional cache read discount ratio (e.g. 0.1)
+  cache_create_ratio?: number // optional cache creation ratio (e.g. 1.25)
+}
+
+export interface SourceChannelBrief {
+  id: number
+  name: string
+  group: string
+  status: number
+  priority: number
+  weight: number
+  channel_ratio: number
+  today_quota: number
+  today_income: number
 }
 
 export interface UpstreamSourceDTO {
   base_url: string
   display_base_url: string
+  dashboard_url?: string
+  upstream_username?: string
+  upstream_password?: string
+  upstream_platform?: string
+  cost_discount_scale?: number
+  upstream_balance?: number
+  upstream_used_quota?: number
+  upstream_updated_at?: number
   wechat_name: string
   channel_count: number
   enabled_channel_count: number
   channel_ids: number[]
   channel_names: string[]
+  channels?: SourceChannelBrief[]
   groups: string[]
   group_channel_counts?: Record<string, number>
   group_models?: Record<string, string[]>
@@ -70,12 +94,16 @@ export interface UpstreamSourceDTO {
   channel_ratio: number
   default_cost_ratio?: number
   group_cost_ratios?: Record<string, number>
+  channel_cost_ratios?: Record<number, number>
   model_cost_rules?: SourceModelCostRule[]
   cost_tier: number
   models: string[]
   model_prices: Record<string, number>
   today_quota?: number
   today_income?: number
+  today_estimated_cost?: number
+  today_gross_profit?: number
+  today_gross_margin?: number
   group_incomes?: Record<string, GroupIncomeItem>
 }
 
@@ -97,12 +125,42 @@ export interface ChannelTodayIncomeResponse {
 export interface UpdateUpstreamSourceRequest {
   base_url: string
   wechat_name?: string
+  dashboard_url?: string
+  upstream_username?: string
+  upstream_password?: string
+  upstream_platform?: string
+  cost_discount_scale?: number
+  upstream_balance?: number
+  upstream_used_quota?: number
   channel_ratio?: number
   default_cost_ratio?: number
   group_cost_ratios?: Record<string, number>
+  channel_cost_ratios?: Record<number, number>
+  channel_statuses?: Record<number, number>
   model_cost_rules?: SourceModelCostRule[]
   group?: string
   apply_group_to_all_channels?: boolean
   cost_tier?: number
   model_prices?: Record<string, number>
+}
+
+export interface ProbeUpstreamSourceRequest {
+  base_url: string
+  dashboard_url?: string
+  upstream_username?: string
+  upstream_password?: string
+  upstream_platform?: string
+  cost_discount_scale?: number
+}
+
+export interface ProbeUpstreamSourceResponse {
+  base_url: string
+  dashboard_url: string
+  platform: string
+  upstream_balance?: number
+  upstream_used_quota?: number
+  upstream_updated_at?: number
+  detected_group_ratios?: Record<string, number>
+  detected_model_call_prices?: Record<string, number>
+  cost_discount_scale?: number
 }

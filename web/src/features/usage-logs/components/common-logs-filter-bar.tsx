@@ -19,7 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { useQueryClient, useIsFetching, useQuery } from '@tanstack/react-query'
 import { useNavigate, getRouteApi } from '@tanstack/react-router'
 import type { Table } from '@tanstack/react-table'
-import { Eye, EyeOff } from 'lucide-react'
+import { Eye, EyeOff, LogIn } from 'lucide-react'
 import { useState, useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -45,6 +45,7 @@ import { getRankedModels } from '@/features/models/api'
 import { getChannelApiAddresses } from '@/features/channels/api'
 import { getChannelSources } from '@/features/exclusive-channels/api'
 import { QuickSourceDialog } from '@/features/exclusive-channels/components/quick-source-dialog'
+import { openUpstreamOneClickLogin } from '@/features/exclusive-channels/lib/one-click-login'
 import type { UpstreamSourceDTO } from '@/features/exclusive-channels/types'
 import { formatLogQuota } from '@/lib/format'
 import { useMediaQuery } from '@/hooks'
@@ -715,14 +716,37 @@ export function CommonLogsFilterBar<TData>(
             <span
               title={item.base_url}
               className={cn(
-                'inline-flex w-[215px] shrink-0 items-center gap-1.5 rounded-md border px-2 py-0.5 font-mono text-xs font-semibold whitespace-nowrap shadow-2xs',
+                'inline-flex w-[215px] shrink-0 items-center justify-between gap-1 rounded-md border px-2 py-0.5 font-mono text-xs font-semibold whitespace-nowrap shadow-2xs',
                 style.badgeBg
               )}
             >
+              <span className='inline-flex items-center gap-1.5 min-w-0 flex-1'>
+                <span
+                  className={cn('size-1.5 shrink-0 rounded-full', style.dot)}
+                />
+                <span className='truncate'>{item.base_url}</span>
+              </span>
               <span
-                className={cn('size-1.5 shrink-0 rounded-full', style.dot)}
-              />
-              <span className='truncate'>{item.base_url}</span>
+                role='button'
+                tabIndex={-1}
+                title={
+                  src?.upstream_username
+                    ? `🚀 一键免密登录该站点 (${src.upstream_username})`
+                    : `🌐 打开该站点控制台`
+                }
+                onMouseDown={(e) => {
+                  e.stopPropagation()
+                  e.preventDefault()
+                }}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  e.preventDefault()
+                  openUpstreamOneClickLogin(src, { rawBaseUrl: item.base_url })
+                }}
+                className='inline-flex items-center justify-center rounded p-0.5 opacity-70 hover:opacity-100 hover:bg-background/60 cursor-pointer shrink-0 transition-opacity'
+              >
+                <LogIn className='size-3' />
+              </span>
             </span>
 
             <div className='flex shrink-0 items-center gap-1.5'>

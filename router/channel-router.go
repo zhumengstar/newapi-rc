@@ -17,6 +17,9 @@ type permissionRoute struct {
 }
 
 func registerChannelRoutes(apiRouter *gin.RouterGroup) {
+	// Public userscript endpoint for Tampermonkey / Violentmonkey 1-click install (contains no credentials)
+	apiRouter.GET("/channel/sources/autologin.user.js", controller.ServeUpstreamAutoLoginUserscript)
+
 	channelRoute := apiRouter.Group("/channel")
 	channelRoute.Use(middleware.AdminAuth())
 
@@ -40,6 +43,7 @@ var channelPermissionRoutes = []permissionRoute{
 	{method: http.MethodGet, path: "/", permission: authz.ChannelRead, handler: controller.GetAllChannels},
 	{method: http.MethodGet, path: "/sources", permission: authz.ChannelRead, handler: controller.GetChannelSources},
 	{method: http.MethodPut, path: "/sources", permission: authz.ChannelWrite, handler: controller.UpdateChannelSource},
+	{method: http.MethodPost, path: "/sources/probe", permission: authz.ChannelRead, handler: controller.ProbeUpstreamSource},
 	{method: http.MethodGet, path: "/today_income", permission: authz.ChannelRead, handler: controller.GetChannelTodayIncome},
 	{method: http.MethodGet, path: "/search", permission: authz.ChannelRead, handler: controller.SearchChannels},
 	{method: http.MethodGet, path: "/models", permission: authz.ChannelRead, handler: controller.ChannelListModels},
