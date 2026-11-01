@@ -530,7 +530,7 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 	var cancelAttempt context.CancelFunc
 	var firstByteTimer *time.Timer
 	var firstByteTimeout time.Duration
-	if info != nil && (info.IsStream || info.RetryIndex > 0) && c != nil && c.Request != nil {
+	if info != nil && info.IsStream && c != nil && c.Request != nil {
 		channelID := info.GetChannelID()
 		model := info.GetUpstreamModelName()
 		if model == "" {
@@ -551,7 +551,7 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 					firstByteTimer.Stop()
 				}
 				// 记录有效出字延迟 (TTFT) 供 P95 统计与健康追踪
-				if info.IsStream && attemptCtx != nil && attemptCtx.Err() == nil {
+				if attemptCtx != nil && attemptCtx.Err() == nil {
 					elapsed := time.Since(attemptStartedAt)
 					service.RecordTTFT(channelID, model, elapsed)
 				}
@@ -561,8 +561,8 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 		info.DisarmFirstByteTimer = disarmTimer
 
 		// 默认遵从上游物理连接状态进行超时处理，不主动强行掐断正在正常通信的上游长连接；
-		// 仅在明确配置开启，或处于重试阶段（RetryIndex > 0）时启动超时截断保护，避免重试叠加导致 2m5s+ 超长慢报错。
-		enableFirstByteTimer := common2.GetEnvOrDefaultBool("ENABLE_STREAMING_FIRST_BYTE_TIMEOUT", false) || info.RetryIndex > 0
+		// 仅在明确配置开启时才启动网关层首字截断定时器。
+		enableFirstByteTimer := common2.GetEnvOrDefaultBool("ENABLE_STREAMING_FIRST_BYTE_TIMEOUT", false)
 		if override := os.Getenv("STREAMING_FIRST_BYTE_TIMEOUT_OVERRIDE"); override != "" {
 			if sec, err := strconv.Atoi(override); err == nil && sec > 0 {
 				enableFirstByteTimer = true
@@ -570,20 +570,12 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 		}
 
 		if enableFirstByteTimer {
-			if info.IsStream {
-				firstByteTimeout = getStreamingFirstByteTimeout(info)
-				if info.RetryIndex > 0 && firstByteTimeout > 35*time.Second {
-					firstByteTimeout = 35 * time.Second
-				}
-				p95, p95Count := service.GetChannelModelP95(channelID, model)
-				if p95Count >= 5 {
-					logger.LogInfo(c, fmt.Sprintf("stream first-byte dynamic timeout armed for channel %d, model %s (retry=%d): %v (P95=%v, samples=%d)", channelID, model, info.RetryIndex, firstByteTimeout, p95, p95Count))
-				} else {
-					logger.LogInfo(c, fmt.Sprintf("stream first-byte dynamic timeout armed for channel %d, model %s (retry=%d): %v (cold-start baseline)", channelID, model, info.RetryIndex, firstByteTimeout))
-				}
+			firstByteTimeout = getStreamingFirstByteTimeout(info)
+			p95, p95Count := service.GetChannelModelP95(channelID, model)
+			if p95Count >= 5 {
+				logger.LogInfo(c, fmt.Sprintf("stream first-byte dynamic timeout armed for channel %d, model %s: %v (P95=%v, samples=%d)", channelID, model, firstByteTimeout, p95, p95Count))
 			} else {
-				firstByteTimeout = 45 * time.Second
-				logger.LogInfo(c, fmt.Sprintf("non-stream retry attempt timeout armed for channel %d, model %s (retry=%d): %v", channelID, model, info.RetryIndex, firstByteTimeout))
+				logger.LogInfo(c, fmt.Sprintf("stream first-byte dynamic timeout armed for channel %d, model %s: %v (cold-start baseline)", channelID, model, firstByteTimeout))
 			}
 
 			firstByteTimer = time.AfterFunc(firstByteTimeout, func() {
@@ -592,7 +584,7 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 				if timerStopped {
 					return
 				}
-				logger.LogWarn(c, fmt.Sprintf("upstream attempt timeout after %v (channel %d, model %s, retry=%d), canceling attempt", firstByteTimeout, channelID, model, info.RetryIndex))
+				logger.LogWarn(c, fmt.Sprintf("upstream stream first-byte dynamic timeout after %v (channel %d, model %s), canceling attempt to trigger retry", firstByteTimeout, channelID, model))
 				cancelAttempt()
 			})
 		}

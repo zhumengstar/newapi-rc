@@ -203,7 +203,6 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	relayInfo.RetryIndex = 0
 	relayInfo.LastError = nil
 	hasUpstreamAttempt := false
-	relayStartedAt := time.Now()
 
 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
 		relayInfo.RetryIndex = retryParam.GetRetry()
@@ -277,11 +276,6 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 		if shouldStopRetryAfterSlowImageAttempt(relayInfo, time.Since(attemptStartedAt)) {
 			logger.LogInfo(c, "image upstream attempt exceeded 60s; skip channel retry")
-			service.SettleInterruptedRequestIfNeeded(c, relayInfo, nil, newAPIError)
-			break
-		}
-		if time.Since(relayStartedAt) >= 75*time.Second {
-			logger.LogInfo(c, fmt.Sprintf("cumulative relay attempts elapsed %v (>=75s); skip further channel retry to avoid 120s+ client timeout", time.Since(relayStartedAt)))
 			service.SettleInterruptedRequestIfNeeded(c, relayInfo, nil, newAPIError)
 			break
 		}
