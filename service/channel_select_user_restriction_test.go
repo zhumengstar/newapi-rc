@@ -218,6 +218,75 @@ func TestCacheGetRandomSatisfiedChannelRestrictedDisabledChannelRouting(t *testi
 	require.NoError(t, err4)
 	require.NotNil(t, selectedCh4)
 	assert.Equal(t, 428, selectedCh4.Id, "专属客户只能走其指定的渠道 428")
+
+	// 5. 验证双开关：
+	// (a) 开启 AllowBindUsersOtherChannels=true, AllowOtherUsers=false，同时新增高优先级公共渠道 478 (prio 183)
+	priority183 := int64(183)
+	ch478 := &model.Channel{
+		Id:       478,
+		Type:     constant.ChannelTypeOpenAI,
+		Key:      "sk-478",
+		Status:   common.ChannelStatusEnabled,
+		Name:     "高优公共渠道478",
+		Group:    "cc反重力按量",
+		Models:   "claude-opus-4-6",
+		Priority: &priority183,
+		Weight:   &weight1,
+	}
+	require.NoError(t, db.Create(ch478).Error)
+	ch428.SetOtherSettings(kitdto.ChannelOtherSettings{
+		AllowedUserIds:              []int{382},
+		AllowBindUsersOtherChannels: true,
+		AllowOtherUsers:             false,
+	})
+	require.NoError(t, db.Model(ch428).Update("settings", ch428.OtherSettings).Error)
+	model.InitChannelCache()
+
+	// 绑定客户 382 首次请求优先走高优先级公共渠道 478，排除 478 后回退到专属渠道 428
+	selectedCh5First, _, err5First := CacheGetRandomSatisfiedChannel(param4)
+	require.NoError(t, err5First)
+	require.NotNil(t, selectedCh5First)
+	assert.Equal(t, 478, selectedCh5First.Id, "开启允许绑定客户请求其他公共渠道后，优先走高优公共渠道 478")
+
+	param4Fallback := &RetryParam{
+		Ctx:         ctx4,
+		TokenGroup:  "cc反重力按量",
+		ModelName:   "claude-opus-4-6",
+		RequestPath: "/v1/messages",
+		Retry:       &retry4,
+	}
+	param4Fallback.MarkChannelTried(478)
+	selectedCh5Fallback, _, err5Fallback := CacheGetRandomSatisfiedChannel(param4Fallback)
+	require.NoError(t, err5Fallback)
+	require.NotNil(t, selectedCh5Fallback)
+	assert.Equal(t, 428, selectedCh5Fallback.Id, "高优公共渠道 478 失败后，绑定客户 382 自动回退到专属渠道 428")
+
+	// 普通客户 435 排除公共渠道 478 后，因为 AllowOtherUsers=false，仍然不能走 428
+	param3Fallback := &RetryParam{
+		Ctx:         ctx3,
+		TokenGroup:  "cc反重力按量",
+		ModelName:   "claude-opus-4-6",
+		RequestPath: "/v1/messages",
+		Retry:       &retry3,
+	}
+	param3Fallback.MarkChannelTried(478)
+	selectedCh3Blocked, _, err3Blocked := CacheGetRandomSatisfiedChannel(param3Fallback)
+	require.NoError(t, err3Blocked)
+	assert.Nil(t, selectedCh3Blocked, "AllowOtherUsers=false 时，普通客户绝不能走 428")
+
+	// (b) 开启 AllowOtherUsers=true 后，普通客户 435 在排除 478 后也可以走 428
+	ch428.SetOtherSettings(kitdto.ChannelOtherSettings{
+		AllowedUserIds:              []int{382},
+		AllowBindUsersOtherChannels: true,
+		AllowOtherUsers:             true,
+	})
+	require.NoError(t, db.Model(ch428).Update("settings", ch428.OtherSettings).Error)
+	model.InitChannelCache()
+
+	selectedCh3Allowed, _, err3Allowed := CacheGetRandomSatisfiedChannel(param3Fallback)
+	require.NoError(t, err3Allowed)
+	require.NotNil(t, selectedCh3Allowed)
+	assert.Equal(t, 428, selectedCh3Allowed.Id, "AllowOtherUsers=true 时，普通客户也可请求 428")
 }
 
 func TestSamePriorityMultiChannelAndMultiPassRetries(t *testing.T) {

@@ -77,15 +77,16 @@ func InitChannelCache() {
 	for _, channel := range channels {
 		otherSettings := channel.GetOtherSettings()
 		allowedUsers := otherSettings.AllowedUserIds
-		allowOtherChannels := otherSettings.AllowOtherUsers
+		allowBindUsersOtherChannels := otherSettings.AllowBindUsersOtherChannels
+		allowOtherUsers := otherSettings.AllowOtherUsers
 		groups := strings.SplitSeq(channel.Group, ",")
 		for group := range groups {
 			group = strings.TrimSpace(group)
 			if group == "" {
 				continue
 			}
-			// 1. 公共渠道池：仅未配置专属客户的启用状态渠道进入公共池（配置了专属客户的渠道仅对指定客户开放，不向其他普通客户开放）
-			if channel.Status == common.ChannelStatusEnabled && len(allowedUsers) == 0 {
+			// 1. 公共渠道池：未配置专属客户的启用渠道，或显式开启了 AllowOtherUsers（允许其他用户请求本渠道）的启用渠道进入公共池
+			if channel.Status == common.ChannelStatusEnabled && (len(allowedUsers) == 0 || allowOtherUsers) {
 				if newGroup2model2channels[group] == nil {
 					newGroup2model2channels[group] = make(map[string][]int)
 				}
@@ -109,21 +110,23 @@ func InitChannelCache() {
 				if newGroup2userAllowPublic[group] == nil {
 					newGroup2userAllowPublic[group] = make(map[int]bool)
 				}
-				newGroupRestrictedChannels[group][channel.Id] = true
+				if !allowOtherUsers {
+					newGroupRestrictedChannels[group][channel.Id] = true
+				}
 				models := channel.GetModels()
 				for _, uid := range allowedUsers {
 					if uid > 0 {
 						newGroup2userRestricted[group][uid] = true
-						if allowOtherChannels {
+						if allowBindUsersOtherChannels {
 							newGroup2userAllowPublic[group][uid] = true
 						}
 						if newGroup2userAllowedChannels[group][uid] == nil {
 							newGroup2userAllowedChannels[group][uid] = make(map[int]bool)
 							newGroup2userModel2channels[group][uid] = make(map[string][]int)
 						}
-						// 若开启了 allowOtherChannels（允许同时请求其他公共渠道并按优先级调度），则仅当本渠道启用时才加入候选；
-						// 若关闭了 allowOtherChannels（仅锁死本专属渠道），则无论是否禁用均加入候选
-						if !allowOtherChannels || channel.Status == common.ChannelStatusEnabled {
+						// 若开启了 allowBindUsersOtherChannels（允许绑定客户同时请求其他公共渠道并按优先级调度），则仅当本渠道启用时才加入候选；
+						// 若关闭了 allowBindUsersOtherChannels（仅锁死本专属渠道），则无论是否禁用均加入候选
+						if !allowBindUsersOtherChannels || channel.Status == common.ChannelStatusEnabled {
 							newGroup2userAllowedChannels[group][uid][channel.Id] = true
 							for _, model := range models {
 								newGroup2userModel2channels[group][uid][model] = append(newGroup2userModel2channels[group][uid][model], channel.Id)

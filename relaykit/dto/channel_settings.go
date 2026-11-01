@@ -95,7 +95,9 @@ type ChannelOtherSettings struct {
 	StripClaudeResponseCache bool `json:"strip_claude_response_cache,omitempty"`
 	// AllowedUserIds 指定可访问本渠道的客户用户ID列表；空表示全员共享，非空时只有配置的用户受限路由，未被配置的普通用户不限制
 	AllowedUserIds []int `json:"allowed_user_ids,omitempty"`
-	// AllowOtherUsers 配置了 AllowedUserIds 时，是否同时支持其他普通用户请求本渠道（false=专属独享，true=允许其他用户共享请求）
+	// AllowBindUsersOtherChannels 配置了 AllowedUserIds 时，是否允许这些绑定客户同时请求同分组的其他公共渠道（按优先级优先走高优渠道，不可用时回退本渠道）
+	AllowBindUsersOtherChannels bool `json:"allow_bind_users_other_channels,omitempty"`
+	// AllowOtherUsers 配置了 AllowedUserIds 时，是否允许未在列表中的其他普通用户请求本渠道（false=仅绑定客户可请求，true=其他用户也可请求本渠道）
 	AllowOtherUsers bool `json:"allow_other_users,omitempty"`
 }
 

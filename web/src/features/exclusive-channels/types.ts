@@ -22,12 +22,14 @@ import type { User } from '@/features/users/types'
 export interface ChannelExclusiveUpdateRequest {
   group?: string
   allowed_user_ids?: number[]
+  allow_bind_users_other_channels?: boolean
   allow_other_users?: boolean
   status?: number
 }
 
 export interface EnrichedChannel extends Channel {
   allowedUserIds: number[]
+  allowBindUsersOtherChannels: boolean
   allowOtherUsers: boolean
   groupsList: string[]
   isExclusive: boolean

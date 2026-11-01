@@ -210,6 +210,7 @@ export const channelFormSchema = z
     models: z.string().min(1, ERROR_MESSAGES.REQUIRED_MODELS),
     group: z.array(z.string()).min(1, ERROR_MESSAGES.REQUIRED_GROUP),
     allowed_user_ids: z.array(z.number()).optional(),
+    allow_bind_users_other_channels: z.boolean().optional(),
     allow_other_users: z.boolean().optional(),
     model_mapping: z
       .string()
@@ -454,6 +455,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   models: '',
   group: ['default'],
   allowed_user_ids: [],
+  allow_bind_users_other_channels: false,
   allow_other_users: false,
   model_mapping: '',
   priority: 0,
@@ -576,6 +578,7 @@ export function transformChannelToFormDefaults(
   let upstreamModelUpdateIgnoredModels = ''
   let advancedCustom = ''
   let allowedUserIds: number[] = []
+  let allowBindUsersOtherChannels = false
   let allowOtherUsers = false
 
   if (channel.settings) {
@@ -586,6 +589,8 @@ export function transformChannelToFormDefaults(
           .map(Number)
           .filter((n: number) => Number.isFinite(n) && n > 0)
       }
+      allowBindUsersOtherChannels =
+        parsed.allow_bind_users_other_channels === true
       allowOtherUsers = parsed.allow_other_users === true
       vertexKeyType = parsed.vertex_key_type || 'json'
       azureResponsesVersion = parsed.azure_responses_version || ''
@@ -674,6 +679,7 @@ export function transformChannelToFormDefaults(
     upstream_model_update_ignored_models: upstreamModelUpdateIgnoredModels,
     advanced_custom: advancedCustom,
     allowed_user_ids: allowedUserIds,
+    allow_bind_users_other_channels: allowBindUsersOtherChannels,
     allow_other_users: allowOtherUsers,
   }
 }
@@ -847,9 +853,12 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
 
   if (Array.isArray(formData.allowed_user_ids) && formData.allowed_user_ids.length > 0) {
     settingsObj.allowed_user_ids = formData.allowed_user_ids
+    settingsObj.allow_bind_users_other_channels =
+      formData.allow_bind_users_other_channels === true
     settingsObj.allow_other_users = formData.allow_other_users === true
   } else {
     delete settingsObj.allowed_user_ids
+    delete settingsObj.allow_bind_users_other_channels
     delete settingsObj.allow_other_users
   }
 

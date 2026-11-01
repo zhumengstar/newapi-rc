@@ -2003,10 +2003,11 @@ func BatchUpdateChannelStatus(c *gin.Context) {
 }
 
 type ChannelExclusiveUpdateRequest struct {
-	Group           *string `json:"group"`
-	AllowedUserIds  *[]int  `json:"allowed_user_ids"`
-	AllowOtherUsers *bool   `json:"allow_other_users"`
-	Status          *int    `json:"status"`
+	Group                       *string `json:"group"`
+	AllowedUserIds              *[]int  `json:"allowed_user_ids"`
+	AllowBindUsersOtherChannels *bool   `json:"allow_bind_users_other_channels"`
+	AllowOtherUsers             *bool   `json:"allow_other_users"`
+	Status                      *int    `json:"status"`
 }
 
 func UpdateChannelExclusive(c *gin.Context) {
@@ -2091,22 +2092,33 @@ func UpdateChannelExclusive(c *gin.Context) {
 
 		otherSettings := existingChannel.GetOtherSettings()
 		otherSettings.AllowedUserIds = cleanedIds
+		if req.AllowBindUsersOtherChannels != nil {
+			otherSettings.AllowBindUsersOtherChannels = *req.AllowBindUsersOtherChannels
+			updateAudit["allow_bind_users_other_channels"] = *req.AllowBindUsersOtherChannels
+		}
 		if req.AllowOtherUsers != nil {
 			otherSettings.AllowOtherUsers = *req.AllowOtherUsers
 			updateAudit["allow_other_users"] = *req.AllowOtherUsers
 		}
 		if len(cleanedIds) == 0 {
+			otherSettings.AllowBindUsersOtherChannels = false
 			otherSettings.AllowOtherUsers = false
 		}
 		existingChannel.SetOtherSettings(otherSettings)
 		updates["settings"] = existingChannel.OtherSettings
 		updateAudit["allowed_user_ids"] = cleanedIds
-	} else if req.AllowOtherUsers != nil {
+	} else if req.AllowBindUsersOtherChannels != nil || req.AllowOtherUsers != nil {
 		otherSettings := existingChannel.GetOtherSettings()
-		otherSettings.AllowOtherUsers = *req.AllowOtherUsers
+		if req.AllowBindUsersOtherChannels != nil {
+			otherSettings.AllowBindUsersOtherChannels = *req.AllowBindUsersOtherChannels
+			updateAudit["allow_bind_users_other_channels"] = *req.AllowBindUsersOtherChannels
+		}
+		if req.AllowOtherUsers != nil {
+			otherSettings.AllowOtherUsers = *req.AllowOtherUsers
+			updateAudit["allow_other_users"] = *req.AllowOtherUsers
+		}
 		existingChannel.SetOtherSettings(otherSettings)
 		updates["settings"] = existingChannel.OtherSettings
-		updateAudit["allow_other_users"] = *req.AllowOtherUsers
 	}
 
 	if len(updates) > 0 {

@@ -3796,28 +3796,58 @@ export function ChannelMutateDrawer({
                       )}
                     </FormDescription>
                   </div>
-                  <FormField
-                    control={form.control}
-                    name='allow_other_users'
-                    render={({ field: allowOtherField }) => (
-                      <div className='border-border/60 bg-muted/20 flex items-center justify-between rounded-md border px-3 py-2'>
-                        <div className='space-y-0.5 pr-3'>
-                          <div className='text-xs font-medium'>
-                            {t('Allow Other Users', '允许这些客户同时请求其他渠道（按优先级调度）')}
+                  <div className='space-y-2'>
+                    <FormField
+                      control={form.control}
+                      name='allow_bind_users_other_channels'
+                      render={({ field: allowBindOtherField }) => (
+                        <div className='border-border/60 bg-muted/20 flex items-center justify-between rounded-md border px-3 py-2'>
+                          <div className='space-y-0.5 pr-3'>
+                            <div className='text-xs font-medium'>
+                              {t(
+                                'Allow Bound Users To Request Other Channels',
+                                '允许绑定客户请求其他公共渠道（按优先级调度）'
+                              )}
+                            </div>
+                            <div className='text-muted-foreground text-[11px]'>
+                              {allowBindOtherField.value
+                                ? '已开启：选中的客户可同时请求同分组其他公共渠道（优先走高优先级渠道，不可用时顺延走本渠道）'
+                                : '已关闭：选中的客户将完全锁定只请求本专属渠道，不走其他公共渠道'}
+                            </div>
                           </div>
-                          <div className='text-muted-foreground text-[11px]'>
-                            {allowOtherField.value
-                              ? '已开启：本渠道仅限下方指定客户使用；指定客户优先走高优先级渠道，高优先级不可用时自动顺延请求本渠道'
-                              : '已关闭：下方指定客户将仅锁定请求本专属渠道（不走同分组其他公共渠道）'}
-                          </div>
+                          <Switch
+                            checked={Boolean(allowBindOtherField.value)}
+                            onCheckedChange={allowBindOtherField.onChange}
+                          />
                         </div>
-                        <Switch
-                          checked={Boolean(allowOtherField.value)}
-                          onCheckedChange={allowOtherField.onChange}
-                        />
-                      </div>
-                    )}
-                  />
+                      )}
+                    />
+                    <FormField
+                      control={form.control}
+                      name='allow_other_users'
+                      render={({ field: allowOtherField }) => (
+                        <div className='border-border/60 bg-muted/20 flex items-center justify-between rounded-md border px-3 py-2'>
+                          <div className='space-y-0.5 pr-3'>
+                            <div className='text-xs font-medium'>
+                              {t(
+                                'Allow Other Users To Request This Channel',
+                                '允许其他用户请求本渠道'
+                              )}
+                            </div>
+                            <div className='text-muted-foreground text-[11px]'>
+                              {allowOtherField.value
+                                ? '已开启：除下方选中的客户外，同分组其他普通用户也可按优先级请求本渠道'
+                                : '已关闭：本渠道仅限下方选中的客户请求，其他普通用户不可请求本渠道'}
+                            </div>
+                          </div>
+                          <Switch
+                            checked={Boolean(allowOtherField.value)}
+                            onCheckedChange={allowOtherField.onChange}
+                          />
+                        </div>
+                      )}
+                    />
+                  </div>
                   <FormControl>
                     {isLoadingUsers ? (
                       <Skeleton className='h-10 w-full' />
