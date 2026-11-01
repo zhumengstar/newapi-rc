@@ -1078,6 +1078,7 @@ export function CommonLogsFilterBar<TData>(
       <Combobox
         options={apiAddressOptions}
         allowCustomValue
+        suspended={sourceDialogOpen}
         aria-label={t('API Address', 'API 地址')}
         emptyText={t('No API address found.', '未找到 API 地址')}
         placeholder={t('API Address', 'API 地址')}
@@ -1089,7 +1090,7 @@ export function CommonLogsFilterBar<TData>(
           handleApply({ ...filters, baseUrl: val }, logType)
         }}
         onKeyDown={handleKeyDown}
-        renderOptionHoverPanel={(option, closeDropdown) => {
+        renderOptionHoverPanel={(option) => {
           if (!option.value) return null
           const norm = option.value.trim().toLowerCase().replace(/\/+$/, '')
           const source =
@@ -1099,7 +1100,6 @@ export function CommonLogsFilterBar<TData>(
               baseUrl={option.value}
               source={source}
               onOpenFullConfig={(src) => {
-                closeDropdown()
                 setEditingSource(src)
                 setSourceDialogOpen(true)
               }}
@@ -1270,6 +1270,7 @@ export function CommonLogsFilterBar<TData>(
           source={editingSource}
           open={sourceDialogOpen}
           onOpenChange={setSourceDialogOpen}
+          onBack={() => setSourceDialogOpen(false)}
         />
       )}
     </>

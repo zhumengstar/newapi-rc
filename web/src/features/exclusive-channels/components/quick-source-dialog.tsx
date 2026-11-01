@@ -18,6 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import {
+  ArrowLeft,
   CheckCheck,
   Coins,
   DollarSign,
@@ -67,12 +68,14 @@ interface QuickSourceDialogProps {
   allGroups?: string[]
   open: boolean
   onOpenChange: (open: boolean) => void
+  onBack?: () => void
 }
 
 export function QuickSourceDialog({
   source,
   open,
   onOpenChange,
+  onBack,
 }: QuickSourceDialogProps) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
@@ -394,15 +397,30 @@ export function QuickSourceDialog({
       <DialogContent className='max-h-[90vh] overflow-y-auto sm:max-w-2xl'>
         <DialogHeader>
           <div className='flex items-center justify-between pr-6'>
-            <DialogTitle className='flex items-center gap-2 text-base font-semibold'>
-              <Globe className='size-4 text-primary' />
-              <span>
-                {t(
-                  'Configure Source Cost (Groups & Models)',
-                  '配置来源分组成本倍率与模型单价'
-                )}
-              </span>
-            </DialogTitle>
+            <div className='flex items-center gap-2'>
+              {onBack && (
+                <Button
+                  type='button'
+                  variant='outline'
+                  size='sm'
+                  onClick={onBack}
+                  className='h-7 px-2 text-xs gap-1 shrink-0'
+                  title='返回上一弹窗'
+                >
+                  <ArrowLeft className='size-3.5' />
+                  <span>返回</span>
+                </Button>
+              )}
+              <DialogTitle className='flex items-center gap-2 text-base font-semibold'>
+                <Globe className='size-4 text-primary' />
+                <span>
+                  {t(
+                    'Configure Source Cost (Groups & Models)',
+                    '配置来源分组成本倍率与模型单价'
+                  )}
+                </span>
+              </DialogTitle>
+            </div>
           </div>
           <DialogDescription className='flex flex-wrap items-center gap-2 text-xs text-muted-foreground pt-1'>
             <span>{t('Upstream Address', '来源地址')}:</span>
@@ -1029,26 +1047,42 @@ export function QuickSourceDialog({
           </div>
         </div>
 
-        <DialogFooter className='flex items-center justify-end gap-2 pt-3 border-t'>
-          <Button
-            type='button'
-            variant='outline'
-            size='sm'
-            onClick={() => onOpenChange(false)}
-          >
-            {t('Cancel', '取消')}
-          </Button>
-          <Button
-            type='button'
-            size='sm'
-            disabled={updateMutation.isPending}
-            onClick={() => updateMutation.mutate()}
-          >
-            {updateMutation.isPending && (
-              <Loader2 className='size-3.5 mr-1.5 animate-spin' />
+        <DialogFooter className='flex items-center justify-between sm:justify-between gap-2 pt-3 border-t'>
+          <div>
+            {onBack && (
+              <Button
+                type='button'
+                variant='ghost'
+                size='sm'
+                onClick={onBack}
+                className='gap-1 text-muted-foreground hover:text-foreground'
+              >
+                <ArrowLeft className='size-3.5' />
+                <span>返回上一弹窗</span>
+              </Button>
             )}
-            {t('Save Source Cost Config', '保存来源成本配置')}
-          </Button>
+          </div>
+          <div className='flex items-center gap-2'>
+            <Button
+              type='button'
+              variant='outline'
+              size='sm'
+              onClick={() => (onBack ? onBack() : onOpenChange(false))}
+            >
+              {t('Cancel', '取消')}
+            </Button>
+            <Button
+              type='button'
+              size='sm'
+              disabled={updateMutation.isPending}
+              onClick={() => updateMutation.mutate()}
+            >
+              {updateMutation.isPending && (
+                <Loader2 className='size-3.5 mr-1.5 animate-spin' />
+              )}
+              {t('Save Source Cost Config', '保存来源成本配置')}
+            </Button>
+          </div>
         </DialogFooter>
       </DialogContent>
     </Dialog>

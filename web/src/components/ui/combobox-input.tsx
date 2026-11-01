@@ -42,6 +42,7 @@ interface ComboboxInputProps {
   id?: string
   allowCustomValue?: boolean
   openOnFocus?: boolean
+  suspended?: boolean
   onKeyDown?: React.KeyboardEventHandler<HTMLInputElement>
   renderOptionHoverPanel?: (
     option: ComboboxInputOption,
@@ -62,6 +63,7 @@ export function ComboboxInput({
   id,
   allowCustomValue = false,
   openOnFocus = true,
+  suspended = false,
   onKeyDown,
   renderOptionHoverPanel,
   'aria-label': ariaLabel,
@@ -84,6 +86,8 @@ export function ComboboxInput({
   const isHoveringPanelRef = React.useRef(false)
   const hoverIntentTimerRef = React.useRef<number | null>(null)
   const highlightedValueRef = React.useRef<string | null>(null)
+  const prevSuspendedRef = React.useRef(false)
+  const lastResumedAtRef = React.useRef(0)
   const selectedOption = React.useMemo(
     () => (value ? options.find((option) => option.value === value) : undefined),
     [options, value]
@@ -133,11 +137,39 @@ export function ComboboxInput({
     setHoverSide(spaceRight >= 390 || spaceRight >= spaceLeft ? 'right' : 'left')
   }, [open, renderOptionHoverPanel])
 
+  // Restore open and highlighted option when returning from a suspended child dialog
+  React.useEffect(() => {
+    if (prevSuspendedRef.current && !suspended) {
+      lastResumedAtRef.current = Date.now()
+      setOpen(true)
+      if (highlightedValueRef.current != null) {
+        const idx = filteredOptions.findIndex(
+          (opt) => opt.value === highlightedValueRef.current
+        )
+        if (idx >= 0) {
+          setHighlightedIndex(idx)
+        }
+      }
+    }
+    prevSuspendedRef.current = Boolean(suspended)
+  }, [suspended, filteredOptions])
+
   // Handle click outside to close
   React.useEffect(() => {
-    if (!open) return
+    if (!open || suspended) return
 
     const handleClickOutside = (e: MouseEvent) => {
+      if (Date.now() - lastResumedAtRef.current < 200) {
+        return
+      }
+      const targetEl = e.target as Element | null
+      if (
+        targetEl?.closest?.(
+          '[data-slot="dialog-overlay"], [data-slot="dialog-content"], [role="dialog"]'
+        )
+      ) {
+        return
+      }
       if (
         containerRef.current &&
         !containerRef.current.contains(e.target as Node)
@@ -149,7 +181,7 @@ export function ComboboxInput({
 
     document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [open])
+  }, [open, suspended])
 
   const handleSelect = (selectedValue: string) => {
     onValueChange(selectedValue)
@@ -197,6 +229,7 @@ export function ComboboxInput({
         }
         break
       case 'Escape':
+        if (suspended) break
         e.preventDefault()
         e.stopPropagation()
         setOpen(false)
@@ -278,7 +311,12 @@ export function ComboboxInput({
           pointerFocusRef.current = false
         }}
         onBlur={(e) => {
-          if (pointerDownInsideRef.current || isHoveringPanelRef.current) {
+          if (
+            suspended ||
+            Date.now() - lastResumedAtRef.current < 200 ||
+            pointerDownInsideRef.current ||
+            isHoveringPanelRef.current
+          ) {
             return
           }
           if (
@@ -299,7 +337,12 @@ export function ComboboxInput({
       <ChevronsUpDown className='pointer-events-none absolute top-1/2 right-3 size-4 shrink-0 -translate-y-1/2 opacity-50' />
 
       {showDropdown && (
-        <div className='bg-popover text-popover-foreground absolute top-full z-100 mt-1 min-w-full w-max max-w-[min(680px,95vw)] rounded-md border shadow-md'>
+        <div
+          className={cn(
+            'bg-popover text-popover-foreground absolute top-full mt-1 min-w-full w-max max-w-[min(680px,95vw)] rounded-md border shadow-md',
+            suspended ? 'z-40 pointer-events-none' : 'z-100'
+          )}
+        >
           {filteredOptions.length > 0 ? (
             <ul
               ref={listRef}
@@ -443,7 +486,8 @@ export function ComboboxInput({
                 <div
                   ref={hoverPanelRef}
                   className={cn(
-                    "bg-popover text-popover-foreground select-text absolute top-0 z-110 w-[456px] max-w-[92vw] rounded-xl border shadow-xl before:content-[''] before:absolute before:inset-y-0 before:w-3",
+                    "bg-popover text-popover-foreground select-text absolute top-0 w-[456px] max-w-[92vw] rounded-xl border shadow-xl before:content-[''] before:absolute before:inset-y-0 before:w-3",
+                    suspended ? 'z-40 pointer-events-none' : 'z-110',
                     hoverSide === 'right'
                       ? 'left-full ml-1.5 before:-left-3'
                       : 'right-full mr-1.5 before:-right-3'

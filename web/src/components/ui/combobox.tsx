@@ -52,6 +52,7 @@ type LegacyComboboxProps = {
   className?: string
   id?: string
   openOnFocus?: boolean
+  suspended?: boolean
   disabled?: boolean
   name?: string
   onBlur?: React.FocusEventHandler<HTMLInputElement>
@@ -93,6 +94,7 @@ function Combobox(
         className={props.className}
         allowCustomValue={props.allowCustomValue}
         openOnFocus={props.openOnFocus}
+        suspended={props.suspended}
         renderOptionHoverPanel={props.renderOptionHoverPanel}
       />
     )
